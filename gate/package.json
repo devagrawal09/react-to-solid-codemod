@@ -1,0 +1,14 @@
+{
+  "private": true,
+  "type": "commonjs",
+  "description": "Pipeline gate: reactivity decisions + the rule pass, then Solid lint",
+  "devDependencies": {
+    "@ast-grep/napi": "*",
+    "eslint": "9",
+    "eslint-plugin-solid": "0.19.0",
+    "@typescript-eslint/parser": "*",
+    "typescript": "5.9.3",
+    "solid-js": "2.0.0-rc.21",
+    "@solidjs/web": "2.0.0-rc.21"
+  }
+}
