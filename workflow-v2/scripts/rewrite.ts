@@ -6,7 +6,7 @@ import { getState } from "codemod:workflow";
 import { rewrite } from "../lib/reactivity.mjs";
 
 const codemod: Codemod<TSX> = (root) => {
-  const result = (getState("r2s.decided") ?? {})[root.relativeFilename()];
+  const result = getState(`r2s.decided:${root.relativeFilename()}`);
   if (!result || result.parseError) return null;
   const code = root.root().text();
   const out = rewrite(code, result).code;

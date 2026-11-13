@@ -13,11 +13,11 @@ codemod workflow run -w workflow.ts -t <app> [--param include=src] [--param agen
 | Read package.json files | `forEachFile` | Collects dependencies from every package.json |
 | Check React libraries for Solid ports | function | Fails if nothing depends on `react`; lists React libraries with and without a Solid port (a table for now, the dependency step later) |
 | branch / commit | `branch`, `commit` | Only with `--managed-git` |
-| Run the React Compiler on each file | `jssg` | `babel-plugin-react-compiler@1.0.0` decides what each component-body value becomes; results go to state |
+| Run the React Compiler on each file | `jssg` | `babel-plugin-react-compiler@1.0.0` decides what each component-body value becomes; each file's result goes to its own state key, `r2s.analysis:<file>` |
 | Resolve hook contracts across files | `jssg` on one file | The whole-program hook-contract pass, over every file's result in state |
 | Rewrite values as signals, memos and accessors | `jssg` | Writes each decision, with a `// solid:` note |
 | Apply the React to Solid rules | `jssg` | The rule pass (`rules/mechanical.mjs`); flags go to state |
-| Summarize the conversion | function | Decision counts, applied rules, flags |
+| Summarize the conversion | function | Decision counts, applied rules, flags; then clears the per-file keys, because shell steps get every state value as an environment variable |
 | Install the Solid 2 lint, Lint | `shell` | `eslint-plugin-solid` 0.19.0, `configs/v2`, on the converted files |
 | Finish flagged spots | `approval`, `agent` | Only with `--param agent=true` |
 

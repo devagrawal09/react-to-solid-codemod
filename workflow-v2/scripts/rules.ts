@@ -3,19 +3,14 @@
 import type { Codemod } from "codemod:ast-grep";
 import type TSX from "codemod:ast-grep/langs/tsx";
 import { parse } from "codemod:ast-grep";
-import { acquireLock, getState, setState } from "codemod:workflow";
+import { setState } from "codemod:workflow";
 import { transform } from "../rules/mechanical.mjs";
 
 const codemod: Codemod<TSX> = (root) => {
   // The rewrite step adds its own createMemo import; the rule pass writes the full solid-js import.
   const code = root.root().text().replace(/^import \{ createMemo \} from "solid-js";\n/m, "");
   const { code: out, applied, flags } = transform(code, { parse, Lang: { Tsx: "tsx" } });
-  const release = acquireLock("r2s.rules");
-  try {
-    setState("r2s.rules", { ...(getState("r2s.rules") ?? {}), [root.relativeFilename()]: { applied, flags } });
-  } finally {
-    release();
-  }
+  setState(`r2s.rules:${root.relativeFilename()}`, { applied, flags });
   return out === root.root().text() ? null : out;
 };
 export default codemod;
