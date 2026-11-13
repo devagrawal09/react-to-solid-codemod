@@ -27,6 +27,18 @@ export function transform(input, { parse, Lang }) {
     return open?.field("name")?.text() ?? "";
   };
 
+  // Does `node`, a block or statement between a read and the rewrite's scope, declare `name` itself?
+  // catch (name), for (const name of ...), or a const/let/var inside a nested block.
+  function declares(node, name) {
+    const named = (n) => !!n && new RegExp(`\\b${name}\\b`).test(n.text());
+    if (node.kind() === "catch_clause") return named(node.field("parameter"));
+    if (node.kind() === "for_in_statement") return named(node.field("left"));
+    if (node.kind() === "for_statement") return named(node.field("initializer"));
+    if (node.kind() !== "statement_block") return false;
+    return node.children().some((c) => ["lexical_declaration", "variable_declaration"].includes(c.kind()) &&
+      c.children().some((d) => d.kind() === "variable_declarator" && named(d.field("name"))));
+  }
+
   // Rewrite reads of `name` inside `scope` to `replacement(text)`; report body-level reads.
   function rewriteReads(scope, declNode, name, toRead, bodyNode, label) {
     const edits = [];
@@ -41,6 +53,7 @@ export function transform(input, { parse, Lang }) {
           const params = a.field("parameters") ?? a.field("parameter");
           if (params && new RegExp(`\\b${name}\\b`).test(params.text())) shadowed = true;
         }
+        if (!same(a, scope) && declares(a, name)) shadowed = true;
       }
       if (shadowed) continue;
       // deferred if any ancestor below the component body is a function or JSX expression/attribute

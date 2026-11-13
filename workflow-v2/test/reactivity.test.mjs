@@ -50,6 +50,11 @@ it("the rewrite wraps a memo and turns its reads into calls", () => {
   expect(rewrite(code, run(code)).code).toContain("const sorted = createMemo(() => items.toSorted()); return <ul>{sorted().map(");
 });
 
+it("a memo that only aliases another memo wraps a call to it, once", () => {
+  const code = `function C({ items }) {\n  const sorted = items.toSorted();\n  const shown = sorted;\n  return <ul>{shown.map((i) => <li>{i}</li>)}</ul>;\n}`;
+  expect(rewrite(code, run(code)).code).toContain("const shown = createMemo(() => sorted());\n");
+});
+
 describe("try/catch pre-step", () => {
   const parse = `function C({ q }) { let x; try { x = q ? JSON.parse(q) : null; } catch { x = null; } return <p>{x}</p>; }`;
 

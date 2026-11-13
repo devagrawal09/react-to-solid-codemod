@@ -180040,7 +180040,7 @@ ${indent}}`;
       }
     }
   }
-  const all = [...edits, ...refEdits];
+  const all = [...edits, ...refEdits.filter((r) => !edits.some((e) => e.start === r.start && e.end === r.end))];
   const outer = all.filter((e) => !all.some((o) => o !== e && o.start <= e.start && o.end >= e.end && o.end - o.start > e.end - e.start));
   outer.sort((a, b) => b.start - a.start);
   const notes = [];
