@@ -8,8 +8,8 @@ let parseErrors = 0;
 for (const r of results) {
   const file = r.filePath.replace(`${process.cwd()}/`, "");
   for (const m of r.messages) {
-    if (!m.ruleId) parseErrors++;
-    const rule = m.ruleId ?? "parse-error";
+    if (m.fatal) parseErrors++;
+    const rule = m.ruleId ?? (m.fatal ? "parse-error" : "eslint");
     byRule[rule] = (byRule[rule] ?? 0) + 1;
     (byFile[file] ??= []).push(`${m.line}: ${rule}: ${m.message.split("\n")[0]}`);
   }
