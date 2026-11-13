@@ -8,7 +8,10 @@
 // 3. Rule pass: mechanical rewrites (props, hooks, JSX, imports), with flags for the rest.
 // 4. Verify: eslint-plugin-solid's Solid 2 config on the migrated files.
 // 5. Optionally hand the flagged spots to an agent, after an approval.
-import { step, forEachFile, jssg, shell, agent, approval, branch, commit, getState, setState } from "codemod:workflow";
+import { step, forEachFile, shell, agent, approval, branch, commit, getState } from "codemod:workflow";
+import { parse } from "codemod:ast-grep";
+import { applyContracts, decide, extract, rewrite } from "./lib/reactivity.mjs";
+import { transform } from "./rules/mechanical.mjs";
 
 // React libraries and their Solid 2 ports. A dependency step will replace this table.
 const PORTS: Record<string, string> = {
@@ -45,19 +48,36 @@ export default async function main({ params }: { params: { include?: string; age
   });
 
   await step(branch("react-to-solid-2"));
-  const analyzed = await step("Run the React Compiler on each file", jssg("./scripts/analyze.ts", { language: "tsx", ...sources }));
-  const files = Object.keys(getState()).filter((key) => key.startsWith("r2s.analysis:")).map((key) => key.slice("r2s.analysis:".length)).sort();
+  // Each step returns its per-file results; nothing goes through state.
+  const analyzed = await step("Run the React Compiler on each file", forEachFile(sources, (file) =>
+    // contracts.mjs finds `~/` imports by an absolute-looking path. The round trip drops the
+    // `undefined` fields the pass leaves, which step outputs reject.
+    ({ file: file.path, result: JSON.parse(JSON.stringify(decide(extract(file.text, `/${file.path}`)))) })));
+  const files = analyzed.outputs.map((o) => o.file);
   if (files.length === 0) return { plan, files: 0, note: `no .ts/.tsx files under ${root}` };
-  await step("Resolve hook contracts across files", jssg("./scripts/contracts.ts", { language: "tsx", files: [files[0]], params: { files } }));
-  const reactive = await step("Rewrite values as signals, memos and accessors", jssg("./scripts/rewrite.ts", { language: "tsx", files }));
-  const rules = await step("Apply the React to Solid rules", jssg("./scripts/rules.ts", { language: "tsx", files }));
+  const decided = await step("Resolve hook contracts across files", () => {
+    // Step results are frozen; applyContracts edits its input. (No structuredClone in function steps.)
+    const results = analyzed.outputs.map((o) => JSON.parse(JSON.stringify(o.result)));
+    applyContracts(results);
+    return Object.fromEntries(files.map((file, i) => [file, results[i]]));
+  });
+  const reactive = await step("Rewrite values as signals, memos and accessors", forEachFile(sources, (file) => {
+    const result = decided[file.path];
+    if (!result || result.parseError) return;
+    const out = rewrite(file.text, result).code;
+    if (out !== file.text) file.write(out);
+  }));
+  const rules = await step("Apply the React to Solid rules", forEachFile(sources, (file) => {
+    // The rewrite step adds its own createMemo import; the rule pass writes the full solid-js import.
+    const code = file.text.replace(/^import \{ createMemo \} from "solid-js";\n/m, "");
+    const { code: out, applied, flags } = transform(code, { parse: (_lang: string, text: string) => parse("tsx", text), Lang: { Tsx: "tsx" } });
+    if (out !== file.text) file.write(out);
+    return { file: file.path, applied, flags };
+  }));
   await step(commit("Convert React components to Solid 2", { add: files }));
 
   const report = await step("Summarize the conversion", () =>
-    summarize(files, (file) => getState(`r2s.decided:${file}`), (file) => getState(`r2s.rules:${file}`)));
-  // Shell steps get every state value as an environment variable, and per-file analysis is too
-  // big for that on a real app, so drop it once the summary has it.
-  for (const file of files) for (const kind of ["analysis", "decided", "rules"]) setState(`r2s.${kind}:${file}`, null);
+    summarize(files, decided, rules.outputs));
 
   await step("Install the Solid 2 lint", shell(`cd "$CODEMOD_PATH/lint" && { [ -x node_modules/.bin/eslint ] || npm ci --silent --no-audit --no-fund; }`));
   await step("Lint with eslint-plugin-solid (Solid 2 config)", shell(
@@ -70,23 +90,23 @@ export default async function main({ params }: { params: { include?: string; age
     await step(approval(`Hand ${report.flags.length} flagged spots to an agent?`));
     await step("Finish flagged spots", agent(agentPrompt(report.flags), { maxSteps: 40 }));
   }
-  return { plan, analyzed: analyzed.unmodified + analyzed.failures.length, rewritten: reactive.changes, rules: rules.changes, ...report, lint };
+  return { plan, analyzed: files.length, failures: analyzed.failures, rewritten: reactive.changes, rules: rules.changes, ...report, lint };
 }
 
-function summarize(files: string[], decided: (file: string) => any, ruleResults: (file: string) => any) {
+function summarize(files: string[], decided: Record<string, any>, ruleResults: { file: string; applied: Record<string, number>; flags: any[] }[]) {
   const decisions: Record<string, number> = {};
   const compiler: Record<string, number> = {};
   for (const file of files) {
-    for (const fn of decided(file)?.functions ?? []) {
+    for (const fn of decided[file]?.functions ?? []) {
       compiler[fn.compiler?.status ?? "none"] = (compiler[fn.compiler?.status ?? "none"] ?? 0) + 1;
       for (const v of fn.values ?? []) decisions[v.decision] = (decisions[v.decision] ?? 0) + 1;
     }
   }
   const applied: Record<string, number> = {};
   const flags: { file: string; line: number; kind: string; detail: string }[] = [];
-  for (const file of files) {
-    for (const [rule, n] of Object.entries(ruleResults(file)?.applied ?? {})) applied[rule] = (applied[rule] ?? 0) + (n as number);
-    for (const f of ruleResults(file)?.flags ?? []) flags.push({ file, ...f });
+  for (const r of ruleResults) {
+    for (const [rule, n] of Object.entries(r.applied)) applied[rule] = (applied[rule] ?? 0) + n;
+    for (const f of r.flags) flags.push({ file: r.file, ...f });
   }
   return { compiler, decisions, applied, flags };
 }
