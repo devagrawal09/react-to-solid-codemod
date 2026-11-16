@@ -1,6 +1,6 @@
 // React -> Solid 2 migration on the code-first engine.
 //
-//   codemod workflow run -w workflow.ts -t <app> [--param include=src] [--param agent=true]
+//   codemod workflow run -w src/workflow.ts -t <app> [--param include=src] [--param agent=true]
 //
 // 1. Guard: the target is a React app, and which of its libraries have a Solid port.
 // 2. Reactivity pass: the React Compiler (run inside jssg, no Node) decides what each
@@ -8,8 +8,8 @@
 // 3. Rule pass: mechanical rewrites (props, hooks, JSX, imports), with flags for the rest.
 // 4. Verify: eslint-plugin-solid's Solid 2 config on the migrated files.
 // 5. Optionally hand the flagged spots to an agent, after an approval.
-import { step, forEachFile, shell, agent, approval, branch, commit, getState } from "codemod:workflow";
-import { parse } from "codemod:ast-grep";
+import { step, forEachFile, shell, agent, approval, branch, commit, getState } from "codemod/workflow";
+import { parse } from "codemod/ast-grep";
 import { applyContracts, decide, extract, rewrite } from "./lib/reactivity.mjs";
 import { transform } from "./rules/mechanical.mjs";
 
@@ -70,7 +70,7 @@ export default async function main({ params }: { params: { include?: string; age
   const rules = await step("Apply the React to Solid rules", forEachFile(sources, (file) => {
     // The rewrite step adds its own createMemo import; the rule pass writes the full solid-js import.
     const code = file.text.replace(/^import \{ createMemo \} from "solid-js";\n/m, "");
-    const { code: out, applied, flags } = transform(code, { parse: (_lang: string, text: string) => parse("tsx", text), Lang: { Tsx: "tsx" } });
+    const { code: out, applied, flags } = transform(code, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" } });
     if (out !== file.text) file.write(out);
     return { file: file.path, applied, flags };
   }));
@@ -79,11 +79,10 @@ export default async function main({ params }: { params: { include?: string; age
   const report = await step("Summarize the conversion", () =>
     summarize(files, decided, rules.outputs));
 
-  await step("Install the Solid 2 lint", shell(`cd "$CODEMOD_PATH/lint" && { [ -x node_modules/.bin/eslint ] || npm ci --silent --no-audit --no-fund; }`));
-  await step("Lint with eslint-plugin-solid (Solid 2 config)", shell(
-    `"$CODEMOD_PATH/lint/node_modules/.bin/eslint" -c "$CODEMOD_PATH/lint/eslint.config.mjs" -f json ${files.map((f) => `'${f}'`).join(" ")} | node "$CODEMOD_PATH/lint/summarize.mjs"`,
-    { cwd: "." },
-  ));
+  const lintDir = `${import.meta.dirname}/lint`;
+  await step("Install the Solid 2 lint", shell`cd ${lintDir} && { [ -x node_modules/.bin/eslint ] || npm ci --silent --no-audit --no-fund; }`);
+  // Paths are relative to the target, so the command runs there (cwd "."), not in the CLI's directory.
+  await step("Lint with eslint-plugin-solid (Solid 2 config)", shell({ cwd: "." })`${lintDir}/node_modules/.bin/eslint -c ${lintDir}/eslint.config.mjs -f json ${files} | node ${lintDir}/summarize.mjs`);
   const lint = getState("r2s.lint") ?? {};
 
   if (params.agent === "true" && report.flags.length) {

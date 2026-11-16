@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { extract } from "../reactivity/extract.mjs";
-import { decide } from "../reactivity/decide.mjs";
-import { rewrite } from "../reactivity/rewrite.mjs";
-import { applyContracts } from "../reactivity/contracts.mjs";
+import { extract } from "../src/reactivity/extract.mjs";
+import { decide } from "../src/reactivity/decide.mjs";
+import { rewrite } from "../src/reactivity/rewrite.mjs";
+import { applyContracts } from "../src/reactivity/contracts.mjs";
 
 const run = (code, options) => decide(extract(code, "Fixture.tsx", options));
 const valueIn = (code, name) => run(code).functions[0].values.find((v) => v.name === name);

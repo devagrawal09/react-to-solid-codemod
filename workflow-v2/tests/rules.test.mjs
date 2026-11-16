@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { parse, Lang } from "@ast-grep/napi";
-import { transform } from "../rules/mechanical.mjs";
+import { transform } from "../src/rules/mechanical.mjs";
 
 const run = (code) => transform(code, { parse, Lang });
 const convert = (code) => run(code).code;

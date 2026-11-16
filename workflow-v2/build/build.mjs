@@ -13,7 +13,7 @@ alias.debug = stub(named.debug);
 
 await build({
   entryPoints: [new URL("./entry.mjs", import.meta.url).pathname],
-  outfile: new URL("../lib/reactivity.mjs", import.meta.url).pathname,
+  outfile: new URL("../src/lib/reactivity.mjs", import.meta.url).pathname,
   bundle: true,
   format: "esm",
   platform: "neutral",

@@ -6,7 +6,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 // Needs a codemod CLI built from the code-first engine (codemod/codemod#2485).
 const bin = process.env.CODEMOD_BIN;
-const workflow = path.resolve(import.meta.dirname, "../workflow.ts");
+const workflow = path.resolve(import.meta.dirname, "../src/workflow.ts");
 const fixture = path.resolve(import.meta.dirname, "fixtures/todo-app");
 
 function givenApp(edit = () => {}) {
