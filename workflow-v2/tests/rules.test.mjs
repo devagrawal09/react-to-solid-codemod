@@ -112,6 +112,11 @@ it("R21 turns useReducer into a signal and a dispatch that runs the reducer", ()
   expect(flat(code)).toContain(`const [n, setN] = createSignal<Parameters<typeof reducer>[0]>(0); const dispatch = (action: Parameters<typeof reducer>[1]) => setN((previous) => reducer(previous, action));`);
 });
 
+it("R21 calls an inline init function in parentheses", () => {
+  const code = `function C() { const [n, dispatch] = useReducer(reducer, null, () => start()); return <b onClick={() => dispatch(1)}>{n}</b>; }`;
+  expect(flat(code)).toContain(`createSignal<Parameters<typeof reducer>[0]>(untrack(() => (() => start())(null)))`);
+});
+
 it("R22 remounts an element keyed outside a list with a keyed <Show>", () => {
   expect(flat(`function C(props: { id: string }) { return <Form key={props.id} />; }`)).toContain(`<Show when={[props.id]} keyed>{(_key) => <Form />}</Show>`);
 });

@@ -445,7 +445,8 @@ export function transform(input, { parse, Lang }) {
           const [reducer, initArg, init] = args;
           const setter = freeName(dispatch?.text() === `set${ucfirst(state.text())}` ? `set${ucfirst(state.text())}State` : `set${ucfirst(state.text())}`);
           const plain = !init && !/[\w)\]]\(|\bprops\.|\bmerged\./.test(initArg.text());
-          const start = init ? `untrack(() => ${init.text()}(${initArg.text()}))` : plain ? initArg.text() : `untrack(() => (${initArg.text()}))`;
+          const initFn = init && !/^(identifier|member_expression)$/.test(init.kind()) ? `(${init.text()})` : init?.text();
+          const start = init ? `untrack(() => ${initFn}(${initArg.text()}))` : plain ? initArg.text() : `untrack(() => (${initArg.text()}))`;
           const statement = decl.parent();
           const indent = " ".repeat(statement.range().start.column);
           const lines = [`const [${state.text()}, ${setter}] = createSignal<Parameters<typeof ${reducer.text()}>[0]>(${start});`];
