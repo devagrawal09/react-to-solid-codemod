@@ -42,6 +42,6 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 ## Tests
 
 ```sh
-pnpm test                                        # reactivity (29) and rule (48) specs
-CODEMOD_BIN=<codemod built from #2485> pnpm test # plus the workflow specs on tests/fixtures/todo-app (6, tagged slow)
+pnpm test                                        # reactivity (29) and rule (49) specs
+CODEMOD_BIN=<codemod built from #2485> pnpm test # plus the workflow specs on tests/fixtures/todo-app (7, tagged slow)
 ```
