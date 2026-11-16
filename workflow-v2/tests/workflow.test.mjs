@@ -48,6 +48,10 @@ describe.skipIf(!bin)("react-to-solid workflow on a small todo app", { tags: ["s
     expect(read(app, "src/components/TodoList.tsx")).toContain("const visible = createMemo(() =>");
   });
 
+  it("rewrites code after a non-ASCII character in the same file", () => {
+    expect(read(app, "src/components/TodoItem.tsx")).toContain('<li title="To do · item" class={className()}>\n      <label for={merged.todo.id}>');
+  });
+
   it("leaves a component with nothing to convert unchanged", () => {
     expect(read(app, "src/App.tsx")).toBe(read(fixture, "src/App.tsx"));
   });

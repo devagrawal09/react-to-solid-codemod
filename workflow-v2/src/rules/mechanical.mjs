@@ -40,6 +40,25 @@ const ucfirst = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 // Edits are { start, end, text } or { start, end, wrap(innerText) }. Nested edits are applied
 // inside the edit that contains them, so a rule can wrap a node and rewrite reads inside it.
+// Node offsets are UTF-16 indexes under @ast-grep/napi but UTF-8 byte offsets in the codemod
+// sandbox. Edits keep the parser's offsets; `ix` turns one into a string index for the source
+// being edited, so files with non-ASCII text splice correctly under both.
+let ix = (i) => i;
+function useOffsetsOf(parse, Lang, text) {
+  ix = (i) => i;
+  if (/^[\x00-\x7f]*$/.test(text) || parse(Lang.Tsx, '"\u00e9"').root().range().end.index === 3) return;
+  const map = [];
+  for (let i = 0; i < text.length; i++) {
+    const c = text.codePointAt(i);
+    const bytes = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+    for (let b = 0; b < bytes; b++) map.push(i);
+    if (c >= 0x10000) i++;
+  }
+  map.push(text.length);
+  ix = (i) => map[i];
+}
+const charAt = (text, i) => text[ix(i)];
+
 function spliceAll(text, base, edits) {
   const items = edits.filter(Boolean).map((e) => ("insertedText" in e ? { start: e.startPos, end: e.endPos, text: e.insertedText } : e));
   items.sort((a, b) => a.start - b.start || (b.end > b.start) - (a.end > a.start) || b.end - a.end);
@@ -53,22 +72,24 @@ function spliceAll(text, base, edits) {
       const nested = [];
       while (it.end > it.start && j < list.length && list[j].start >= it.start && list[j].end <= it.end) nested.push(list[j++]);
       if (it.start < at) { i = j; continue; }
-      out += text.slice(at - base, it.start - base);
+      out += text.slice(ix(at) - ix(base), ix(it.start) - ix(base));
       out += it.text != null ? it.text : it.wrap(go(it.start, it.end, nested));
       at = it.end;
       i = j;
     }
-    return out + text.slice(at - base, e - base);
+    return out + (e == null ? text.slice(ix(at) - ix(base)) : text.slice(ix(at) - ix(base), ix(e) - ix(base)));
   };
-  return go(base, base + text.length, items);
+  return go(base, null, items);
 }
 // remove a statement together with its indentation and line break
 const dropLine = (node, text) => {
   let a = node.range().start.index, b = node.range().end.index;
-  while (a > 0 && (text[a - 1] === " " || text[a - 1] === "\t")) a--;
-  while (text[b] === " " || text[b] === "\t") b++;
-  if (text[b] === "\n") b++;
-  if (text[b] === "\n" && text[a - 1] === "\n" && text[a - 2] === "\n") b++;
+  // only steps over ASCII whitespace, which is one byte and one index
+  const c = (i) => charAt(text, i);
+  while (a > 0 && (c(a - 1) === " " || c(a - 1) === "\t")) a--;
+  while (c(b) === " " || c(b) === "\t") b++;
+  if (c(b) === "\n") b++;
+  if (c(b) === "\n" && c(a - 1) === "\n" && c(a - 2) === "\n") b++;
   return { start: a, end: b, text: "" };
 };
 const rep = (node, text) => ({ start: node.range().start.index, end: node.range().end.index, text });
@@ -83,6 +104,7 @@ export function transform(input, { parse, Lang }) {
   const flag = (kind, node, detail) => flags.push({ kind, line: node ? node.range().start.line + 1 : 0, detail });
 
   function pass(fn) {
+    useOffsetsOf(parse, Lang, src);
     const root = parse(Lang.Tsx, src).root();
     const edits = (fn(root) || []).filter(Boolean);
     if (edits.length) src = spliceAll(src, 0, edits);
@@ -159,7 +181,7 @@ export function transform(input, { parse, Lang }) {
   const readAs = (id, text) => rep(id, id.kind() === "shorthand_property_identifier" ? `${id.text()}: ${text}` : text);
 
   // drop an attribute and the space before it
-  const dropAttr = (a) => ({ start: src[a.range().start.index - 1] === " " ? a.range().start.index - 1 : a.range().start.index, end: a.range().end.index, text: "" });
+  const dropAttr = (a) => ({ start: charAt(src, a.range().start.index - 1) === " " ? a.range().start.index - 1 : a.range().start.index, end: a.range().end.index, text: "" });
   const componentFns = (root) =>
     root.findAll({
       rule: {
