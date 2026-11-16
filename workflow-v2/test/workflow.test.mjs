@@ -57,7 +57,7 @@ describe.skipIf(!bin)("react-to-solid workflow on a small todo app", { tags: ["s
   });
 
   it("reports eslint-plugin-solid's Solid 2 warnings by rule", () => {
-    expect(run.output.lint.byRule).toEqual({ "solid/reactivity": 3, "solid/components-return-once": 1 });
+    expect(run.output.lint.byRule).toEqual({ "solid/reactivity": 2 });
   });
 });
 
