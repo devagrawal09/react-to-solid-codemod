@@ -1,0 +1,22 @@
+{
+  "name": "react-to-solid-workflow",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build/build.mjs",
+    "test": "vitest run",
+    "test:slow": "vitest run --tags-filter=slow"
+  },
+  "devDependencies": {
+    "@ast-grep/napi": "^0.40.0",
+    "@babel/core": "^7.28.0",
+    "@babel/generator": "^7.28.0",
+    "@babel/parser": "^7.28.0",
+    "@babel/plugin-syntax-jsx": "^7.27.0",
+    "@babel/preset-typescript": "^7.27.0",
+    "babel-plugin-react-compiler": "1.0.0",
+    "esbuild": "0.25.11",
+    "path-browserify": "1.0.1",
+    "vitest": "^4.1.12"
+  }
+}

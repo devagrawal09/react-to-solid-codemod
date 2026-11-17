@@ -1,0 +1,23 @@
+schema_version: "1.0"
+
+name: "react-to-solid"
+version: "0.1.0"
+description: "Migrate a React app to Solid 2: the React Compiler decides what becomes a signal, memo or accessor, rules rewrite the rest, and eslint-plugin-solid checks the result"
+license: "MIT"
+
+targets:
+  # Keep this aligned with the files matched in src/workflow.ts.
+  languages: ["tsx"]
+
+keywords: ["react", "solid", "migration"]
+
+registry:
+  access: "public"
+  visibility: "private"
+
+capabilities: []
+
+workflows:
+  - name: main
+    default: true
+    path: src/workflow.ts
