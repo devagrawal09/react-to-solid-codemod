@@ -1,0 +1,59 @@
+{
+  "analyzed": 1383,
+  "compiler": {
+    "compiled": 2144,
+    "not-compiled": 82,
+    "bailout": 4
+  },
+  "decisions": {
+    "flag": 314,
+    "accessor": 6206,
+    "memo": 1965,
+    "call-time": 504,
+    "static": 3454,
+    "function": 1180,
+    "getter-read": 690,
+    "getter-object": 407,
+    "hook": 126,
+    "jsx-fn": 128,
+    "inline": 48
+  },
+  "failures": [],
+  "lint": {
+    "files": 1383,
+    "problems": 3865,
+    "parseErrors": 0,
+    "byRule": {
+      "solid/reactivity": 3035,
+      "solid/components-return-once": 287,
+      "solid/style-prop": 104,
+      "solid/no-boolean-enumerated-attribute": 23,
+      "solid/event-handlers": 7,
+      "solid/jsx-no-undef": 56,
+      "solid/no-write-in-pure-computation": 266,
+      "solid/prefer-structured-class": 25,
+      "solid/no-destructure": 12,
+      "solid/prefer-for": 43,
+      "solid/no-innerhtml": 5,
+      "solid/no-unused-signal": 1,
+      "eslint": 1
+    }
+  },
+  "flagsByKind": {
+    "custom hook call": 3241,
+    "render-dependent read": 2741,
+    "effect": 400,
+    "render handler": 178,
+    "ref": 82,
+    "early return": 62,
+    "list key": 29,
+    "React namespace": 18,
+    "expression-bodied component": 8,
+    "controlled input": 6,
+    "complex props pattern": 3,
+    "accessor in tag name": 2,
+    "context default": 2,
+    "reassigned let": 1
+  },
+  "flagCount": 6773
+}

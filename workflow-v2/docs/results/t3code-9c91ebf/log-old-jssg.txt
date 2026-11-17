@@ -1,0 +1,36 @@
+Run 0806fa57-bec3-4de5-a43b-9e5c22319c5e
+▸ Read package.json files
+✓ Read package.json files (0.4s)
+▸ Check React libraries for Solid ports
+✓ Check React libraries for Solid ports (0.0s)
+▸ branch
+  skipped: managed git is off
+✓ branch (0.0s)
+▸ Run the React Compiler on each file
+✓ Run the React Compiler on each file (653.6s)
+▸ Resolve hook contracts across files
+✓ Resolve hook contracts across files (17.5s)
+▸ Rewrite values as signals, memos and accessors
+✓ Rewrite values as signals, memos and accessors (760.5s)
+▸ Apply the React to Solid rules
+  apps/web/src/components/guest/GuestPage.tsx
+    Runtime error JavaScript execution failed: Error: `rule` is not configured correctly.
+        at rewriteReads (/home/user/work/r2s-master/rules/mechanical.mjs:45:28)
+        at <anonymous> (/home/user/work/r2s-master/rules/mechanical.mjs:131:75)
+        at pass (/home/user/work/r2s-master/rules/mechanical.mjs:19:22)
+        at transform (/home/user/work/r2s-master/rules/mechanical.mjs:111:17)
+        at codemod (/home/user/work/r2s-master/scripts/rules.ts:12:51)
+        at executeCodemod (__codemod_entry.js:8:22)
+◐ Apply the React to Solid rules: 1 of 1383 files failed (153.0s)
+▸ commit
+  skipped: managed git is off
+✓ commit (5.2s)
+▸ Summarize the conversion
+✓ Summarize the conversion (11.1s)
+▸ Install the Solid 2 lint
+✓ Install the Solid 2 lint (0.2s)
+▸ Lint with eslint-plugin-solid (Solid 2 config)
+  5370 problems in 1383 files {"solid/reactivity":3891,"solid/components-return-once":605,"solid/style-prop":104,"solid/no-boolean-enumerated-attribute":191,"solid/no-react-specific-props":82,"solid/no-destructure":70,"solid/event-handlers":7,"solid/jsx-no-undef":52,"solid/no-unused-signal":28,"solid/no-write-in-pure-computation":267,"solid/prefer-structured-class":25,"solid/prefer-for":42,"solid/no-innerhtml":5,"eslint":1}
+✓ Lint with eslint-plugin-solid (Solid 2 config) (18.5s)
+Done (some files failed in 1 step)
+EXIT 0 SECONDS 1695

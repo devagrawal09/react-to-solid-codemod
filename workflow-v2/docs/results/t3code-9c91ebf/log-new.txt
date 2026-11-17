@@ -1,0 +1,28 @@
+Run 9d27d4d7-974b-48ab-a1e9-5e5c0fde7fb4
+▸ Read package.json files
+✓ Read package.json files (0.6s)
+▸ Check React libraries for Solid ports
+✓ Check React libraries for Solid ports (0.0s)
+▸ branch
+  skipped: managed git is off
+✓ branch (0.0s)
+▸ Run the React Compiler on each file
+✓ Run the React Compiler on each file (378.5s)
+▸ Resolve hook contracts across files
+✓ Resolve hook contracts across files (16.0s)
+▸ Rewrite values as signals, memos and accessors
+✓ Rewrite values as signals, memos and accessors (10.0s)
+▸ Apply the React to Solid rules
+✓ Apply the React to Solid rules (105.8s)
+▸ commit
+  skipped: managed git is off
+✓ commit (0.0s)
+▸ Summarize the conversion
+✓ Summarize the conversion (7.6s)
+▸ Install the Solid 2 lint
+✓ Install the Solid 2 lint (0.1s)
+▸ Lint with eslint-plugin-solid (Solid 2 config)
+  3865 problems in 1383 files {"solid/reactivity":3035,"solid/components-return-once":287,"solid/style-prop":104,"solid/no-boolean-enumerated-attribute":23,"solid/event-handlers":7,"solid/jsx-no-undef":56,"solid/no-write-in-pure-computation":266,"solid/prefer-structured-class":25,"solid/no-destructure":12,"solid/prefer-for":43,"solid/no-innerhtml":5,"solid/no-unused-signal":1,"eslint":1}
+✓ Lint with eslint-plugin-solid (Solid 2 config) (19.7s)
+Done
+EXIT 0 SECONDS 653
