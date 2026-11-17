@@ -1,0 +1,26 @@
+[package]
+name = "compiler-facts"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "oxc's React Compiler with its reactive analysis exposed, built to WASM for the react-to-solid codemod"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+oxc_allocator = { path = "../../oxc/crates/oxc_allocator" }
+oxc_parser = { path = "../../oxc/crates/oxc_parser" }
+oxc_semantic = { path = "../../oxc/crates/oxc_semantic" }
+oxc_span = { path = "../../oxc/crates/oxc_span" }
+oxc_react_compiler = { path = "../../oxc/crates/oxc_react_compiler" }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[workspace]

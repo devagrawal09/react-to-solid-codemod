@@ -659,8 +659,9 @@ function compile(code, filename, { prestep, liftIn, compiler = true }) {
   return { astFunctions, irByLoc, events, notes, parseError, imports };
 }
 
-// `analyze` is the engine's native React Compiler (`codemod:react-compiler`). With it, Babel
-// only reads the AST and the compiler runs on the original source, with no pre-steps.
+// `analyze` is oxc's React Compiler built to WASM (lib/compiler-facts.wasm, see
+// compiler-facts.mjs). With it, Babel only reads the AST and the compiler runs on the original
+// source, with no pre-steps.
 export function extract(code, filename, { prestep = true, analyze } = {}) {
   if (analyze) return extractWithNative(code, filename, analyze);
   const started = performance.now();
