@@ -1,0 +1,656 @@
+diff --git a/crates/oxc_react_compiler/src/facts.rs b/crates/oxc_react_compiler/src/facts.rs
+new file mode 100644
+index 00000000..eecac7d3
+--- /dev/null
++++ b/crates/oxc_react_compiler/src/facts.rs
+@@ -0,0 +1,374 @@
++//! Per-function analysis facts read from the reactive function after
++//! `PruneHoistedContexts`, for tools that want the compiler's view of a
++//! component (scopes, dependencies, reactivity) rather than its output.
++//!
++//! Identifiers are keyed by `DeclarationId`, because SSA versions of one
++//! variable joined by a phi share it. Spans are byte offsets into the source.
++
++use oxc_span::Span;
++use rustc_hash::{FxHashMap, FxHashSet};
++
++use crate::diagnostics::LintDiagnostic;
++use crate::react_compiler_hir::environment::Environment;
++use crate::react_compiler_hir::reactive::{
++    ReactiveBlock, ReactiveFunction, ReactiveInstruction, ReactiveStatement, ReactiveTerminal,
++    ReactiveValue,
++};
++use crate::react_compiler_hir::visitors::{each_instruction_value_operand, each_pattern_operand};
++use crate::react_compiler_hir::{IdentifierName, InstructionValue, ParamPattern, Place};
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum FunctionStatus {
++    Compiled,
++    /// The compiler gave up on this function; see `FunctionFacts::diagnostics`.
++    Bailout,
++    /// Lowering declined the function without a diagnostic, or a directive opted it out.
++    Skipped,
++}
++
++#[derive(Debug)]
++pub struct FunctionFacts {
++    pub span: Span,
++    pub status: FunctionStatus,
++    pub memo_slots: u32,
++    pub diagnostics: Vec<LintDiagnostic>,
++    /// Present when the pipeline reached `PruneHoistedContexts`.
++    pub reactive: Option<ReactiveFacts>,
++}
++
++#[derive(Debug, Default)]
++pub struct ReactiveFacts {
++    pub identifiers: Vec<IdentifierFact>,
++    /// Value flow: each declaration and the declarations it was computed from.
++    pub edges: Vec<(u32, Vec<u32>)>,
++    /// Store targets (locals, context, destructured names) and params, first occurrence per span.
++    pub named: Vec<NamedFact>,
++    pub scopes: Vec<ScopeFact>,
++    pub returns: Vec<ReturnFact>,
++    /// Declarations written by at least one reactive store.
++    pub reactive_ids: Vec<u32>,
++}
++
++#[derive(Debug, Clone)]
++pub struct IdentifierFact {
++    pub declaration_id: u32,
++    pub name: Option<String>,
++    pub span: Option<Span>,
++    pub scope: Option<u32>,
++}
++
++#[derive(Debug, Clone)]
++pub struct NamedFact {
++    pub span: Span,
++    pub declaration_id: u32,
++    pub name: Option<String>,
++    pub reactive: bool,
++    pub is_param: bool,
++    pub own_scope: Option<u32>,
++    pub enclosing_scope: Option<u32>,
++    pub operand_ids: Vec<u32>,
++}
++
++#[derive(Debug, Clone)]
++pub struct ScopeFact {
++    pub id: u32,
++    pub span: Option<Span>,
++    pub dependencies: Vec<DependencyFact>,
++    pub declarations: Vec<u32>,
++    pub merged: Vec<u32>,
++}
++
++#[derive(Debug, Clone)]
++pub struct DependencyFact {
++    pub declaration_id: u32,
++    pub name: Option<String>,
++    pub path: Vec<(String, bool)>,
++    pub reactive: bool,
++}
++
++#[derive(Debug, Clone)]
++pub struct ReturnFact {
++    pub span: Span,
++    pub declaration_id: u32,
++    pub reactive: bool,
++}
++
++/// Declarations of temporaries the compiler promoted to names, read before
++/// `rename_variables` gives them ordinary names like `t0`.
++pub(crate) fn promoted_declarations(env: &Environment<'_>) -> FxHashSet<u32> {
++    env.identifiers
++        .iter()
++        .filter(|i| matches!(i.name, Some(IdentifierName::Promoted(_))))
++        .map(|i| i.declaration_id.index() as u32)
++        .collect()
++}
++
++pub(crate) fn collect(
++    func: &ReactiveFunction<'_>,
++    env: &Environment<'_>,
++    promoted: &FxHashSet<u32>,
++) -> ReactiveFacts {
++    let mut c = Collector { env, promoted, facts: ReactiveFacts::default(), identifiers: FxHashMap::default(), edges: FxHashMap::default(), named_spans: FxHashMap::default(), reactive: Vec::new() };
++    c.visit_block(&func.body, None);
++    for param in &func.params {
++        let place = match param {
++            ParamPattern::Place(place) => place,
++            ParamPattern::Spread(spread) => &spread.place,
++        };
++        let id = c.note(place);
++        if let Some(span) = c.source_span(place) {
++            if !c.named_spans.contains_key(&span.start) {
++                c.named_spans.insert(span.start, c.facts.named.len());
++                c.facts.named.push(NamedFact { span, declaration_id: id, name: c.name_of(place), reactive: place.reactive, is_param: true, own_scope: None, enclosing_scope: None, operand_ids: Vec::new() });
++            }
++        }
++    }
++    c.finish()
++}
++
++struct Collector<'e, 'a> {
++    env: &'e Environment<'a>,
++    promoted: &'e FxHashSet<u32>,
++    facts: ReactiveFacts,
++    identifiers: FxHashMap<u32, usize>,
++    edges: FxHashMap<u32, Vec<u32>>,
++    named_spans: FxHashMap<u32, usize>,
++    reactive: Vec<u32>,
++}
++
++impl Collector<'_, '_> {
++    fn did(&self, place: &Place) -> u32 {
++        self.env.identifiers[place.identifier].declaration_id.index() as u32
++    }
++
++    /// Where a source variable is declared. Temporaries the compiler promoted to names
++    /// (`t0`) inherit the span of the pattern they came from, so they get none, or they
++    /// would be mistaken for the variable declared at the same position.
++    fn source_span(&self, place: &Place) -> Option<Span> {
++        let ident = &self.env.identifiers[place.identifier];
++        if self.promoted.contains(&(ident.declaration_id.index() as u32)) { None } else { ident.span }
++    }
++
++    fn name_of(&self, place: &Place) -> Option<String> {
++        self.env.identifiers[place.identifier].name.map(|n| n.value().to_string())
++    }
++
++    /// Records the identifier behind `place` (last write wins, as the TS consumer does).
++    fn note(&mut self, place: &Place) -> u32 {
++        let ident = &self.env.identifiers[place.identifier];
++        let id = ident.declaration_id.index() as u32;
++        let fact = IdentifierFact {
++            declaration_id: id,
++            name: ident.name.map(|n| n.value().to_string()),
++            span: self.source_span(place),
++            scope: ident.scope.map(|s| s.index() as u32),
++        };
++        match self.identifiers.get(&id) {
++            Some(&i) => self.facts.identifiers[i] = fact,
++            None => {
++                self.identifiers.insert(id, self.facts.identifiers.len());
++                self.facts.identifiers.push(fact);
++            }
++        }
++        id
++    }
++
++    fn add_edge(&mut self, from: u32, to: u32) {
++        if from == to {
++            return;
++        }
++        let tos = self.edges.entry(from).or_default();
++        if !tos.contains(&to) {
++            tos.push(to);
++        }
++    }
++
++    fn visit_block(&mut self, block: &ReactiveBlock<'_>, scope: Option<u32>) {
++        for stmt in block {
++            match stmt {
++                ReactiveStatement::Instruction(instr) => self.visit_instruction(instr, scope),
++                ReactiveStatement::Scope(block) => {
++                    let s = &self.env.scopes[block.scope];
++                    let id = block.scope.index() as u32;
++                    let dependencies = s
++                        .dependencies
++                        .iter()
++                        .map(|d| {
++                            let ident = &self.env.identifiers[d.identifier];
++                            DependencyFact {
++                                declaration_id: ident.declaration_id.index() as u32,
++                                name: ident.name.map(|n| n.value().to_string()),
++                                path: d.path.iter().map(|p| (p.property.to_string(), p.optional)).collect(),
++                                reactive: d.reactive,
++                            }
++                        })
++                        .collect();
++                    let declarations = s
++                        .declarations
++                        .iter()
++                        .map(|(_, d)| self.env.identifiers[d.identifier].declaration_id.index() as u32)
++                        .collect();
++                    let merged = s.merged.iter().map(|m| m.index() as u32).collect();
++                    self.facts.scopes.push(ScopeFact { id, span: s.span, dependencies, declarations, merged });
++                    for (_, d) in &s.declarations {
++                        let ident = &self.env.identifiers[d.identifier];
++                        let did = ident.declaration_id.index() as u32;
++                        if !self.identifiers.contains_key(&did) {
++                            self.identifiers.insert(did, self.facts.identifiers.len());
++                            self.facts.identifiers.push(IdentifierFact { declaration_id: did, name: ident.name.map(|n| n.value().to_string()), span: if self.promoted.contains(&did) { None } else { ident.span }, scope: ident.scope.map(|s| s.index() as u32) });
++                        }
++                    }
++                    self.visit_block(&block.instructions, Some(id));
++                }
++                ReactiveStatement::PrunedScope(block) => self.visit_block(&block.instructions, scope),
++                ReactiveStatement::Terminal(term) => self.visit_terminal(&term.terminal, term.span, scope),
++            }
++        }
++    }
++
++    fn visit_instruction(&mut self, instr: &ReactiveInstruction<'_>, scope: Option<u32>) {
++        let mut operands = Vec::new();
++        self.collect_operands(&instr.value, &mut operands, scope);
++        let targets: Vec<Place> = match &instr.value {
++            ReactiveValue::Instruction(value) => store_targets(value),
++            _ => Vec::new(),
++        };
++        let target_ids: Vec<u32> = targets.iter().map(|t| self.did(t)).collect();
++        let operands: Vec<Place> = operands.into_iter().filter(|o| !target_ids.contains(&self.did(o))).collect();
++        let lvalues: Vec<Place> = targets.iter().copied().chain(instr.lvalue).collect();
++        let operand_ids: Vec<u32> = operands.iter().map(|o| self.note(o)).collect();
++        for l in &lvalues {
++            let lid = self.note(l);
++            for &o in &operand_ids {
++                self.add_edge(lid, o);
++            }
++            if l.reactive && !self.reactive.contains(&lid) {
++                self.reactive.push(lid);
++            }
++        }
++        for t in &targets {
++            let ident = &self.env.identifiers[t.identifier];
++            let Some(span) = self.source_span(t) else { continue };
++            if self.named_spans.contains_key(&span.start) {
++                continue;
++            }
++            self.named_spans.insert(span.start, self.facts.named.len());
++            self.facts.named.push(NamedFact {
++                span,
++                declaration_id: ident.declaration_id.index() as u32,
++                name: ident.name.map(|n| n.value().to_string()),
++                reactive: t.reactive,
++                is_param: false,
++                own_scope: ident.scope.map(|s| s.index() as u32),
++                enclosing_scope: scope,
++                operand_ids: operand_ids.clone(),
++            });
++        }
++    }
++
++    /// Operands of a value, recursing through compound values; instructions nested in
++    /// sequence expressions are visited as instructions and contribute their lvalue.
++    fn collect_operands(&mut self, value: &ReactiveValue<'_>, out: &mut Vec<Place>, scope: Option<u32>) {
++        match value {
++            ReactiveValue::Instruction(v) => out.extend(each_instruction_value_operand(v, self.env)),
++            ReactiveValue::LogicalExpression { left, right, .. } => {
++                self.collect_operands(left, out, scope);
++                self.collect_operands(right, out, scope);
++            }
++            ReactiveValue::ConditionalExpression { test, consequent, alternate } => {
++                self.collect_operands(test, out, scope);
++                self.collect_operands(consequent, out, scope);
++                self.collect_operands(alternate, out, scope);
++            }
++            ReactiveValue::SequenceExpression { instructions, value, .. } => {
++                for inner in instructions {
++                    match inner.lvalue {
++                        Some(lvalue) => {
++                            self.visit_instruction(inner, scope);
++                            out.push(lvalue);
++                        }
++                        None => self.collect_operands(&inner.value, out, scope),
++                    }
++                }
++                self.collect_operands(value, out, scope);
++            }
++            ReactiveValue::OptionalExpression { value, .. } => self.collect_operands(value, out, scope),
++        }
++    }
++
++    /// Terminals contribute their nested blocks, instructions nested in their values, and returns.
++    fn visit_terminal_value(&mut self, value: &ReactiveValue<'_>, scope: Option<u32>) {
++        let mut ignored = Vec::new();
++        self.collect_operands(value, &mut ignored, scope);
++    }
++
++    fn visit_terminal(&mut self, term: &ReactiveTerminal<'_>, span: Span, scope: Option<u32>) {
++        match term {
++            ReactiveTerminal::Return { value, .. } => {
++                let id = self.note(value);
++                self.facts.returns.push(ReturnFact { span, declaration_id: id, reactive: value.reactive });
++            }
++            ReactiveTerminal::Break { .. } | ReactiveTerminal::Continue { .. } | ReactiveTerminal::Throw { .. } => {}
++            ReactiveTerminal::Switch { cases, .. } => {
++                for case in cases {
++                    if let Some(block) = &case.block {
++                        self.visit_block(block, scope);
++                    }
++                }
++            }
++            ReactiveTerminal::DoWhile { loop_block, test, .. } | ReactiveTerminal::While { test, loop_block, .. } => {
++                self.visit_block(loop_block, scope);
++                self.visit_terminal_value(test, scope);
++            }
++            ReactiveTerminal::For { init, test, update, loop_block, .. } => {
++                self.visit_terminal_value(init, scope);
++                self.visit_terminal_value(test, scope);
++                if let Some(update) = update {
++                    self.visit_terminal_value(update, scope);
++                }
++                self.visit_block(loop_block, scope);
++            }
++            ReactiveTerminal::ForOf { init, test, loop_block, .. } => {
++                self.visit_terminal_value(init, scope);
++                self.visit_terminal_value(test, scope);
++                self.visit_block(loop_block, scope);
++            }
++            ReactiveTerminal::ForIn { init, loop_block, .. } => {
++                self.visit_terminal_value(init, scope);
++                self.visit_block(loop_block, scope);
++            }
++            ReactiveTerminal::If { consequent, alternate, .. } => {
++                self.visit_block(consequent, scope);
++                if let Some(alternate) = alternate {
++                    self.visit_block(alternate, scope);
++                }
++            }
++            ReactiveTerminal::Label { block, .. } => self.visit_block(block, scope),
++            ReactiveTerminal::Try { block, handler, .. } => {
++                self.visit_block(block, scope);
++                self.visit_block(handler, scope);
++            }
++        }
++    }
++
++    fn finish(mut self) -> ReactiveFacts {
++        let mut edges: Vec<(u32, Vec<u32>)> = self.edges.into_iter().collect();
++        edges.sort_unstable_by_key(|(from, _)| *from);
++        self.facts.edges = edges;
++        self.facts.reactive_ids = self.reactive;
++        self.facts
++    }
++}
++
++/// Places a store writes, matching the TS consumer: locals, context variables and
++/// destructuring targets, but not update expressions.
++fn store_targets(value: &InstructionValue<'_>) -> Vec<Place> {
++    match value {
++        InstructionValue::StoreLocal { lvalue, .. }
++        | InstructionValue::StoreContext { lvalue, .. }
++        | InstructionValue::DeclareLocal { lvalue, .. }
++        | InstructionValue::DeclareContext { lvalue, .. } => vec![lvalue.place],
++        InstructionValue::Destructure { lvalue, .. } => each_pattern_operand(&lvalue.pattern).into_vec(),
++        _ => Vec::new(),
++    }
++}
+diff --git a/crates/oxc_react_compiler/src/lib.rs b/crates/oxc_react_compiler/src/lib.rs
+index 9405fb9f..7d25e70e 100644
+--- a/crates/oxc_react_compiler/src/lib.rs
++++ b/crates/oxc_react_compiler/src/lib.rs
+@@ -1,6 +1,7 @@
+ use oxc_allocator::Allocator;
+ 
+ mod diagnostics;
++mod facts;
+ mod options;
+ mod scope;
+ 
+@@ -21,6 +22,10 @@ use crate::react_compiler::entrypoint::imports::{
+ use crate::react_compiler::entrypoint::program::compile_program;
+ 
+ pub use crate::diagnostics::{ErrorCategory, LintDiagnostic};
++pub use crate::facts::{
++    DependencyFact, FunctionFacts, FunctionStatus, IdentifierFact, NamedFact, ReactiveFacts,
++    ReturnFact, ScopeFact,
++};
+ pub use crate::react_compiler::entrypoint::compile_result::CompileResult;
+ pub use crate::react_compiler::entrypoint::program::CompileOutput;
+ 
+@@ -83,7 +88,25 @@ pub fn compile<'a>(
+     allocator: &'a Allocator,
+     options: PluginOptions,
+ ) -> CompileResult<'a> {
+-    run_compiler::<true>(program, semantic, allocator, options)
++    run_compiler::<true>(program, semantic, allocator, options, None)
++}
++
++/// Run the React Compiler for its analysis only: per function, whether it compiled,
++/// its memo slots and diagnostics, and the reactive scopes, dependencies and
++/// reactivity the compiler inferred (see [`ReactiveFacts`]). Nothing is rewritten.
++///
++/// The `semantic` requirements are the same as for [`compile`].
++pub fn facts<'a>(
++    program: &Program<'a>,
++    semantic: &Semantic<'_>,
++    allocator: &'a Allocator,
++    options: PluginOptions,
++) -> (Vec<FunctionFacts>, Diagnostics) {
++    let mut functions = Vec::new();
++    let diagnostics = match run_compiler::<true>(program, semantic, allocator, options, Some(&mut functions)) {
++        CompileResult::Success { diagnostics, .. } | CompileResult::Fatal { diagnostics } => diagnostics,
++    };
++    (functions, diagnostics)
+ }
+ 
+ fn run_compiler<'a, const EMIT: bool>(
+@@ -91,6 +114,7 @@ fn run_compiler<'a, const EMIT: bool>(
+     semantic: &Semantic<'_>,
+     allocator: &'a Allocator,
+     options: PluginOptions,
++    facts_out: Option<&mut Vec<FunctionFacts>>,
+ ) -> CompileResult<'a> {
+     // Check for existing runtime imports (file already compiled).
+     if has_memo_cache_function_import(program, &get_react_compiler_runtime_module(&options.target))
+@@ -110,7 +134,7 @@ fn run_compiler<'a, const EMIT: bool>(
+         };
+     }
+ 
+-    compile_program::<EMIT>(allocator, semantic, program, options)
++    compile_program::<EMIT>(allocator, semantic, program, options, facts_out)
+ }
+ 
+ /// Lint a pre-parsed program — like [`compile`] but read-only: it collects
+@@ -127,7 +151,7 @@ pub fn lint<'a>(
+     let mut options = options;
+     options.no_emit = true;
+ 
+-    let (diagnostics, fatal) = match run_compiler::<false>(program, semantic, allocator, options) {
++    let (diagnostics, fatal) = match run_compiler::<false>(program, semantic, allocator, options, None) {
+         CompileResult::Success { diagnostics, .. } => (diagnostics, false),
+         CompileResult::Fatal { diagnostics } => (diagnostics, true),
+     };
+diff --git a/crates/oxc_react_compiler/src/react_compiler/entrypoint/imports.rs b/crates/oxc_react_compiler/src/react_compiler/entrypoint/imports.rs
+index 9e7fab92..8de7f77a 100644
+--- a/crates/oxc_react_compiler/src/react_compiler/entrypoint/imports.rs
++++ b/crates/oxc_react_compiler/src/react_compiler/entrypoint/imports.rs
+@@ -46,6 +46,10 @@ pub struct ProgramContext<'a> {
+     pub instrument_gating_name: Option<Ident<'a>>,
+     pub hook_guard_name: Option<Ident<'a>>,
+     pub memo_cache_name: Option<Ident<'a>>,
++    /// `Some` when the caller asked for per-function facts (see [`crate::facts`]).
++    pub facts: Option<Vec<crate::facts::FunctionFacts>>,
++    /// Reactive facts of the function the pipeline is compiling, taken by `process_fn`.
++    pub pending_reactive_facts: Option<crate::facts::ReactiveFacts>,
+ 
+     // Internal state
+     known_referenced_names: IdentHashSet<'a>,
+@@ -73,6 +77,8 @@ impl<'a> ProgramContext<'a> {
+             instrument_gating_name: None,
+             hook_guard_name: None,
+             memo_cache_name: None,
++            facts: None,
++            pending_reactive_facts: None,
+             known_referenced_names: IdentHashSet::default(),
+             imports: FxHashMap::default(),
+         }
+diff --git a/crates/oxc_react_compiler/src/react_compiler/entrypoint/pipeline.rs b/crates/oxc_react_compiler/src/react_compiler/entrypoint/pipeline.rs
+index 14d4c22e..37d59109 100644
+--- a/crates/oxc_react_compiler/src/react_compiler/entrypoint/pipeline.rs
++++ b/crates/oxc_react_compiler/src/react_compiler/entrypoint/pipeline.rs
+@@ -347,6 +347,8 @@ pub fn compile_fn<'a, const EMIT: bool>(
+ 
+     stabilize_block_ids(&mut reactive_fn, &mut env);
+ 
++    // Renaming turns promoted temporaries into plain names, so note them first.
++    let promoted = context.facts.is_some().then(|| crate::facts::promoted_declarations(&env));
+     let unique_identifiers = rename_variables(&mut reactive_fn, &mut env);
+ 
+     for name in &unique_identifiers {
+@@ -355,6 +357,10 @@ pub fn compile_fn<'a, const EMIT: bool>(
+ 
+     prune_hoisted_contexts(&mut reactive_fn, &env)?;
+ 
++    if let Some(promoted) = &promoted {
++        context.pending_reactive_facts = Some(crate::facts::collect(&reactive_fn, &env, promoted));
++    }
++
+     if env.config.enable_preserve_existing_memoization_guarantees
+         || env.config.validate_preserve_existing_memoization_guarantees
+     {
+diff --git a/crates/oxc_react_compiler/src/react_compiler/entrypoint/program.rs b/crates/oxc_react_compiler/src/react_compiler/entrypoint/program.rs
+index 2d1394e4..1b6d1c20 100644
+--- a/crates/oxc_react_compiler/src/react_compiler/entrypoint/program.rs
++++ b/crates/oxc_react_compiler/src/react_compiler/entrypoint/program.rs
+@@ -1261,6 +1261,10 @@ fn process_fn<'a, const EMIT: bool>(
+     let compile_result =
+         try_compile_function::<EMIT>(ast, source, scope, output_mode, env_config, context);
+ 
++    if context.facts.is_some() {
++        record_facts(source, &compile_result, opt_out.is_some(), context);
++    }
++
+     match compile_result {
+         Err(err) => {
+             if opt_out.is_some() {
+@@ -1310,6 +1314,31 @@ fn process_fn<'a, const EMIT: bool>(
+     }
+ }
+ 
++fn record_facts<'a>(
++    source: &CompileSource<'_, 'a>,
++    compile_result: &Result<Option<CodegenFunction<'a>>, Diagnostics>,
++    opted_out: bool,
++    context: &mut ProgramContext<'a>,
++) {
++    use crate::facts::{FunctionFacts, FunctionStatus};
++    let reactive = context.pending_reactive_facts.take();
++    let span = Span::new(source.fn_start.unwrap_or(0), source.fn_end.unwrap_or(0));
++    let (status, memo_slots, diagnostics) = match compile_result {
++        Err(err) => (
++            FunctionStatus::Bailout,
++            0,
++            err.iter().cloned().map(diagnostics::categorize).collect(),
++        ),
++        Ok(None) => (FunctionStatus::Skipped, 0, Vec::new()),
++        Ok(Some(_)) if opted_out => (FunctionStatus::Skipped, 0, Vec::new()),
++        Ok(Some(codegen_fn)) => (FunctionStatus::Compiled, codegen_fn.memo_slots_used, Vec::new()),
++    };
++    let reactive = if status == FunctionStatus::Compiled { reactive } else { None };
++    if let Some(facts) = context.facts.as_mut() {
++        facts.push(FunctionFacts { span, status, memo_slots, diagnostics, reactive });
++    }
++}
++
+ // -----------------------------------------------------------------------
+ // Function discovery
+ // -----------------------------------------------------------------------
+@@ -3269,6 +3298,7 @@ pub fn compile_program<'a, const EMIT: bool>(
+     semantic: &Semantic<'_>,
+     program: &Program<'a>,
+     options: PluginOptions,
++    facts_out: Option<&mut Vec<crate::facts::FunctionFacts>>,
+ ) -> CompileResult<'a> {
+     // Find all functions to compile. An empty queue means no work, so return
+     // before all the setup below, which only compilation needs. The pre-check
+@@ -3367,6 +3397,19 @@ pub fn compile_program<'a, const EMIT: bool>(
+         context.reserve_memo_cache_name(&scope);
+     }
+ 
++    if let Some(facts_out) = facts_out {
++        context.facts = Some(Vec::new());
++        for source in &queue {
++            if let Err(CompileResult::Fatal { diagnostics }) =
++                process_fn::<EMIT>(&ast, source, &scope, output_mode, &options.environment, &mut context)
++            {
++                context.diagnostics.extend(diagnostics);
++            }
++        }
++        *facts_out = context.facts.take().unwrap_or_default();
++        return CompileResult::Success { output: None, diagnostics: context.diagnostics };
++    }
++
+     // Process each function and collect compiled results
+     let mut compiled_fns: Vec<CompiledFunction<'_, '_, '_, '_>> = Vec::new();
+ 
+diff --git a/crates/oxc_react_compiler/tests/facts.rs b/crates/oxc_react_compiler/tests/facts.rs
+new file mode 100644
+index 00000000..54c5ccad
+--- /dev/null
++++ b/crates/oxc_react_compiler/tests/facts.rs
+@@ -0,0 +1,71 @@
++//! `facts` reports the compiler's analysis per function without rewriting anything.
++
++use oxc_allocator::Allocator;
++use oxc_parser::Parser;
++use oxc_react_compiler::{FunctionFacts, FunctionStatus, PluginOptions, facts};
++use oxc_semantic::SemanticBuilder;
++use oxc_span::SourceType;
++
++fn facts_of(source: &str) -> Vec<FunctionFacts> {
++    let allocator = Allocator::default();
++    let program = Parser::new(&allocator, source, SourceType::tsx()).parse().program;
++    let semantic = SemanticBuilder::new().with_build_nodes(true).build(&program).semantic;
++    facts(&program, &semantic, &allocator, PluginOptions::default()).0
++}
++
++const MEMOIZABLE: &str = "function Label(props) {\n  const text = props.prefix + props.text;\n  return <span title={props.title}>{text}</span>;\n}\n";
++
++#[test]
++fn a_compiled_component_reports_its_scope_dependencies_by_property_path() {
++    let reactive = facts_of(MEMOIZABLE).remove(0).reactive.unwrap();
++    let mut deps: Vec<String> = reactive
++        .scopes
++        .iter()
++        .flat_map(|scope| &scope.dependencies)
++        .map(|dep| {
++            let mut parts = vec![dep.name.as_deref().unwrap_or("?")];
++            parts.extend(dep.path.iter().map(|(property, _)| property.as_str()));
++            parts.join(".")
++        })
++        .collect();
++    deps.sort();
++    deps.dedup();
++    assert_eq!(deps, ["props.title", "text"]);
++}
++
++#[test]
++fn a_value_derived_from_props_is_reported_reactive() {
++    let reactive = facts_of(MEMOIZABLE).remove(0).reactive.unwrap();
++    let text = reactive.named.iter().find(|named| named.name.as_deref() == Some("text")).unwrap();
++    assert!(text.reactive);
++}
++
++#[test]
++fn a_component_that_breaks_the_rules_of_react_bails_out_without_reactive_facts() {
++    let source = "function Counter(props) {\n  props.count = 1;\n  return <span>{props.count}</span>;\n}\n";
++    let function = facts_of(source).remove(0);
++    assert_eq!((function.status, function.reactive.is_some()), (FunctionStatus::Bailout, false));
++}
++
++#[test]
++fn analysing_leaves_the_program_text_unchanged() {
++    let allocator = Allocator::default();
++    let program = Parser::new(&allocator, MEMOIZABLE, SourceType::tsx()).parse().program;
++    let semantic = SemanticBuilder::new().with_build_nodes(true).build(&program).semantic;
++    facts(&program, &semantic, &allocator, PluginOptions::default());
++    let printed = oxc_codegen::Codegen::new().build(&program).code;
++    assert!(!printed.contains("_c("));
++}
++
++#[test]
++fn a_destructured_default_is_reported_under_its_variable_not_the_compilers_temporary() {
++    let source = "function Slot(props) {\n  const { radius = 0 } = props;\n  return <div style={{ borderRadius: radius }} />;\n}\n";
++    let reactive = facts_of(source).remove(0).reactive.unwrap();
++    let at_radius: Vec<_> = reactive
++        .identifiers
++        .iter()
++        .filter(|i| i.span.is_some_and(|span| span.start == 33))
++        .filter_map(|i| i.name.as_deref())
++        .collect();
++    assert_eq!(at_radius, ["radius"]);
++}

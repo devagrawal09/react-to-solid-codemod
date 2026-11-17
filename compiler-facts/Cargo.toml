@@ -9,11 +9,11 @@ description = "oxc's React Compiler with its reactive analysis exposed, built to
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-oxc_allocator = { path = "../../oxc/crates/oxc_allocator" }
-oxc_parser = { path = "../../oxc/crates/oxc_parser" }
-oxc_semantic = { path = "../../oxc/crates/oxc_semantic" }
-oxc_span = { path = "../../oxc/crates/oxc_span" }
-oxc_react_compiler = { path = "../../oxc/crates/oxc_react_compiler" }
+oxc_allocator = { path = ".oxc/crates/oxc_allocator" }
+oxc_parser = { path = ".oxc/crates/oxc_parser" }
+oxc_semantic = { path = ".oxc/crates/oxc_semantic" }
+oxc_span = { path = ".oxc/crates/oxc_span" }
+oxc_react_compiler = { path = ".oxc/crates/oxc_react_compiler" }
 serde_json = { version = "1", features = ["preserve_order"] }
 
 [profile.release]
@@ -23,4 +23,6 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+# build.sh clones oxc into .oxc; it is its own workspace, not part of this one.
 [workspace]
+exclude = [".oxc"]
