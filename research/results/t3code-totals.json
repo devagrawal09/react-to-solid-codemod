@@ -1,0 +1,17 @@
+{
+ "files": 804,
+ "functions": 2045,
+ "statusSame": 2042,
+ "bothCompiled": 1965,
+ "memoSame": 1822,
+ "functionsIdentical": 1791,
+ "values": 14294,
+ "fields": {
+  "reactive": 14288,
+  "scope": 14011,
+  "inputs": 14294,
+  "readBy": 13407
+ },
+ "babelMs": 172365.21439300012,
+ "nativeUs": 23440084
+}

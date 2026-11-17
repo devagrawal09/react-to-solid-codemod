@@ -1,0 +1,19 @@
+
+src/hooks/useFilter.ts
+  {"mode":"babel","file":"hooks/useFilter.ts","ms":43,"functions":[{"name":"useFilter","status":"compiled","scopes":1,"reactive":["filter","label","(return)"]}]}
+
+src/components/TodoItem.tsx
+  {"mode":"babel","file":"components/TodoItem.tsx","ms":72,"functions":[{"name":"TodoItem","status":"compiled","scopes":4,"reactive":["className"]}]}
+
+src/components/ThemeContext.tsx
+  {"mode":"babel","file":"components/ThemeContext.tsx","ms":57,"functions":[{"name":"ThemeProvider","status":"compiled","scopes":3,"reactive":["dark","toggle"]},{"name":"useTheme","status":"compiled","scopes":0,"reactive":["(return)"]}]}
+
+src/App.tsx
+  {"mode":"babel","file":"src/App.tsx","ms":59,"functions":[{"name":"App","status":"compiled","scopes":2,"reactive":[]}]}
+
+src/components/Clock.tsx
+  {"mode":"babel","file":"components/Clock.tsx","ms":76,"functions":[{"name":"Clock","status":"compiled","scopes":4,"reactive":["now"]}]}
+
+src/components/TodoList.tsx
+  {"mode":"babel","file":"components/TodoList.tsx","ms":246,"functions":[{"name":"TodoList","status":"compiled","scopes":17,"reactive":["todos","draft","filter","setFilter","label","dark","toggle","visible","remaining","add","toggleTodo"]}]}
+✨ Done in 1.380s

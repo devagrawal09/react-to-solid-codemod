@@ -1,0 +1,19 @@
+
+src/components/TodoItem.tsx
+  {"mode":"native","file":"components/TodoItem.tsx","ms":21,"analyzeMs":1,"functions":[{"name":"TodoItem","status":"compiled","scopes":4,"reactive":["className"]}]}
+
+src/components/TodoList.tsx
+  {"mode":"native","file":"components/TodoList.tsx","ms":42,"analyzeMs":3,"functions":[{"name":"TodoList","status":"compiled","scopes":17,"reactive":["todos","draft","filter","setFilter","label","dark","toggle","visible","remaining","add","toggleTodo"]}]}
+
+src/App.tsx
+  {"mode":"native","file":"src/App.tsx","ms":18,"analyzeMs":0,"functions":[{"name":"App","status":"compiled","scopes":2,"reactive":[]}]}
+
+src/components/ThemeContext.tsx
+  {"mode":"native","file":"components/ThemeContext.tsx","ms":21,"analyzeMs":1,"functions":[{"name":"ThemeProvider","status":"compiled","scopes":3,"reactive":["dark","toggle"]},{"name":"useTheme","status":"compiled","scopes":0,"reactive":["(return)"]}]}
+
+src/hooks/useFilter.ts
+  {"mode":"native","file":"hooks/useFilter.ts","ms":19,"analyzeMs":1,"functions":[{"name":"useFilter","status":"compiled","scopes":1,"reactive":["filter","label","(return)"]}]}
+
+src/components/Clock.tsx
+  {"mode":"native","file":"components/Clock.tsx","ms":22,"analyzeMs":1,"functions":[{"name":"Clock","status":"compiled","scopes":4,"reactive":["now"]}]}
+✨ Done in 1.238s

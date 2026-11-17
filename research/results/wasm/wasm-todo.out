@@ -1,0 +1,19 @@
+
+src/App.tsx
+  {"mode":"wasm","file":"src/App.tsx","ms":18,"analyzeMs":1,"memMB":1.4,"functions":[{"name":"App","status":"compiled","scopes":2,"reactive":[]}]}
+
+src/components/TodoItem.tsx
+  {"mode":"wasm","file":"components/TodoItem.tsx","ms":22,"analyzeMs":2,"memMB":1.6,"functions":[{"name":"TodoItem","status":"compiled","scopes":4,"reactive":["className"]}]}
+
+src/components/ThemeContext.tsx
+  {"mode":"wasm","file":"components/ThemeContext.tsx","ms":26,"analyzeMs":2,"memMB":1.4,"functions":[{"name":"ThemeProvider","status":"compiled","scopes":3,"reactive":["dark","toggle"]},{"name":"useTheme","status":"compiled","scopes":0,"reactive":["(return)"]}]}
+
+src/hooks/useFilter.ts
+  {"mode":"wasm","file":"hooks/useFilter.ts","ms":20,"analyzeMs":2,"memMB":1.4,"functions":[{"name":"useFilter","status":"compiled","scopes":1,"reactive":["filter","label","(return)"]}]}
+
+src/components/TodoList.tsx
+  {"mode":"wasm","file":"components/TodoList.tsx","ms":41,"analyzeMs":4,"memMB":2.1,"functions":[{"name":"TodoList","status":"compiled","scopes":17,"reactive":["todos","draft","filter","setFilter","label","dark","toggle","visible","remaining","add","toggleTodo"]}]}
+
+src/components/Clock.tsx
+  {"mode":"wasm","file":"components/Clock.tsx","ms":23,"analyzeMs":1,"memMB":1.6,"functions":[{"name":"Clock","status":"compiled","scopes":4,"reactive":["now"]}]}
+✨ Done in 2.388s

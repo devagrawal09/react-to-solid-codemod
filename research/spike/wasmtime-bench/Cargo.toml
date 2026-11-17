@@ -1,0 +1,10 @@
+[package]
+name = "wasmtime-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wasmtime = { version = "=42.0.2", default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
+
+[workspace]

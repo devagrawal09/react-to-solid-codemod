@@ -1,0 +1,85 @@
+
+routes/_chat.settings.storage.tsx
+  {"mode":"babel","file":"routes/_chat.settings.storage.tsx","ms":14,"functions":[]}
+
+routes/_chat.draft.$draftId.tsx
+  {"mode":"babel","file":"routes/_chat.draft.$draftId.tsx","ms":16,"functions":[]}
+
+components/preview/PreviewUnreachable.tsx
+  {"mode":"babel","file":"preview/PreviewUnreachable.tsx","ms":348,"functions":[{"name":"PreviewFileNotShown","status":"compiled","scopes":9,"reactive":["host"]},{"name":"PreviewUnreachable","status":"compiled","scopes":15,"reactive":["showDetails","host","friendly","errorLabel"]},{"name":"ErrorIcon","status":"compiled","scopes":2,"reactive":[]}]}
+
+components/ui/select.tsx
+  {"mode":"babel","file":"ui/select.tsx","ms":403,"functions":[{"name":"SelectTrigger","status":"compiled","scopes":5,"reactive":[]},{"name":"SelectButton","status":"compiled","scopes":6,"reactive":["defaultProps"]},{"name":"SelectValue","status":"compiled","scopes":3,"reactive":[]},{"name":"SelectPopup","status":"compiled","scopes":9,"reactive":[]},{"name":"SelectItem","status":"compiled","scopes":4,"reactive":[]},{"name":"SelectGroup","status":"compiled","scopes":1,"reactive":[]},{"name":"SelectGroupLabel","status":"compiled","scopes":1,"reactive":[]}]}
+
+components/KeybindingsUpdateToast.tsx
+  {"mode":"babel","file":"components/KeybindingsUpdateToast.tsx","ms":33,"functions":[]}
+
+components/pullRequest/PullRequestRow.tsx
+  {"mode":"babel","file":"pullRequest/PullRequestRow.tsx","ms":634,"functions":[{"name":"PullRequestRowLabels","status":"compiled","scopes":2,"reactive":[]},{"name":"PullRequestRowImpl","status":"compiled","scopes":29,"reactive":["Icon","providerName","terminology"]}]}
+
+components/ui/calendar.tsx
+  {"mode":"babel","file":"ui/calendar.tsx","ms":200,"functions":[{"name":"Calendar","status":"compiled","scopes":7,"reactive":["defaultClassNames","mergedClassNames","mergedComponents","dayPickerProps"]}]}
+
+components/CommandPaletteContent.tsx
+  {"mode":"babel","file":"components/CommandPaletteContent.tsx","ms":221,"functions":[{"name":"CommandPaletteContent","status":"compiled","scopes":15,"reactive":[]}]}
+
+components/pullRequest/PullRequestEditButton.tsx
+  {"mode":"babel","file":"pullRequest/PullRequestEditButton.tsx","ms":50,"functions":[{"name":"PullRequestEditButton","status":"compiled","scopes":5,"reactive":[]}]}
+
+components/desktop/RunningThreadKeepAlive.tsx
+  {"mode":"babel","file":"desktop/RunningThreadKeepAlive.tsx","ms":20,"functions":[{"name":"RunningThreadKeepAlive","status":"compiled","scopes":0,"reactive":[]}]}
+
+components/SourceControlIconArtwork.tsx
+  {"mode":"babel","file":"components/SourceControlIconArtwork.tsx","ms":213,"functions":[{"name":"SourceControlIconArtwork","status":"compiled","scopes":8,"reactive":["idPrefix","paint"]}]}
+
+components/BranchToolbar.tsx
+  {"mode":"babel","file":"components/BranchToolbar.tsx","ms":3230,"functions":[{"name":"RunContextSelector","status":"compiled","scopes":36,"reactive":["composerFloatingLayerProps","activeEnvironment","WorkspaceIcon","workspaceLabel","isPanel","isLocked","workspacePath","handleContextMenu","workspaceIcon","environmentIcon","icon","triggerContent"]},{"name":"useLabelsOverflow","status":"compiled","scopes":2,"reactive":["overflows","(return)"]},{"name":"BranchToolbar","status":"compiled","scopes":16,"reactive":["threadRef","setDraftThreadContext","activeProjectRef","activeProject","activeWorktreePath","effectiveEnvMode","envModeLocked","canUsePreviousWorktree","projectRefsForWorktreeLookup","projectThreads","previousWorktreeSeed","previousWorktreeLabel","onUsePreviousWorktree","addTargets","onAddToMachine","hasMultipleEnvironments","showEnvironmentPicker","activeEnvironmentOption","showEnvironmentIndicator","attachStrip","labelsOverflow"]}]}
+
+components/settings/SettingsScopeSentence.tsx
+  {"mode":"babel","file":"settings/SettingsScopeSentence.tsx","ms":1326,"functions":[{"name":"SettingsScopeSentence","status":"compiled","scopes":9,"reactive":["scope","pathname","environments","props"]},{"name":"ScopeOptionLabel","status":"compiled","scopes":5,"reactive":[]},{"name":"ScopeMenu","status":"compiled","scopes":18,"reactive":["query","Trigger","trigger","choices"]},{"name":"EnvironmentScopeMenu","status":"compiled","scopes":10,"reactive":["resolved","environmentValue","selected","project","memberEnvironmentIds","options"]},{"name":"CheckoutScopeMenu","status":"compiled","scopes":8,"reactive":["group","checkouts","selected"]},{"name":"ProjectScopeMenu","status":"compiled","scopes":8,"reactive":["selected","projects"]}]}
+
+components/settings/FoldedSettingsSection.tsx
+  {"mode":"babel","file":"settings/FoldedSettingsSection.tsx","ms":293,"functions":[{"name":"FoldedSettingsSection","status":"compiled","scopes":20,"reactive":["open","searchTargetId","targetRef","openedForTarget"]}]}
+
+components/settings/AdvancedSettings.tsx
+  {"mode":"babel","file":"settings/AdvancedSettings.tsx","ms":82,"functions":[{"name":"AdvancedSettings","status":"compiled","scopes":3,"reactive":["open","searchTargetId","seenSearchTargetId"]}]}
+
+components/pullRequest/PullRequestTimelineTab.tsx
+  {"mode":"babel","file":"pullRequest/PullRequestTimelineTab.tsx","ms":2889,"functions":[{"name":"TimelineBody","status":"compiled","scopes":1,"reactive":[]},{"name":"ActorName","status":"compiled","scopes":1,"reactive":[]},{"name":"TimelineMarker","status":"compiled","scopes":2,"reactive":[]},{"name":"IconMarker","status":"compiled","scopes":2,"reactive":[]},{"name":"ActorTimelineMarker","status":"compiled","scopes":1,"reactive":["actor"]},{"name":"ReviewStateBadge","status":"compiled","scopes":2,"reactive":[]},{"name":"AddToChatButton","status":"compiled","scopes":1,"reactive":["onAddToChat"]},{"name":"OpenOnHostButton","status":"compiled","scopes":1,"reactive":[]},{"name":"ConversationCard","status":"compiled","scopes":18,"reactive":["editing","saving","updateComment","save"]},{"name":"ConversationGroup","status":"compiled","scopes":19,"reactive":["open","actors","first"]},{"name":"ReviewThreadEvent","status":"compiled","scopes":19,"reactive":["dismissed","expanded","replyCount"]},{"name":"CommitEvent","status":"compiled","scopes":12,"reactive":[]},{"name":"LifecycleEvent","status":"compiled","scopes":9,"reactive":["title","presentation"]},{"name":"ReviewVerdictEvent","status":"compiled","scopes":23,"reactive":[]},{"name":"PullRequestTimelineTab","status":"compiled","scopes":16,"reactive":["events","location","revealAnchor","linked","seenRevealUrl","anchor","matches","term","newestCommitAt","reactions","editable","orderedEvents","rows","targetIndex","reveal","rowKey","renderRow"]}]}
+
+components/settings/TypographySettings.tsx
+  {"mode":"babel","file":"settings/TypographySettings.tsx","ms":1469,"functions":[{"name":"useFontDefaultFamilies","status":"compiled","scopes":2,"reactive":["settings","defaults","(return)"]},{"name":"InterfaceFontRow","status":"compiled","scopes":6,"reactive":["settings","updateSettings","defaults"]},{"name":"PromptFontRow","status":"compiled","scopes":6,"reactive":["settings","updateSettings","defaults"]},{"name":"CodeFontRow","status":"compiled","scopes":7,"reactive":["settings","updateSettings","defaults"]},{"name":"TerminalFontRow","status":"compiled","scopes":7,"reactive":["settings","updateSettings","defaults"]},{"name":"FontSmoothingRow","status":"compiled","scopes":5,"reactive":["settings","updateSettings"]},{"name":"WordWrapRow","status":"compiled","scopes":5,"reactive":["settings","updateSettings"]},{"name":"FontSettingsGroup","status":"compiled","scopes":1,"reactive":[]},{"name":"SeparateFontsRow","status":"compiled","scopes":3,"reactive":[]},{"name":"SimpleFontRows","status":"compiled","scopes":5,"reactive":["settings"]},{"name":"TypographySection","status":"compiled","scopes":10,"reactive":["advanced","setAdvanced","searchTargetId","showAdvanced"]},{"name":"FontFamilySettingsRow","status":"compiled","scopes":22,"reactive":["trimmed","draft","draftSettled","adopted","readAdoptedGeneration","acceptsFamily","commitDraft","flushDraft","draftTrimmed","draftPending","resetToDefault","resetAction","fontEnumeration","inputFocused","familyControl","control"]}]}
+
+components/settings/ProviderAccentColorPicker.tsx
+  {"mode":"babel","file":"settings/ProviderAccentColorPicker.tsx","ms":661,"functions":[{"name":"ProviderCustomColorPanel","status":"compiled","scopes":16,"reactive":["onCommit","onPreview","hsv","currentColor","hexDraft","syncedValue","startDrag","changeHsv","endDrag"]},{"name":"ProviderCustomColorPicker","status":"compiled","scopes":9,"reactive":["normalized"]},{"name":"ProviderAccentColorPicker","status":"compiled","scopes":9,"reactive":["description","displayName","layout","onCommit","value","draft","shownValue","commit","picker"]}]}
+
+components/files/fileSurfaceChrome.tsx
+  {"mode":"babel","file":"files/fileSurfaceChrome.tsx","ms":186,"functions":[{"name":"FileSurfaceAction","status":"compiled","scopes":3,"reactive":["pressed"]},{"name":"FileSurfaceNotice","status":"compiled","scopes":1,"reactive":[]},{"name":"FileSurfaceLoading","status":"compiled","scopes":3,"reactive":[]},{"name":"FileSurfaceFailure","status":"compiled","scopes":3,"reactive":[]}]}
+
+components/files/AudioPreview.tsx
+  {"mode":"babel","file":"files/AudioPreview.tsx","ms":859,"functions":[{"name":"AudioPreview","status":"compiled","scopes":1,"reactive":[]},{"name":"StandardAudioPreview","status":"compiled","scopes":5,"reactive":["onUnmount","audioRef","loadedSource","playing","revision","src"]},{"name":"AudioChip","status":"compiled","scopes":13,"reactive":["onUnmount","loadedSource","src","playing","ready","duration","elapsed","audioRef","loading","open","action","Icon"]}]}
+
+components/chat/ThreadStatusLine.tsx
+  {"mode":"babel","file":"chat/ThreadStatusLine.tsx","ms":50,"functions":[{"name":"ThreadStatusLine","status":"compiled","scopes":4,"reactive":[]}]}
+
+components/chat/ChatCanvas.tsx
+  {"mode":"babel","file":"chat/ChatCanvas.tsx","ms":397,"functions":[{"name":"ChatCanvas","status":"compiled","scopes":10,"reactive":["timelineElement","measurements","detailsCardMeasurement","detailsCardInlineOpen","model","context","layout"]}]}
+
+components/settings/SavedEnvironmentRows.tsx
+  {"mode":"babel","file":"settings/SavedEnvironmentRows.tsx","ms":4038,"functions":[{"name":"SavedBackendListRow","status":"compiled","scopes":59,"reactive":["routesOpen","permissionsOpen","diagnosisOpen","environmentId","unsupported","blocked","enabled","isConnected","isRemoving","errorTraceId","copyTraceIdToClipboard","copyTraceId","copyMcpUrl","versionMismatch","serverUpdateState","resumingServerUpdate","status","serverVersion","relayDiscovery","discoveredDescriptor","lastDescriptor","discoveredRelayHttpBaseUrl","lastRelayHttpBaseUrl","retryNow","currentDiagnosis","connectionState","relayOnly","diagnosis","prepared","connectedTarget","mcpUrl","machineKind","routeCount","subtitleText","showUpdateAction","statusTooltip"]},{"name":"CloudLinkSwitch","status":"compiled","scopes":3,"reactive":["control"]},{"name":"T3ConnectTunnelUsage","status":"compiled","scopes":3,"reactive":["usage","accountPage","openAccountPage","usedAtRefusal","showLimitAlert","meter"]},{"name":"ConfiguredCloudLinkRow","status":"compiled","scopes":12,"reactive":["isSignedIn","cloudLinkState","linkRevoked","managedTunnelActive","managedTunnelOutOfSync","publishAgentActivity","holdWebhooksWhileOffline","operationError","tunnelLimit","reconcileCloudState","openAuthPrompt","connectDenial","turnOn","showSwitch","isUpdating","isUpdatingPreference","disabledReason","isBusy","switchDisabled","signedOut","signInButton","refreshLinkState","reachability","reachabilityStatus","updateManagedTunnel","updatePublishAgentActivity","updateHoldWebhooks"]},{"name":"CloudLinkRow","status":"compiled","scopes":2,"reactive":[]},{"name":"EmptyRemoteEnvironments","status":"compiled","scopes":3,"reactive":[]},{"name":"CloudRemoteEnvironmentRows","status":"compiled","scopes":1,"reactive":[]}]}
+
+components/settings/AuthorizedClientsSettings.tsx
+  {"mode":"babel","file":"settings/AuthorizedClientsSettings.tsx","ms":4223,"functions":[{"name":"AccessScopeSummary","status":"compiled","scopes":6,"reactive":["scopeCountLabel"]},{"name":"PairingLinkListRow","status":"compiled","scopes":42,"reactive":["nowMs","expiresAtMs","isRevealDialogOpen","isQrPanelOpen","qrEndpointId","qrPanelId","currentOriginPairingUrl","hostedPairingUrl","endpointPairingUrl","endpointCopyOptions","shareablePairingUrl","failedCopyValue","revealValue","isRevealValueUrl","isRevealValueHostedAppPairingUrl","isRevealValueQrShareable","copyToClipboard","copyPairingValue","handleCopyCode","expiresAbsolute","primaryLabel","selectedQrOption","qrPairingUrl","canRenderQrForSelection"]},{"name":"ConnectedClientListRow","status":"compiled","scopes":15,"reactive":["nowMs","isLive","lastConnectedAt","statusTooltip","deviceInfoBits","primaryLabel"]},{"name":"AuthorizedClientsHeaderAction","status":"compiled","scopes":38,"reactive":["pairingDenial","createPairingCredential","dialogOpen","pairingLabel","pairingScopes","selectedScopes","isCreatingPairingLink","handleCreatePairingLink"]},{"name":"PairingClientsList","status":"compiled","scopes":6,"reactive":[]},{"name":"AdvertisedEndpointListRow","status":"compiled","scopes":16,"reactive":["isAvailable","needsTailscaleSetup","canDisableTailscaleServe","shouldShowEndpointUrl","remoteDenial"]},{"name":"NetworkAccessDescription","status":"compiled","scopes":5,"reactive":["summary"]}]}
+
+components/chat/ComposerPendingTerminalContexts.tsx
+  {"mode":"babel","file":"chat/ComposerPendingTerminalContexts.tsx","ms":72,"functions":[{"name":"ComposerPendingTerminalContextChip","status":"compiled","scopes":3,"reactive":["label","expired"]}]}
+
+components/chat/MarkdownExternalLink.tsx
+  {"mode":"babel","file":"chat/MarkdownExternalLink.tsx","ms":256,"functions":[{"name":"MarkdownLinkFavicon","status":"compiled","scopes":4,"reactive":["failedHost","brandIcon","faviconUrl"]},{"name":"MarkdownExternalLinkContent","status":"compiled","scopes":5,"reactive":["childNodes","firstChild"]}]}
+
+components/chat/SecretRequestCard.tsx
+  {"mode":"babel","file":"chat/SecretRequestCard.tsx","ms":939,"functions":[{"name":"SecretRequestCard","status":"compiled","scopes":5,"reactive":["item","display"]},{"name":"useSecretRequestSources","status":"compiled","scopes":2,"reactive":["config","(return)"]},{"name":"PendingSecretRequestForm","status":"compiled","scopes":23,"reactive":["item","inputId","errorId","privacyId","answer","sources","sourceId","source","secret","reference","submitting","error","send","onSubmit","draft","link","describedBy"]}]}
+
+components/chat/WorktreeSetupCard.tsx
+  {"mode":"babel","file":"chat/WorktreeSetupCard.tsx","ms":1105,"functions":[{"name":"LiveElapsed","status":"compiled","scopes":0,"reactive":["elapsed"]},{"name":"Elapsed","status":"compiled","scopes":2,"reactive":[]},{"name":"StageIcon","status":"compiled","scopes":6,"reactive":[]},{"name":"ShimmerOverlay","status":"compiled","scopes":1,"reactive":[]},{"name":"SetupHeaderRow","status":"compiled","scopes":7,"reactive":["running","failed","finishedWithFailedStage","text","tone"]},{"name":"StageRow","status":"compiled","scopes":11,"reactive":["label","running","trailing"]},{"name":"OUTPUT_TAIL_SLOTS","status":"not-compiled","scopes":0,"reactive":[]},{"name":"OutputTail","status":"compiled","scopes":4,"reactive":["rows"]},{"name":"SetupDetails","status":"compiled","scopes":5,"reactive":[]},{"name":"CollapsedSummaryRow","status":"compiled","scopes":5,"reactive":["status","label"]},{"name":"WorktreeSetupCard","status":"compiled","scopes":13,"reactive":["running","detailsOpen","setupStage","showTerminal","collapsed","showHeader","showTail"]}]}
+✨ Done in 10.747s
