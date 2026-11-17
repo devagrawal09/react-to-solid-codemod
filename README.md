@@ -38,6 +38,7 @@ An ast-grep script for the mechanical rewrites:
 - `.map(...)` in JSX → `<For>`, `key` removed
 - `className` → `class`, `htmlFor` → `for` and the other DOM attribute renames, `dangerouslySetInnerHTML` → `innerHTML`
 - `Ctx.Provider` → `Ctx`, `ReactNode` → `JSX.Element`, `React.ComponentProps` → `ComponentProps`, `"use client"` dropped
+- R11–R34: the hand fixes that repeated across three screen ports, such as early returns → `<Show>`/`<Switch>`, values inside `<For>` callbacks → accessors, Base UI `useRender` getters, `onChange` → `onInput`, React types, `useReducer`, `useRef` and TanStack Query options. [HANDOFF.md](HANDOFF.md) lists each one; `test/rules.test.mjs` has a spec per rule.
 
 Anything it can't do safely (refs, effects, custom hook calls, controlled inputs, list indexes, render-dependent reads, unusual prop patterns) it reports as a flag instead of guessing.
 
@@ -47,13 +48,13 @@ Anything it can't do safely (refs, effects, custom hook calls, controlled inputs
 
 ```sh
 npm ci
-npm test                                   # specs for the reactivity pass
+(cd gate && npm ci)                        # the rule specs load gate/mechanical.js
+npm test                                   # specs for both passes
 
 # one or more files: writes <name>.solid.tsx, <name>.report.md and <name>.json per file
 node src/cli.mjs out path/to/Component.tsx path/to/useThing.ts
 
 # rule pass on a file
-(cd gate && npm ci)
 node gate/mechanical.js out/Component.solid.tsx out/Component.final.tsx   # prints applied rules and flags as JSON
 ```
 
@@ -85,6 +86,6 @@ Whole screens converted with both passes plus hand fixes compile and run on Soli
 
 - **Pinned compiler.** It reads the React Compiler's internal IR, which changes between versions. Use exactly `babel-plugin-react-compiler@1.0.0`; the pre-steps are written against its specific gaps.
 - **Library hooks** need an entry in the contract table (`BUILTIN` in `src/contracts.mjs`) describing what their Solid port returns.
-- **Left for an agent or a person:** setting state during render (`if (x !== prev) setPrev(x)`), effects, refs, values filled by a loop during render, reassigned `let`s, and early returns.
+- **Left for an agent or a person:** setting state during render (`if (x !== prev) setPrev(x)`), effects, refs, values filled by a loop during render, reassigned `let`s, and early returns with work between the guard and the final return.
 - **Partial output by design.** The result is a partial conversion; library imports (UI kits, icons, routers) still need Solid equivalents.
 - **Memo grouping.** The compiler's scopes are finer than a person's would be: correct, sometimes more memos than needed.

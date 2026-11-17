@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+for s in one big cm; do rm -rf /home/user/rw/$s/mech-new; mkdir -p /home/user/rw/$s/mech-new; for f in $(cd /home/user/rw/$s/decided && find . -name '*.tsx'); do mkdir -p /home/user/rw/$s/mech-new/$(dirname $f); node /home/user/rules/codemod/mechanical.js /home/user/rw/$s/decided/$f /home/user/rw/$s/mech-new/$f > /home/user/rw/$s/mech-new/$f.json 2>/home/user/rw/$s/mech-new/$f.err || echo "FAIL $s $f: $(head -5 /home/user/rw/$s/mech-new/$f.err)"; done; done
