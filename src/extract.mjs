@@ -605,7 +605,7 @@ function tryAssignment(v, binding, fnPath, bodyStatements) {
 
 const CONDITION_BAIL = /^Unexpected terminal kind `(optional|logical)` for (ternary|logical) test block/;
 
-function compile(code, filename, { prestep, liftIn }) {
+function compile(code, filename, { prestep, liftIn, compiler = true }) {
   const imports = {};
   const astFunctions = new Map();
   const irByLoc = new Map();
@@ -644,13 +644,14 @@ function compile(code, filename, { prestep, liftIn }) {
     transformSync(code, {
       filename, babelrc: false, configFile: false, code: false, ast: false,
       parserOpts: { plugins: ["typescript", "jsx"] },
-      plugins: [collect, ...pre, [ReactCompiler, {
+      plugins: [collect, ...pre, ...(compiler ? [[ReactCompiler, {
         panicThreshold: "none",
+        enableReanimatedCheck: false,
         logger: {
           logEvent: (_file, e) => events.push(e),
           debugLogIRs: (v) => { if (v.kind === "reactive") irByLoc.set(posKey(v.value.loc), v.value); },
         },
-      }]],
+      }]] : [])],
     });
   } catch (e) {
     parseError = String(e.message ?? e).split("\n")[0];
@@ -658,7 +659,10 @@ function compile(code, filename, { prestep, liftIn }) {
   return { astFunctions, irByLoc, events, notes, parseError, imports };
 }
 
-export function extract(code, filename, { prestep = true } = {}) {
+// `analyze` is the engine's native React Compiler (`codemod:react-compiler`). With it, Babel
+// only reads the AST and the compiler runs on the original source, with no pre-steps.
+export function extract(code, filename, { prestep = true, analyze } = {}) {
+  if (analyze) return extractWithNative(code, filename, analyze);
   const started = performance.now();
   let run = compile(code, filename, { prestep });
   // Second compile, only for files where a function hit the condition bug, lifting tests only there.
@@ -683,4 +687,51 @@ export function extract(code, filename, { prestep = true } = {}) {
     functions.push(fn);
   }
   return { file: filename, parseError, imports, functions, ms: Math.round(performance.now() - started) };
+}
+
+function extractWithNative(code, filename, analyze) {
+  const started = performance.now();
+  const { astFunctions, parseError, imports } = compile(code, filename, { compiler: false });
+  const result = analyze(code, filename);
+  const byLoc = new Map(result.functions.map((f) => [f.loc, f]));
+  const functions = [];
+  for (const [key, ast] of astFunctions) {
+    const f = byLoc.get(key);
+    const event = !f ? { status: "not-compiled" }
+      : f.status === "compiled" ? { status: "compiled", memoSlots: f.memoSlots }
+      : f.status === "bailout" ? { status: "bailout", reason: f.diagnostics[0]?.reason ?? "bailout", category: f.diagnostics[0]?.category ?? null, description: null, line: f.diagnostics[0]?.line ?? null }
+      : { status: "skipped", reason: null };
+    const ir = f?.status === "compiled" && f.reactive ? irFromFacts(f.reactive) : null;
+    functions.push(joinFunction(ast, ir, event));
+  }
+  return { file: filename, parseError: parseError ?? result.parseError, imports, functions, ms: Math.round(performance.now() - started) };
+}
+
+// Rebuilds the shape analyzeReactiveFunction returns from the native facts.
+function irFromFacts(r) {
+  const loc = (key) => {
+    if (!key) return null;
+    const [line, column] = key.split(":").map(Number);
+    return { start: { line, column } };
+  };
+  const identifier = (id, name, key, scope) => ({ id, declarationId: id, name: name ? { value: name } : null, loc: loc(key), scope: scope == null ? null : { id: scope } });
+  const identifiers = new Map(r.identifiers.map((i) => [i.id, identifier(i.id, i.name, i.loc, i.scope)]));
+  const surviving = new Map(r.scopes.map((s) => [s.id, {
+    id: s.id,
+    loc: s.line == null ? null : { start: { line: s.line } },
+    dependencies: s.dependencies.map((d) => ({ identifier: identifiers.get(d.id) ?? identifier(d.id, d.name, null, null), path: d.path, reactive: d.reactive })),
+    declarations: new Map(s.declarations.map((id) => [id, { identifier: identifiers.get(id) ?? identifier(id, null, null, null) }])),
+    merged: new Set(s.merged),
+  }]));
+  const scopeOfDecl = new Map();
+  for (const s of r.scopes) for (const id of s.declarations) scopeOfDecl.set(id, s.id);
+  return {
+    edges: new Map(r.edges.map(([from, to]) => [from, new Set(to)])),
+    named: new Map(r.named.map((n) => [n.loc, { id: n.id, name: n.name, reactive: n.reactive, ownScope: n.ownScope, enclosingScope: n.enclosingScope, operandIds: n.operandIds }])),
+    identifiers,
+    surviving,
+    scopeOfDecl,
+    returns: r.returns,
+    reactiveIds: new Set(r.reactiveIds),
+  };
 }
