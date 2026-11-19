@@ -1,7 +1,9 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { builtinModules } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { rolldown } from "rolldown";
 import { beforeAll, describe, expect, it } from "vitest";
 
 // Needs a codemod CLI with the code-first engine: codemod@2.0.0-alpha.4 or newer.
@@ -20,9 +22,9 @@ function givenApp(edit = () => {}) {
   return dir;
 }
 
-function migrate(dir, params = ["apply=true"]) {
+function migrate(dir, params = ["apply=true"], workflowFile = workflow) {
   const store = fs.mkdtempSync(path.join(os.tmpdir(), "r2s-runs-"));
-  const cli = spawnSync(bin, ["workflow", "run", "-w", workflow, "-t", dir, ...params.flatMap((p) => ["--param", p]), "--no-interactive", "--approve", "--disable-analytics", "--no-color"], {
+  const cli = spawnSync(bin, ["workflow", "run", "-w", workflowFile, "-t", dir, ...params.flatMap((p) => ["--param", p]), "--no-interactive", "--approve", "--disable-analytics", "--no-color"], {
     env: { ...process.env, CODEMOD_RUN_STORE_DIR: store },
     encoding: "utf8",
   });
@@ -81,4 +83,27 @@ describe.skipIf(!bin)("react-to-solid workflow on a project without React", { ta
     const app = givenApp((dir) => fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "not-react" })));
     expect(migrate(app).error).toContain("No package.json here depends on react");
   });
+});
+
+// `codemod publish` replaces src/workflow.ts with a Rolldown bundle of it and everything it imports
+// (default options, the runtime's modules external). A workflow callback then gets only the
+// bindings it uses from that one file, so setup code and reassigned module-level bindings, which
+// work unbundled, break once published.
+describe.skipIf(!bin)("react-to-solid workflow as codemod publish bundles it", { tags: ["slow"] }, () => {
+  it("writes the same files as the unbundled workflow", async () => {
+    const pkg = fs.mkdtempSync(path.join(os.tmpdir(), "r2s-published-"));
+    const root = path.resolve(import.meta.dirname, "..");
+    fs.cpSync(root, pkg, { recursive: true, filter: (p) => !p.includes(`${path.sep}node_modules`) });
+    const external = (id) => /^codemod[:/]/.test(id) || id.startsWith("node:") || builtinModules.includes(id);
+    const { output } = await (await rolldown({ input: workflow, cwd: root, external })).generate({ format: "esm" });
+    fs.writeFileSync(path.join(pkg, "src/workflow.ts"), output[0].code);
+
+    const [unbundled, bundled] = [givenApp(), givenApp()];
+    migrate(unbundled);
+    const run = migrate(bundled, ["apply=true"], path.join(pkg, "src/workflow.ts"));
+    expect(run.status).toBe("succeeded");
+    for (const file of ["src/App.tsx", "src/components/TodoList.tsx", "src/components/ThemeContext.tsx", "src/hooks/useFilter.ts"]) {
+      expect(read(bundled, file)).toBe(read(unbundled, file));
+    }
+  }, 240_000);
 });

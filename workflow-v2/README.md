@@ -54,6 +54,8 @@ The run's result (in `run.json` of the run store) holds the summary, the flags a
 
 `build/build.mjs` bundles the reactivity pass, Babel and the React Compiler into `src/lib/reactivity.mjs` (7 MB, ESM), which the workflow imports; each `forEachFile` worker loads it once, under QuickJS. Node built-ins are stubbed (`build/stubs/`): the pass never reads Babel config files, and the compiler's Reanimated check, which calls `require.resolve`, is turned off with `enableReanimatedCheck: false` (the one change to the pass's source). Node is only needed for the eslint step.
 
+The bundle is one IIFE assigned to one `const`, with its exports after it, and has no setup code of its own at the top level. `codemod publish` replaces `src/workflow.ts` with a Rolldown bundle of everything it imports, and each workflow callback then gets only the bindings it uses from that file: top-level setup statements would be dropped, and a reassigned module-level binding can't be copied at all. Rolldown also replaces `process.env.NODE_ENV` with `"development"`, which turns on the compiler's dev-only cache checks, so the build sets it to `undefined`, as jssg has it. The slow spec "as codemod publish bundles it" bundles the package the same way and checks the result matches the unbundled run.
+
 ```sh
 pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src/reactivity/
 ```
@@ -70,5 +72,5 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 
 ```sh
 pnpm test                                        # reactivity (30) and rule (55) specs
-CODEMOD_BIN=<path to codemod 2.0.0-alpha.4> pnpm test # plus the workflow specs on tests/fixtures/todo-app (8, tagged slow)
+CODEMOD_BIN=<path to codemod 2.0.0-alpha.4> pnpm test # plus the workflow specs on tests/fixtures/todo-app (9, tagged slow)
 ```

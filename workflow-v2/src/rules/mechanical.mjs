@@ -38,65 +38,67 @@ const attrValue = (attr) => {
 const lcfirst = (s) => s.charAt(0).toLowerCase() + s.slice(1);
 const ucfirst = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
-// Edits are { start, end, text } or { start, end, wrap(innerText) }. Nested edits are applied
-// inside the edit that contains them, so a rule can wrap a node and rewrite reads inside it.
-// Node offsets are UTF-16 indexes under @ast-grep/napi but UTF-8 byte offsets in the codemod
-// sandbox. Edits keep the parser's offsets; `ix` turns one into a string index for the source
-// being edited, so files with non-ASCII text splice correctly under both.
-let ix = (i) => i;
-function useOffsetsOf(parse, Lang, text) {
-  ix = (i) => i;
-  if (/^[\x00-\x7f]*$/.test(text) || parse(Lang.Tsx, '"\u00e9"').root().range().end.index === 3) return;
-  const map = [];
-  for (let i = 0; i < text.length; i++) {
-    const c = text.codePointAt(i);
-    const bytes = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
-    for (let b = 0; b < bytes; b++) map.push(i);
-    if (c >= 0x10000) i++;
-  }
-  map.push(text.length);
-  ix = (i) => map[i];
-}
-const charAt = (text, i) => text[ix(i)];
-
-function spliceAll(text, base, edits) {
-  const items = edits.filter(Boolean).map((e) => ("insertedText" in e ? { start: e.startPos, end: e.endPos, text: e.insertedText } : e));
-  items.sort((a, b) => a.start - b.start || (b.end > b.start) - (a.end > a.start) || b.end - a.end);
-  const go = (s, e, list) => {
-    let out = "";
-    let at = s;
-    let i = 0;
-    while (i < list.length) {
-      const it = list[i];
-      let j = i + 1;
-      const nested = [];
-      while (it.end > it.start && j < list.length && list[j].start >= it.start && list[j].end <= it.end) nested.push(list[j++]);
-      if (it.start < at) { i = j; continue; }
-      out += text.slice(ix(at) - ix(base), ix(it.start) - ix(base));
-      out += it.text != null ? it.text : it.wrap(go(it.start, it.end, nested));
-      at = it.end;
-      i = j;
-    }
-    return out + (e == null ? text.slice(ix(at) - ix(base)) : text.slice(ix(at) - ix(base), ix(e) - ix(base)));
-  };
-  return go(base, null, items);
-}
-// remove a statement together with its indentation and line break
-const dropLine = (node, text) => {
-  let a = node.range().start.index, b = node.range().end.index;
-  // only steps over ASCII whitespace, which is one byte and one index
-  const c = (i) => charAt(text, i);
-  while (a > 0 && (c(a - 1) === " " || c(a - 1) === "\t")) a--;
-  while (c(b) === " " || c(b) === "\t") b++;
-  if (c(b) === "\n") b++;
-  if (c(b) === "\n" && c(a - 1) === "\n" && c(a - 2) === "\n") b++;
-  return { start: a, end: b, text: "" };
-};
-const rep = (node, text) => ({ start: node.range().start.index, end: node.range().end.index, text });
-const wrapRep = (node, wrap) => ({ start: node.range().start.index, end: node.range().end.index, wrap });
-const textWith = (node, edits) => spliceAll(node.text(), node.range().start.index, edits.filter((e) => e && (e.startPos ?? e.start) >= node.range().start.index && (e.endPos ?? e.end) <= node.range().end.index));
-
 export function transform(input, { parse, Lang }) {
+  // Offsets are per file, so the helpers that read them live in here: a module-level binding
+  // that changes can't be copied into a workflow callback once the package is bundled.
+  // Edits are { start, end, text } or { start, end, wrap(innerText) }. Nested edits are applied
+  // inside the edit that contains them, so a rule can wrap a node and rewrite reads inside it.
+  // Node offsets are UTF-16 indexes under @ast-grep/napi but UTF-8 byte offsets in the codemod
+  // sandbox. Edits keep the parser's offsets; `ix` turns one into a string index for the source
+  // being edited, so files with non-ASCII text splice correctly under both.
+  let ix = (i) => i;
+  function useOffsetsOf(parse, Lang, text) {
+    ix = (i) => i;
+    if (/^[\x00-\x7f]*$/.test(text) || parse(Lang.Tsx, '"\u00e9"').root().range().end.index === 3) return;
+    const map = [];
+    for (let i = 0; i < text.length; i++) {
+      const c = text.codePointAt(i);
+      const bytes = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+      for (let b = 0; b < bytes; b++) map.push(i);
+      if (c >= 0x10000) i++;
+    }
+    map.push(text.length);
+    ix = (i) => map[i];
+  }
+  const charAt = (text, i) => text[ix(i)];
+
+  function spliceAll(text, base, edits) {
+    const items = edits.filter(Boolean).map((e) => ("insertedText" in e ? { start: e.startPos, end: e.endPos, text: e.insertedText } : e));
+    items.sort((a, b) => a.start - b.start || (b.end > b.start) - (a.end > a.start) || b.end - a.end);
+    const go = (s, e, list) => {
+      let out = "";
+      let at = s;
+      let i = 0;
+      while (i < list.length) {
+        const it = list[i];
+        let j = i + 1;
+        const nested = [];
+        while (it.end > it.start && j < list.length && list[j].start >= it.start && list[j].end <= it.end) nested.push(list[j++]);
+        if (it.start < at) { i = j; continue; }
+        out += text.slice(ix(at) - ix(base), ix(it.start) - ix(base));
+        out += it.text != null ? it.text : it.wrap(go(it.start, it.end, nested));
+        at = it.end;
+        i = j;
+      }
+      return out + (e == null ? text.slice(ix(at) - ix(base)) : text.slice(ix(at) - ix(base), ix(e) - ix(base)));
+    };
+    return go(base, null, items);
+  }
+  // remove a statement together with its indentation and line break
+  const dropLine = (node, text) => {
+    let a = node.range().start.index, b = node.range().end.index;
+    // only steps over ASCII whitespace, which is one byte and one index
+    const c = (i) => charAt(text, i);
+    while (a > 0 && (c(a - 1) === " " || c(a - 1) === "\t")) a--;
+    while (c(b) === " " || c(b) === "\t") b++;
+    if (c(b) === "\n") b++;
+    if (c(b) === "\n" && c(a - 1) === "\n" && c(a - 2) === "\n") b++;
+    return { start: a, end: b, text: "" };
+  };
+  const rep = (node, text) => ({ start: node.range().start.index, end: node.range().end.index, text });
+  const wrapRep = (node, wrap) => ({ start: node.range().start.index, end: node.range().end.index, wrap });
+  const textWith = (node, edits) => spliceAll(node.text(), node.range().start.index, edits.filter((e) => e && (e.startPos ?? e.start) >= node.range().start.index && (e.endPos ?? e.end) <= node.range().end.index));
+
   let src = input;
   const flags = [];
   const applied = {};
