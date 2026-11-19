@@ -7,8 +7,8 @@
 version: "1"
 nodes:
   - id: needs-workflow-v2
-    name: Needs codemod 2.0.0-alpha.4
+    name: Needs the codemod 2.0 alpha CLI
     type: automatic
     steps:
       - name: Explain
-        run: echo "react-to-solid is a workflow v2 package; run it with npx codemod@2.0.0-alpha.4 run react-to-solid"
+        run: echo "react-to-solid is a workflow v2 package; run it with npx codemod@alpha run react-to-solid"

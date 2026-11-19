@@ -1123,8 +1123,35 @@ export function transform(input, { parse, Lang }) {
     }),
   );
 
+  // R39 Solid has no class components: note each React class component above it, with what its
+  // lifecycle methods become. An error boundary becomes <Errored>. Flagged below.
+  pass((root) =>
+    root.findAll({ rule: { any: [{ kind: "class_declaration" }, { kind: "abstract_class_declaration" }, { kind: "class" }], has: { kind: "class_heritage" } } }).flatMap((cls) => {
+      const base = cls.children().find((c) => c.kind() === "class_heritage")?.text().match(/^extends\s+((?:React\.)?(?:Pure)?Component)\b/)?.[1];
+      if (!base || !(base.startsWith("React.") || fromReact.has(base))) return [];
+      const methods = new Set(cls.field("body")?.children().filter((m) => m.kind() === "method_definition").map((m) => m.field("name")?.text()));
+      const name = cls.field("name")?.text() ?? "class";
+      let detail;
+      if (methods.has("getDerivedStateFromError") || methods.has("componentDidCatch")) {
+        detail = `${name} is an error boundary and Solid has no class components: use Solid 2's <Errored fallback={(err, reset) => ...}> around the children it guards`;
+      } else {
+        const lifecycle = { componentDidMount: "onSettled", componentDidUpdate: "createEffect(compute, apply), split by what it compares", componentWillUnmount: "onCleanup", getDerivedStateFromProps: "createMemo", shouldComponentUpdate: "nothing (Solid updates only what changed)" };
+        const maps = Object.entries(lifecycle).filter(([m]) => methods.has(m)).map(([m, to]) => `${m} -> ${to}`);
+        if (/\bthis\.(state|setState)\b/.test(cls.text())) maps.unshift("this.state/setState -> createSignal");
+        detail = `${name} is a class component and Solid has none: rewrite it as a function component${maps.length ? ` (${maps.join("; ")})` : ""}`;
+      }
+      const statement = [cls, ...cls.ancestors()].find((a) => ["program", "statement_block"].includes(a.parent()?.kind() ?? ""));
+      if (!statement) return [];
+      const at = statement.range().start.index;
+      note("class component -> note");
+      return [{ start: at, end: at, text: `// solid: class component: ${detail}\n${" ".repeat(statement.range().start.column)}` }];
+    }),
+  );
+
   // Flags for the judgment bucket
   const root = parse(Lang.Tsx, src).root();
+  for (const c of root.findAll({ rule: { kind: "comment", regex: "^// solid: class component: " } }))
+    flag("class component", c.next(), c.text().replace("// solid: class component: ", ""));
   for (const c of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^(React\\.)?(useEffect|useLayoutEffect)$" } } }))
     flag("effect", c, `${kids(c.field("arguments"))[1]?.text() ?? "no deps"} -> createEffect(compute, apply) or onSettled`);
   for (const c of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^(React\\.)?useRef$" } } }))
@@ -1135,7 +1162,8 @@ export function transform(input, { parse, Lang }) {
     if (!/^use(Context|State|Memo|Callback|Effect|LayoutEffect|Ref)$/.test(c.field("function").text())) flag("custom hook call", c, `${c.field("function").text()}() returns values in React; decide value vs accessor`);
 
   // R10 imports
-  const code = src.replace(/^import\b[^;]*?\bfrom\s*["'][^"'\n]*["'];?[ \t]*$|^import\s*["'][^"'\n]*["'];?[ \t]*$/gm, "");
+  // A `// solid:` note names Solid APIs (R39's onSettled) without using them.
+  const code = src.replace(/^import\b[^;]*?\bfrom\s*["'][^"'\n]*["'];?[ \t]*$|^import\s*["'][^"'\n]*["'];?[ \t]*$/gm, "").replace(/\/\/ solid:.*$/gm, "");
   const used = (re) => re.test(code);
   // A name the file declares or imports from another module stays that binding: importing Solid's
   // too would clash. When the conversion added that use, which one it means needs a person.
@@ -1152,7 +1180,8 @@ export function transform(input, { parse, Lang }) {
     ...["untrack", "flush"].filter((n) => used(new RegExp(`\\b${n}\\(`))).filter(free((n) => new RegExp(`\\b${n}\\(`))),
   ];
   const typeNames = ["JSX", "ComponentProps"].filter((n) => used(new RegExp(`\\b${n}\\b`))).filter(free((n) => new RegExp(`\\b${n}\\b`)));
-  const solidTypes = ["Component", "Setter"].filter((n) => used(new RegExp(`\\b${n}<`))).filter(free((n) => new RegExp(`\\b${n}<`)));
+  // `extends Component<P, S>` is React's class (R39), not Solid's Component type.
+  const solidTypes = ["Component", "Setter"].filter((n) => new RegExp(`\\b${n}<`).test(code.replace(/\bextends\s+Component</g, ""))).filter(free((n) => new RegExp(`\\b${n}<`)));
   let removedReact = false;
   src = src.replace(/^import\s+(type\s+)?(\*\s+as\s+React|React(,\s*\{[^}]*\})?|\{[^}]*\})\s+from\s+["']react["'];?[ \t]*\n/gm, () => { removedReact = true; return ""; });
   src = src.replace(/^import\s+\{\s*flushSync\s*\}\s+from\s+["']react-dom["'];?[ \t]*\n/gm, "");

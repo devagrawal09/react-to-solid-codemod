@@ -9,25 +9,16 @@
 // 2. Reactivity pass: the React Compiler (run inside jssg, no Node) decides what each
 //    component-body value becomes; a whole-program pass works out what each hook returns.
 // 3. Rule pass: mechanical rewrites (props, hooks, JSX, imports), with flags for the rest.
-// 4. Verify: eslint-plugin-solid's Solid 2 config on the migrated files.
-// 5. Optionally hand the flagged spots to an agent, after an approval.
+// 4. Project: package.json, tsconfig and the Vite config move to Solid 2 (no install).
+// 5. Verify: eslint-plugin-solid's Solid 2 config on the migrated files.
+// 6. Optionally hand the flagged spots to an agent, after an approval.
 import { step, forEachFile, shell, agent, approval, branch, commit } from "codemod/workflow";
 import { parse } from "codemod/ast-grep";
 import { applyContracts, decide, extract, rewrite } from "./lib/reactivity.mjs";
 import { transform } from "./rules/mechanical.mjs";
+import { NO_PORT, PORTS, migratePackageJson, migrateTsconfig, migrateViteConfig } from "./manifests.mjs";
 
-// React libraries and their Solid 2 ports. A dependency step will replace this table.
-const PORTS: Record<string, string> = {
-  react: "solid-js",
-  "react-dom": "@solidjs/web",
-  "@tanstack/react-query": "@tanstack/solid-query",
-  "@tanstack/react-router": "@tanstack/solid-router",
-  "react-router": "@solidjs/router",
-  "react-router-dom": "@solidjs/router",
-  "lucide-react": "lucide-solid",
-  "@base-ui-components/react": "@solidports/base-ui",
-};
-const NOT_SHIPPED = /^(@types\/|babel-plugin-react-compiler$|eslint-plugin-react|@vitejs\/plugin-react|typescript$)/;
+const NOT_SHIPPED = /^(@types\/|babel-plugin-react-compiler$|eslint-plugin-react|typescript$)/;
 
 export default async function main({ params }: { params: { include?: string; apply?: boolean | string; agent?: boolean | string } }) {
   // --param values arrive as JSON when they parse as JSON, so true is a boolean.
@@ -37,23 +28,33 @@ export default async function main({ params }: { params: { include?: string; app
 
   const manifests = await step("Read package.json files", forEachFile("**/package.json", (file) => {
     const pkg = JSON.parse(file.text);
-    return { path: file.path, deps: { ...pkg.peerDependencies, ...pkg.devDependencies, ...pkg.dependencies } };
+    return { path: file.path, deps: { ...pkg.peerDependencies, ...pkg.devDependencies, ...pkg.dependencies }, packageManager: pkg.packageManager ?? null };
   }));
+  const lockfiles = await step("Find the lockfile", forEachFile(["pnpm-lock.yaml", "yarn.lock", "bun.lock", "package-lock.json"], (file) => file.path));
   const plan = await step("Check React libraries for Solid ports", () => {
     // Only the package.json files on the way to the converted directory: in a monorepo, the
-    // other apps' dependencies say nothing about this one.
+    // other apps' dependencies say nothing about this one. The deepest one owns the directory.
     const deps: Record<string, string> = {};
+    let owner: string | null = null;
     for (const m of manifests.outputs) {
       const dir = m.path.replace(/\/?package\.json$/, "");
-      if (dir === "" || root === dir || root.startsWith(`${dir}/`)) Object.assign(deps, m.deps);
+      if (dir === "" || root === dir || root.startsWith(`${dir}/`)) {
+        Object.assign(deps, m.deps);
+        if (owner === null || dir.length > owner.length) owner = dir;
+      }
     }
     if (!deps.react) throw new Error("No package.json here depends on react; nothing to migrate.");
-    const reactish = Object.keys(deps).filter((name) => /react/i.test(name) && !NOT_SHIPPED.test(name)).sort();
+    const reactish = Object.keys(deps).filter((name) => (/react/i.test(name) || name in PORTS || name in NO_PORT) && !NOT_SHIPPED.test(name)).sort();
+    // The root package.json's packageManager field, then the lockfile.
+    const managers: Record<string, string> = { "pnpm-lock.yaml": "pnpm", "yarn.lock": "yarn", "bun.lock": "bun", "package-lock.json": "npm" };
+    const manager = manifests.outputs.find((m) => m.path === "package.json")?.packageManager?.replace(/@.*$/, "") ?? managers[lockfiles.outputs[0] ?? ""] ?? "npm";
     return {
       react: deps.react,
       usesReactCompiler: "babel-plugin-react-compiler" in deps,
-      ported: reactish.filter((name) => PORTS[name]).map((name) => `${name} -> ${PORTS[name]}`),
-      noPort: reactish.filter((name) => !PORTS[name]),
+      manifest: owner ? `${owner}/package.json` : "package.json",
+      install: `${manager} install`,
+      ported: reactish.filter((name) => PORTS[name]).map((name) => `${name} -> ${PORTS[name].to}${PORTS[name].version ? `@${PORTS[name].version}` : ""}${PORTS[name].note ? ` (${PORTS[name].note})` : ""}`),
+      noPort: reactish.filter((name) => !PORTS[name]).map((name) => (NO_PORT[name] ? `${name}: ${NO_PORT[name]}` : name)),
     };
   });
 
@@ -85,16 +86,47 @@ export default async function main({ params }: { params: { include?: string; app
     if (apply && changed) file.write(out);
     return { file: file.path, changed, applied, flags };
   }));
+  // The package that owns the converted directory moves to Solid 2: its package.json, the
+  // tsconfig files between it and the directory, and its Vite config. A package.json or tsconfig
+  // above it is shared with the rest of the workspace, so what would change there is reported.
+  const owner = plan.manifest.replace(/\/?package\.json$/, "");
+  const configs = await step(apply ? "Move package.json, tsconfig and the Vite config to Solid 2" : "Preview the package.json, tsconfig and Vite config changes", forEachFile({
+    include: ["**/package.json", "**/tsconfig*.json", "**/vite.config.ts", "**/vite.config.js", "**/vite.config.mts", "**/vite.config.mjs"],
+    exclude: ["**/node_modules/**"],
+  }, (file) => {
+    const dir = file.path.replace(/\/?[^/]+$/, "");
+    const name = file.path.slice(dir ? dir.length + 1 : 0);
+    if (!(dir === "" || root === dir || root.startsWith(`${dir}/`))) return undefined;
+    const shared = !(owner === "" || dir === owner || dir.startsWith(`${owner}/`));
+    let edit;
+    if (name === "package.json") edit = migratePackageJson(file.text);
+    else if (name.startsWith("tsconfig")) edit = migrateTsconfig(file.text);
+    else if (dir === owner) edit = migrateViteConfig(file.text, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" } });
+    else return undefined;
+    if (apply && !shared && edit.text !== file.text) file.write(edit.text);
+    return { file: file.path, shared, changes: edit.changes, flags: edit.flags, jsx: !shared && "jsx" in edit && edit.jsx };
+  }));
+  const configChanges = configs.outputs.filter((o) => !o.shared && o.changes.length).map((o) => ({ file: o.file, changes: o.changes }));
   const changed = converted.outputs.filter((o) => o.changed).map((o) => o.file);
-  const report = await step("Summarize the conversion", () =>
-    summarize(files, decided, converted.outputs));
-  const result = { plan, analyzed: files.length, failures: [...analyzed.failures, ...converted.failures], ...report };
+  const report = await step("Summarize the conversion", () => {
+    // Project flags have no line; a shared file's changes are left for a person.
+    const projectFlags = configs.outputs.map((o) => ({
+      file: o.file,
+      applied: {},
+      flags: [...o.flags, ...(o.shared ? o.changes.map((change) => ({ kind: "shared config", detail: `shared with the workspace, so not changed: ${change}` })) : [])].map((f) => ({ line: 0, ...f })),
+    }));
+    if (configs.outputs.some((o) => o.file.includes("tsconfig") && !o.shared) && !configs.outputs.some((o) => o.jsx)) {
+      projectFlags.push({ file: owner || ".", applied: {}, flags: [{ line: 0, kind: "build config", detail: `no tsconfig on the way to ${root} sets jsx: set "jsx": "preserve" and "jsxImportSource": "@solidjs/web" in the one that covers it` }] });
+    }
+    return summarize(files, decided, [...converted.outputs, ...projectFlags]);
+  });
+  const result = { plan, analyzed: files.length, failures: [...analyzed.failures, ...converted.failures, ...configs.failures], ...report, config: configChanges };
 
   if (!apply) {
-    console.log(`Preview: ${changed.length} of ${files.length} files would change, with ${report.flags.length} flagged spots to finish by hand. Nothing was written; run again with --param apply=true to convert them.`);
+    console.log(`Preview: ${changed.length} of ${files.length} files would change, and ${configChanges.length} package.json, tsconfig or Vite config files, with ${report.flags.length} flagged spots to finish by hand. Nothing was written; run again with --param apply=true to convert them, then ${plan.install}.`);
     return { ...result, preview: true, wouldChange: changed };
   }
-  await step(commit("Convert React components to Solid 2", { add: files }));
+  await step(commit("Convert React components to Solid 2", { add: [...files, ...configChanges.map((c) => c.file)] }));
 
   const lintDir = `${import.meta.dirname}/lint`;
   await step("Install the Solid 2 lint", shell`cd ${lintDir} && { [ -x node_modules/.bin/eslint ] || npm ci --silent --no-audit --no-fund >&2; }`);
@@ -112,6 +144,8 @@ export default async function main({ params }: { params: { include?: string; app
     await step(approval(`Hand ${report.flags.length} flagged spots to an agent?`));
     await step("Finish flagged spots", agent(agentPrompt(report.flags), { maxSteps: 40 }));
   }
+  // Nothing was installed: the dependency changes only take effect after an install.
+  console.log(`Converted ${changed.length} of ${files.length} files and ${configChanges.length} package.json, tsconfig or Vite config files, with ${report.flags.length} flagged spots to finish by hand. Next: ${plan.install}, then type-check and build.`);
   return { ...result, changed, lint };
 }
 

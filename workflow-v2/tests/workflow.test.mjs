@@ -74,7 +74,120 @@ describe.skipIf(!bin)("react-to-solid workflow without apply=true", { tags: ["sl
     expect(run.output.preview).toBe(true);
     expect(run.output.wouldChange).toContain("src/components/TodoList.tsx");
     expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "src/components/Clock.tsx", line: 8, kind: "effect" }));
+    expect(run.output.config).toContainEqual({ file: "package.json", changes: expect.arrayContaining(["react -> solid-js@^2.0.3"]) });
     expect(execFileSync("git", ["status", "--porcelain"], { cwd: app, encoding: "utf8" })).toBe("");
+  });
+});
+
+// create-vite's react-ts template, Nov 19
+const viteConfig = `import react from '@vitejs/plugin-react'\nimport { defineConfig } from 'vite'\n\n// https://vite.dev/config/\nexport default defineConfig({\n  plugins: [react()],\n})\n`;
+const tsconfigApp = `{\n  "compilerOptions": {\n    "types": ["vite/client"],\n    "skipLibCheck": true,\n\n    /* Bundler mode */\n    "moduleResolution": "bundler",\n    "jsx": "react-jsx",\n\n    /* Linting */\n    "strict": true\n  },\n  "include": ["src"]\n}\n`;
+
+describe.skipIf(!bin)("react-to-solid workflow on a Vite app with apply=true", { tags: ["slow"] }, () => {
+  let app;
+  let run;
+  beforeAll(() => {
+    app = givenApp((dir) => {
+      const pkg = JSON.parse(read(dir, "package.json"));
+      pkg.devDependencies = { ...pkg.devDependencies, "@vitejs/plugin-react": "^6.1.2", vite: "^8.3.6" };
+      fs.writeFileSync(path.join(dir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
+      fs.writeFileSync(path.join(dir, "vite.config.ts"), viteConfig);
+      fs.writeFileSync(path.join(dir, "tsconfig.app.json"), tsconfigApp);
+      fs.writeFileSync(path.join(dir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    });
+    run = migrate(app);
+  }, 120_000);
+
+  it("moves package.json to Solid 2", () => {
+    expect(JSON.parse(read(app, "package.json"))).toEqual({
+      name: "todo-demo",
+      private: true,
+      type: "module",
+      dependencies: { "@solidjs/web": "^2.0.3", "solid-js": "^2.0.3" },
+      devDependencies: { "@solidjs/vite-plugin": "^3.0.1", typescript: "5.9.3", vite: "^8.3.6" },
+    });
+  });
+
+  it("gives the tsconfig Solid's JSX", () => {
+    expect(read(app, "tsconfig.app.json")).toContain(`"jsx": "preserve",\n    "jsxImportSource": "@solidjs/web",\n\n    /* Linting */`);
+  });
+
+  it("swaps the React Vite plugin for Solid's", () => {
+    expect(read(app, "vite.config.ts")).toBe(viteConfig.replace("import react from '@vitejs/plugin-react'", "import solid from '@solidjs/vite-plugin'").replace("react()", "solid()"));
+  });
+
+  it("names the install command for the project's package manager, without running it", () => {
+    expect(run.output.plan.install).toBe("pnpm install");
+    expect(fs.existsSync(path.join(app, "node_modules"))).toBe(false);
+  });
+});
+
+describe.skipIf(!bin)("react-to-solid workflow on one app of a monorepo", { tags: ["slow"] }, () => {
+  let repo;
+  let run;
+  const rootPackage = `{\n  "name": "repo",\n  "private": true,\n  "workspaces": ["apps/*"],\n  "devDependencies": {\n    "@types/react": "^19.0.0",\n    "typescript": "5.9.3"\n  }\n}\n`;
+  const baseTsconfig = `{\n  "compilerOptions": {\n    "jsx": "react-jsx",\n    "strict": true\n  }\n}\n`;
+  const otherPackage = `{\n  "name": "other",\n  "dependencies": {\n    "react": "19.2.0"\n  }\n}\n`;
+  beforeAll(() => {
+    repo = fs.mkdtempSync(path.join(os.tmpdir(), "r2s-mono-"));
+    fs.writeFileSync(path.join(repo, "package.json"), rootPackage);
+    fs.writeFileSync(path.join(repo, "tsconfig.base.json"), baseTsconfig);
+    fs.mkdirSync(path.join(repo, "apps/web"), { recursive: true });
+    fs.cpSync(path.join(fixture, "src"), path.join(repo, "apps/web/src"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "apps/web/package.json"), `{\n  "name": "web",\n  "dependencies": {\n    "react": "19.2.0",\n    "react-dom": "19.2.0"\n  },\n  "devDependencies": {\n    "@vitejs/plugin-react": "^5.0.0",\n    "vite": "^7.1.0"\n  }\n}\n`);
+    fs.writeFileSync(path.join(repo, "apps/web/tsconfig.json"), `{\n  "extends": "../../tsconfig.base.json",\n  "include": ["src"]\n}\n`);
+    fs.writeFileSync(path.join(repo, "apps/web/vite.config.ts"), viteConfig);
+    fs.mkdirSync(path.join(repo, "apps/other"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "apps/other/package.json"), otherPackage);
+    const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+    git("init", "-q");
+    git("add", "-A");
+    git("-c", "user.email=spec@example.com", "-c", "user.name=spec", "commit", "-qm", "fixture");
+    run = migrate(repo, ["apply=true", "include=apps/web/src"]);
+  }, 120_000);
+
+  it("moves the package that owns the converted directory, bumping Vite for Solid's plugin", () => {
+    expect(read(repo, "apps/web/package.json")).toBe(`{\n  "name": "web",\n  "dependencies": {\n    "@solidjs/web": "^2.0.3",\n    "solid-js": "^2.0.3"\n  },\n  "devDependencies": {\n    "@solidjs/vite-plugin": "^3.0.1",\n    "vite": "^8.3.8"\n  }\n}\n`);
+    expect(read(repo, "apps/web/vite.config.ts")).toContain("plugins: [solid()]");
+  });
+
+  it("leaves the workspace's shared files and the other apps alone, reporting what the shared ones need", () => {
+    expect(read(repo, "package.json")).toBe(rootPackage);
+    expect(read(repo, "tsconfig.base.json")).toBe(baseTsconfig);
+    expect(read(repo, "apps/other/package.json")).toBe(otherPackage);
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "tsconfig.base.json", kind: "shared config", detail: `shared with the workspace, so not changed: jsx "react-jsx" -> "preserve"` }));
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "package.json", kind: "shared config", detail: "shared with the workspace, so not changed: removed @types/react" }));
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "apps/web", kind: "build config", detail: expect.stringContaining("no tsconfig on the way to apps/web/src sets jsx") }));
+  });
+});
+
+describe.skipIf(!bin)("react-to-solid workflow on an app with React libraries and a class component", { tags: ["slow"] }, () => {
+  let run;
+  beforeAll(() => {
+    const app = givenApp((dir) => {
+      const pkg = JSON.parse(read(dir, "package.json"));
+      Object.assign(pkg.dependencies, { "lucide-react": "1.0.0", zustand: "5.0.0", "@dnd-kit/core": "6.0.0", "react-hotkeys-hook": "5.0.0", lodash: "4.0.0" });
+      fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify(pkg, null, 2));
+      fs.writeFileSync(path.join(dir, "src/components/Boundary.tsx"), `import { Component, type ReactNode } from "react";\n\nexport class Boundary extends Component<{ children: ReactNode }, { failed: boolean }> {\n  state = { failed: false };\n  static getDerivedStateFromError() {\n    return { failed: true };\n  }\n  render() {\n    return this.state.failed ? <p>Failed</p> : this.props.children;\n  }\n}\n`);
+    });
+    run = migrate(app, []);
+  }, 120_000);
+
+  it("maps React libraries to their Solid 2 ports", () => {
+    expect(run.output.plan.ported).toContain("lucide-react -> @lucide/solid@1.76.0");
+  });
+
+  it("lists libraries without a Solid 2 port, with what to do when the table knows", () => {
+    expect(run.output.plan.noPort).toEqual([
+      "@dnd-kit/core: no verified Solid 2 port",
+      "react-hotkeys-hook",
+      expect.stringMatching(/^zustand: the React hook \(create\) has no Solid 2 port/),
+    ]);
+  });
+
+  it("flags a class component, which the React Compiler pass leaves alone", () => {
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "src/components/Boundary.tsx", kind: "class component", detail: expect.stringContaining("<Errored") }));
+    expect(run.output.failures).toEqual([]);
   });
 });
 

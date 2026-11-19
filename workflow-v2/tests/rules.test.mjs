@@ -301,3 +301,27 @@ it("R10 doesn't flag a React event type that becomes the DOM's once its import i
   const details = flags.filter((f) => f.kind === "React API").map((f) => f.detail);
   expect(details).toEqual([expect.stringContaining("ReactMouseEvent")]);
 });
+
+it("R39 notes and flags an error boundary class as Solid 2's <Errored>", () => {
+  const { code, flags } = run(`import { Component, type ErrorInfo, type ReactNode } from "react";\n\nexport class Boundary extends Component<{ children: ReactNode }, { error: Error | null }> {\n  state = { error: null };\n  static getDerivedStateFromError(error: Error) { return { error }; }\n  componentDidCatch(error: Error, info: ErrorInfo) { console.error(error, info); }\n  render() { return this.state.error ? <p>Failed</p> : this.props.children; }\n}\n`);
+  expect(code).toMatch(/^\/\/ solid: class component: Boundary is an error boundary .*<Errored fallback=\{\(err, reset\) => \.\.\.\}>.*\nexport class Boundary extends Component</m);
+  expect(flags).toContainEqual({ kind: "class component", line: 4, detail: expect.stringContaining("<Errored") });
+});
+
+it("R39 maps a class component's lifecycle methods in its note, indented with the class", () => {
+  const { code, flags } = run(`import * as React from "react";\nexport function make() {\n  class Ticker extends React.PureComponent<{ n: number }> {\n    componentDidMount() { this.setState({ t: 1 }); }\n    componentDidUpdate() {}\n    componentWillUnmount() {}\n    render() { return <span>{this.props.n}</span>; }\n  }\n  return Ticker;\n}\n`);
+  expect(code).toContain(`  // solid: class component: Ticker is a class component and Solid has none: rewrite it as a function component (this.state/setState -> createSignal; componentDidMount -> onSettled; componentDidUpdate -> createEffect(compute, apply), split by what it compares; componentWillUnmount -> onCleanup)\n  class Ticker extends React.PureComponent`);
+  expect(flags.map((f) => f.kind)).toContain("class component");
+});
+
+it("R39 doesn't import Solid's Component type or the APIs its note names", () => {
+  const { code, flags } = run(`import { Component } from "react";\nexport class Plain extends Component<{ a: string }> {\n  componentDidMount() {}\n  render() { return <b>{this.props.a}</b>; }\n}\n`);
+  expect(code).not.toContain(`from "solid-js"`);
+  expect(flags).toContainEqual(expect.objectContaining({ kind: "React API", detail: expect.stringContaining("Component was imported from react") }));
+});
+
+it("R39 leaves classes that don't extend React's Component alone", () => {
+  const { code, flags } = run(`import { Component } from "./mine";\nclass A extends Component<{}> {}\nclass B extends Error {}\n`);
+  expect(code).not.toContain("// solid:");
+  expect(flags).toEqual([]);
+});
