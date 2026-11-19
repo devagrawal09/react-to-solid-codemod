@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 
-// Needs a codemod CLI built from the code-first engine (codemod/codemod#2485).
+// Needs a codemod CLI with the code-first engine: codemod@2.0.0-alpha.4 or newer.
 const bin = process.env.CODEMOD_BIN;
 const workflow = path.resolve(import.meta.dirname, "../src/workflow.ts");
 const fixture = path.resolve(import.meta.dirname, "fixtures/todo-app");
@@ -20,9 +20,9 @@ function givenApp(edit = () => {}) {
   return dir;
 }
 
-function migrate(dir) {
+function migrate(dir, params = ["apply=true"]) {
   const store = fs.mkdtempSync(path.join(os.tmpdir(), "r2s-runs-"));
-  const cli = spawnSync(bin, ["workflow", "run", "-w", workflow, "-t", dir, "--no-interactive", "--approve", "--disable-analytics", "--no-color"], {
+  const cli = spawnSync(bin, ["workflow", "run", "-w", workflow, "-t", dir, ...params.flatMap((p) => ["--param", p]), "--no-interactive", "--approve", "--disable-analytics", "--no-color"], {
     env: { ...process.env, CODEMOD_RUN_STORE_DIR: store },
     encoding: "utf8",
   });
@@ -61,7 +61,18 @@ describe.skipIf(!bin)("react-to-solid workflow on a small todo app", { tags: ["s
   });
 
   it("reports eslint-plugin-solid's Solid 2 warnings by rule", () => {
-    expect(run.output.lint.byRule).toEqual({ "solid/reactivity": 2 });
+    expect(run.output.lint.byRule).toEqual({ "solid/reactivity": 1 });
+  });
+});
+
+describe.skipIf(!bin)("react-to-solid workflow without apply=true", { tags: ["slow"] }, () => {
+  it("previews the conversion and writes nothing", () => {
+    const app = givenApp();
+    const run = migrate(app, []);
+    expect(run.output.preview).toBe(true);
+    expect(run.output.wouldChange).toContain("src/components/TodoList.tsx");
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "src/components/Clock.tsx", line: 8, kind: "effect" }));
+    expect(execFileSync("git", ["status", "--porcelain"], { cwd: app, encoding: "utf8" })).toBe("");
   });
 });
 

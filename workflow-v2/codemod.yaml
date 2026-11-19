@@ -2,18 +2,20 @@ schema_version: "1.0"
 
 name: "react-to-solid"
 version: "0.1.0"
-description: "Migrate a React app to Solid 2: the React Compiler decides what becomes a signal, memo or accessor, rules rewrite the rest, and eslint-plugin-solid checks the result"
+description: "Preview: migrate a React app to Solid 2. The React Compiler decides what becomes a signal, memo or accessor, rules rewrite the rest, and eslint-plugin-solid checks the result. Previews by default; pass --param apply=true to rewrite files."
 license: "MIT"
+author: "devagrawal09"
+category: "migration"
 
 targets:
   # Keep this aligned with the files matched in src/workflow.ts.
   languages: ["tsx"]
 
-keywords: ["react", "solid", "migration"]
+keywords: ["react", "solid", "solidjs", "solid-2", "migration", "react-compiler", "preview"]
 
 registry:
   access: "public"
-  visibility: "private"
+  visibility: "public"
 
 capabilities: []
 

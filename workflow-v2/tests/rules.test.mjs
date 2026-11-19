@@ -212,3 +212,36 @@ it("adds the Solid imports the rewrites use", () => {
   const code = `import { useState } from "react";\nfunction C(props: { a?: string }) { const [v] = useState(() => 1); if (!props.a) return null; return <b>{v}</b>; }`;
   expect(convert(code)).toContain(`import { Show, untrack } from "solid-js";`);
 });
+
+it("R10 replaces React imports written without semicolons", () => {
+  const out = convert(`import { useState } from 'react'\nimport './App.css'\n\nfunction App() {\n  const [count, setCount] = useState(0)\n  return <b>{count}</b>\n}\n`);
+  expect(out).not.toContain("from 'react'");
+  expect(out).toContain("import './App.css'");
+});
+
+it("R10 doesn't count a name in another module's semicolon-less import as a use", () => {
+  const out = convert(`import { merge } from 'lodash'\nimport { useState } from 'react'\nexport const x = 1\n`);
+  expect(out).not.toContain(`from "solid-js"`);
+});
+
+it("R35 turns createRoot(el).render(<StrictMode><App /></StrictMode>) into render(() => <App />, el)", () => {
+  const out = convert(`import { StrictMode } from 'react'\nimport { createRoot } from 'react-dom/client'\nimport App from './App.tsx'\n\ncreateRoot(document.getElementById('root')!).render(\n  <StrictMode>\n    <App />\n  </StrictMode>,\n)\n`);
+  expect(out).toContain(`import { render } from "@solidjs/web";`);
+  expect(out).toContain(`render(() => <App />, document.getElementById('root')!)`);
+  expect(out).not.toMatch(/react-dom|StrictMode|from 'react'/);
+});
+
+it("R35 leaves createRoot alone when it isn't followed by render", () => {
+  const out = convert(`import { createRoot } from 'react-dom/client'\nconst root = createRoot(el)\nroot.render(<App />)\n`);
+  expect(out).toContain("createRoot(el)");
+  expect(out).toContain("from 'react-dom/client'");
+});
+
+it("R36 makes a provider's inline value read reactive state through getters", () => {
+  const out = flat(`import { createContext, useState } from "react";\nconst ThemeContext = createContext({ dark: false, toggle: () => {} });\nexport function ThemeProvider({ children }) {\n  const [dark, setDark] = useState(false);\n  const toggle = () => setDark(!dark);\n  return <ThemeContext.Provider value={{ dark, toggle, mode: "x" }}>{children}</ThemeContext.Provider>;\n}\n`);
+  expect(out).toContain(`<ThemeContext value={{ get dark() { return dark(); }, toggle, mode: "x" }}>`);
+});
+
+it("R36 leaves value props on other components alone", () => {
+  expect(flat(`const el = <Select value={{ id: pick() }} />;`)).toContain(`value={{ id: pick() }}`);
+});

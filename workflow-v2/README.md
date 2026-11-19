@@ -1,10 +1,38 @@
-# React to Solid 2, as a code-first workflow
+# React to Solid 2
 
-**Status: prototype.** The [react-to-solid-codemod](https://github.com/devagrawal09/react-to-solid-codemod) passes, run as steps of `src/workflow.ts` on the code-first engine (codemod/codemod#2485, built at 9c91ebf, published as `codemod@2.0.0-alpha.3`). Nothing in the engine was changed for it. The package uses the layout `codemod init` scaffolds at that head: `codemod.yaml` at the root, the workflow and what it imports under `src/`, specs under `tests/`.
+**Status: public preview.** Converts React components to Solid 2 (`solid-js@2.0.1`). The React Compiler decides what each component-body value becomes (a signal, a memo, an accessor or a plain value), deterministic rules rewrite props, hooks, JSX and imports, and eslint-plugin-solid's Solid 2 config checks the result. It converts most of a component; what it can't convert safely, it flags with a file and line for you or an agent to finish. Expect to finish flagged spots and move your dependencies by hand.
+
+## Run it
+
+This is a Codemod workflow v2 package, which is in alpha: pin `codemod@2.0.0-alpha.4`, because `codemod@latest` is still the 1.x CLI and can't run it. Run it from the root of a React app in a clean git checkout.
 
 ```sh
-codemod workflow run -w src/workflow.ts -t <app> [--param include=src] [--param agent=true]
+# Preview (default): converts every file in memory and reports what would change,
+# with the flagged spots. Nothing is written.
+npx codemod@2.0.0-alpha.4 run react-to-solid --target .
+
+# Apply: rewrites the files, then lints them with eslint-plugin-solid.
+npx codemod@2.0.0-alpha.4 run react-to-solid --target . --param apply=true
 ```
+
+| Param | Default | What it does |
+|---|---|---|
+| `include` | `src` | Directory whose `.ts`/`.tsx` files are converted (tests and `.d.ts` files are skipped) |
+| `apply` | `false` | `true` writes the converted files and lints them; otherwise the run is a preview |
+| `agent` | `false` | `true` (with `apply=true`) asks for approval, then hands the flagged spots to a coding agent. Untested |
+
+The run's result holds the summary: the compiler's decisions, the rules applied, every flag with its file and line, and the lint counts.
+
+### After it runs
+
+The workflow only rewrites source. To finish the migration:
+
+1. Finish each flagged spot. The most common are effects (`useEffect` becomes `createEffect(compute, apply)` or `onSettled`), custom hook results, and values read in a component body, which runs once in Solid.
+2. Replace `react` and `react-dom` with `solid-js@^2.0.1` and `@solidjs/web@^2.0.1`, and `@vitejs/plugin-react` with `@solidjs/vite-plugin` (plus `@solidjs/babel-plugin` and `@babel/core`). The plan in the result lists which React libraries have a Solid port.
+3. In `tsconfig`, set `"jsx": "preserve"` and `"jsxImportSource": "@solidjs/web"`.
+4. Type-check, build and run the app.
+
+Verified on create-vite's React TypeScript template and on the todo app in `tests/fixtures/todo-app`, moved into that template: after the steps above, both type-check, build with Vite, and behave the same in the browser (jsdom). It has not yet been verified on a large production app; a run on t3code parsed every file but wasn't built.
 
 ## Steps
 
@@ -12,14 +40,13 @@ codemod workflow run -w src/workflow.ts -t <app> [--param include=src] [--param 
 |---|---|---|
 | Read package.json files | `forEachFile` | Collects dependencies from every package.json |
 | Check React libraries for Solid ports | function | Fails if nothing depends on `react`; lists React libraries with and without a Solid port (a table for now, the dependency step later) |
-| branch / commit | `branch`, `commit` | Only with `--managed-git` |
+| branch / commit | `branch`, `commit` | Only with `--param apply=true` and `--managed-git` |
 | Run the React Compiler on each file | `forEachFile` | `babel-plugin-react-compiler@1.0.0` decides what each component-body value becomes; each file's result is a step output |
 | Resolve hook contracts across files | function | The whole-program hook-contract pass, over every file's result |
-| Rewrite values as signals, memos and accessors | `forEachFile` | Writes each decision, with a `// solid:` note |
-| Apply the React to Solid rules | `forEachFile` | The rule pass (`src/rules/mechanical.mjs`, R1-R34); applied rules and flags are step outputs |
+| Convert each file to Solid 2 (preview: Preview the conversion of each file) | `forEachFile` | Writes each decision with a `// solid:` note, then runs the rule pass (`src/rules/mechanical.mjs`, R1-R36) on that text; applied rules and flags are step outputs. A preview writes nothing |
 | Summarize the conversion | function | Decision counts, applied rules, flags |
-| Install the Solid 2 lint, Lint | `shell` | `eslint-plugin-solid` 0.19.0, `configs/v2`, on the converted files |
-| Finish flagged spots | `approval`, `agent` | Only with `--param agent=true` |
+| Install the Solid 2 lint, Lint | `shell` | Only with `--param apply=true`: `eslint-plugin-solid` 0.19.0, `configs/v2`, on the converted files; the summary is the last line of the lint step's output |
+| Finish flagged spots | `approval`, `agent` | Only with `--param apply=true --param agent=true` |
 
 The run's result (in `run.json` of the run store) holds the summary, the flags and the lint counts.
 
@@ -42,6 +69,6 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 ## Tests
 
 ```sh
-pnpm test                                        # reactivity (29) and rule (49) specs
-CODEMOD_BIN=<codemod built from #2485> pnpm test # plus the workflow specs on tests/fixtures/todo-app (7, tagged slow)
+pnpm test                                        # reactivity (30) and rule (55) specs
+CODEMOD_BIN=<path to codemod 2.0.0-alpha.4> pnpm test # plus the workflow specs on tests/fixtures/todo-app (8, tagged slow)
 ```

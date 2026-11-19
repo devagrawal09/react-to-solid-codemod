@@ -178855,10 +178855,10 @@ p.stdout ??= { fd: 1, isTTY: false, write() {
 p.env ??= {};
 globalThis.global ??= globalThis;
 
-// reactivity/extract.mjs
+// src/reactivity/extract.mjs
 var import_core3 = __toESM(require_lib26(), 1);
 
-// reactivity/try-prestep.mjs
+// src/reactivity/try-prestep.mjs
 var import_core = __toESM(require_lib26(), 1);
 var VALUE_BLOCK = /^(ConditionalExpression|LogicalExpression|OptionalMemberExpression|OptionalCallExpression)$/;
 function hasValueBlock(tryPath) {
@@ -178917,7 +178917,7 @@ function tryPrestep({ onRewrite = () => {
   };
 }
 
-// reactivity/condition-prestep.mjs
+// src/reactivity/condition-prestep.mjs
 var import_core2 = __toESM(require_lib26(), 1);
 var VALUE_BLOCK2 = /^(ConditionalExpression|LogicalExpression|OptionalMemberExpression|OptionalCallExpression)$/;
 var LOOP = /^(For|ForIn|ForOf|While|DoWhile)Statement$/;
@@ -178999,7 +178999,7 @@ function conditionPrestep({ inFunction = () => true, onLift = () => {
   };
 }
 
-// reactivity/extract.mjs
+// src/reactivity/extract.mjs
 var import_babel_plugin_react_compiler = __toESM(require_dist3(), 1);
 var EFFECT_HOOKS = /^use(Layout|Insertion)?Effect$/;
 var HOOK_NAME = /^use[A-Z0-9]/;
@@ -179666,7 +179666,7 @@ function extract(code, filename, { prestep = true } = {}) {
   return { file: filename, parseError, imports, functions, ms: Math.round(performance.now() - started) };
 }
 
-// reactivity/decide.mjs
+// src/reactivity/decide.mjs
 var CALL_TIME = /* @__PURE__ */ new Set(["handler", "effect", "effect-deps", "callback"]);
 var EFFECT_HOOKS2 = /^use(Layout|Insertion)?Effect$/;
 function functionCallSiteKinds(use) {
@@ -179743,6 +179743,7 @@ function decideValue(value2, fn, byName) {
   }
   if (kinds.length && kinds.every((k) => CALL_TIME.has(k))) return out("call-time", `only read in ${[...new Set(kinds)].join(", ")}`);
   if (kinds.length && kinds.every((k) => k === "provider-value") && value2.initKind === "object") return out("getter-object", "context provider value");
+  if (fn.kind === "hook" && value2.name === "(return)" && value2.initKind === "object") return out("getter-object", "a hook's returned object: callers keep `r.k`");
   if (value2.compiler.scope === "ast") return out("memo", "allocates");
   if (value2.compiler.scope != null) return out("memo", `React scope @${value2.compiler.scope}`);
   return out("accessor", "reactive, no own scope");
@@ -179825,7 +179826,7 @@ function decide(extracted) {
   return extracted;
 }
 
-// reactivity/contracts.mjs
+// src/reactivity/contracts.mjs
 var import_node_path = __toESM(require_path_browserify(), 1);
 var S = { kind: "static" };
 var F = { kind: "static", reactiveCall: true };
@@ -179958,7 +179959,7 @@ function applyContracts(results) {
   for (const r of results) for (const fn of r.functions) settle(r.file, fn, /* @__PURE__ */ new Set());
 }
 
-// reactivity/rewrite.mjs
+// src/reactivity/rewrite.mjs
 var import_parser = __toESM(require_lib4(), 1);
 var WRAPS = /* @__PURE__ */ new Set(["memo", "accessor", "call-time", "jsx-fn", "inline", "getter-object"]);
 function getterObject(text, render, offset) {
@@ -180070,7 +180071,7 @@ ${out}`;
   return { code: out, rewrittenFunctions: safeFunctions.map((f) => f.name) };
 }
 
-// reactivity/report.mjs
+// src/reactivity/report.mjs
 function report(extracted, rewritten) {
   const lines = [`# ${extracted.file}`, ""];
   if (extracted.parseError) lines.push(`Parse error: ${extracted.parseError}`, "");

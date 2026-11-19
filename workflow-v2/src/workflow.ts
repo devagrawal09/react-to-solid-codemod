@@ -1,6 +1,9 @@
 // React -> Solid 2 migration on the code-first engine.
 //
-//   codemod workflow run -w src/workflow.ts -t <app> [--param include=src] [--param agent=true]
+//   codemod workflow run -w src/workflow.ts -t <app> [--param include=src] [--param apply=true] [--param agent=true]
+//
+// Without apply=true the run is a preview: it converts every file in memory and reports
+// what it would change, flags included, and writes nothing.
 //
 // 1. Guard: the target is a React app, and which of its libraries have a Solid port.
 // 2. Reactivity pass: the React Compiler (run inside jssg, no Node) decides what each
@@ -8,7 +11,7 @@
 // 3. Rule pass: mechanical rewrites (props, hooks, JSX, imports), with flags for the rest.
 // 4. Verify: eslint-plugin-solid's Solid 2 config on the migrated files.
 // 5. Optionally hand the flagged spots to an agent, after an approval.
-import { step, forEachFile, shell, agent, approval, branch, commit, getState } from "codemod/workflow";
+import { step, forEachFile, shell, agent, approval, branch, commit } from "codemod/workflow";
 import { parse } from "codemod/ast-grep";
 import { applyContracts, decide, extract, rewrite } from "./lib/reactivity.mjs";
 import { transform } from "./rules/mechanical.mjs";
@@ -26,7 +29,9 @@ const PORTS: Record<string, string> = {
 };
 const NOT_SHIPPED = /^(@types\/|babel-plugin-react-compiler$|eslint-plugin-react|@vitejs\/plugin-react|typescript$)/;
 
-export default async function main({ params }: { params: { include?: string; agent?: string } }) {
+export default async function main({ params }: { params: { include?: string; apply?: boolean | string; agent?: boolean | string } }) {
+  // --param values arrive as JSON when they parse as JSON, so true is a boolean.
+  const apply = params.apply === true || params.apply === "true";
   const root = (params.include ?? "src").replace(/\/$/, "");
   const sources = { include: [`${root}/**/*.tsx`, `${root}/**/*.ts`], exclude: ["**/*.test.*", "**/*.spec.*", "**/*.d.ts"] };
 
@@ -47,7 +52,7 @@ export default async function main({ params }: { params: { include?: string; age
     };
   });
 
-  await step(branch("react-to-solid-2"));
+  if (apply) await step(branch("react-to-solid-2"));
   // Each step returns its per-file results; nothing goes through state.
   const analyzed = await step("Run the React Compiler on each file", forEachFile(sources, (file) =>
     // contracts.mjs finds `~/` imports by an absolute-looking path. The round trip drops the
@@ -61,36 +66,50 @@ export default async function main({ params }: { params: { include?: string; age
     applyContracts(results);
     return Object.fromEntries(files.map((file, i) => [file, results[i]]));
   });
-  const reactive = await step("Rewrite values as signals, memos and accessors", forEachFile(sources, (file) => {
+  // One pass per file: the compiler's decisions, then the rules on that text. A preview
+  // stops before writing.
+  const converted = await step(apply ? "Convert each file to Solid 2" : "Preview the conversion of each file", forEachFile(sources, (file) => {
     const result = decided[file.path];
-    if (!result || result.parseError) return;
-    const out = rewrite(file.text, result).code;
-    if (out !== file.text) file.write(out);
-  }));
-  const rules = await step("Apply the React to Solid rules", forEachFile(sources, (file) => {
-    // The rewrite step adds its own createMemo import; the rule pass writes the full solid-js import.
-    const code = file.text.replace(/^import \{ createMemo \} from "solid-js";\n/m, "");
+    let code = file.text;
+    if (result && !result.parseError) {
+      // The rewrite adds its own createMemo import; the rule pass writes the full solid-js import.
+      code = rewrite(code, result).code.replace(/^import \{ createMemo \} from "solid-js";\n/m, "");
+    }
     const { code: out, applied, flags } = transform(code, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" } });
-    if (out !== file.text) file.write(out);
-    return { file: file.path, applied, flags };
+    const changed = out !== file.text;
+    if (apply && changed) file.write(out);
+    return { file: file.path, changed, applied, flags };
   }));
+  const changed = converted.outputs.filter((o) => o.changed).map((o) => o.file);
+  const report = await step("Summarize the conversion", () =>
+    summarize(files, decided, converted.outputs));
+  const result = { plan, analyzed: files.length, failures: [...analyzed.failures, ...converted.failures], ...report };
+
+  if (!apply) {
+    console.log(`Preview: ${changed.length} of ${files.length} files would change, with ${report.flags.length} flagged spots to finish by hand. Nothing was written; run again with --param apply=true to convert them.`);
+    return { ...result, preview: true, wouldChange: changed };
+  }
   await step(commit("Convert React components to Solid 2", { add: files }));
 
-  const report = await step("Summarize the conversion", () =>
-    summarize(files, decided, rules.outputs));
-
   const lintDir = `${import.meta.dirname}/lint`;
-  await step("Install the Solid 2 lint", shell`cd ${lintDir} && { [ -x node_modules/.bin/eslint ] || npm ci --silent --no-audit --no-fund; }`);
-  // Paths are relative to the target, so the command runs there (cwd "."), not in the CLI's directory.
-  await step("Lint with eslint-plugin-solid (Solid 2 config)", shell({ cwd: "." })`${lintDir}/node_modules/.bin/eslint -c ${lintDir}/eslint.config.mjs -f json ${files} | node ${lintDir}/summarize.mjs`);
-  const lint = getState("r2s.lint") ?? {};
+  await step("Install the Solid 2 lint", shell`cd ${lintDir} && { [ -x node_modules/.bin/eslint ] || npm ci --silent --no-audit --no-fund >&2; }`);
+  // Paths are relative to the target, so the command runs there (cwd "."), not in the CLI's
+  // directory. summarize.mjs prints its summary as the last line of stdout.
+  const linted = await step("Lint with eslint-plugin-solid (Solid 2 config)", shell({ cwd: "." })`${lintDir}/node_modules/.bin/eslint -c ${lintDir}/eslint.config.mjs -f json ${files} | node ${lintDir}/summarize.mjs`);
+  let lint = {};
+  try {
+    lint = JSON.parse(linted.stdout?.trimEnd().split("\n").pop() ?? "");
+  } catch {
+    // A dry run skips shell steps; only the last 1 MiB of output comes back.
+  }
 
-  if (params.agent === "true" && report.flags.length) {
+  if ((params.agent === true || params.agent === "true") && report.flags.length) {
     await step(approval(`Hand ${report.flags.length} flagged spots to an agent?`));
     await step("Finish flagged spots", agent(agentPrompt(report.flags), { maxSteps: 40 }));
   }
-  return { plan, analyzed: files.length, failures: analyzed.failures, rewritten: reactive.changes, rules: rules.changes, ...report, lint };
+  return { ...result, changed, lint };
 }
+
 
 function summarize(files: string[], decided: Record<string, any>, ruleResults: { file: string; applied: Record<string, number>; flags: any[] }[]) {
   const decisions: Record<string, number> = {};

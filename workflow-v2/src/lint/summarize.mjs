@@ -1,4 +1,5 @@
-// Reads ESLint's JSON report on stdin and writes a one-line summary to workflow state.
+// Reads ESLint's JSON report on stdin and prints a one-line JSON summary as the last line
+// of stdout, which the workflow parses. The human summary goes to stderr.
 import fs from "node:fs";
 
 const results = JSON.parse(fs.readFileSync(0, "utf8"));
@@ -15,5 +16,5 @@ for (const r of results) {
   }
 }
 const summary = { files: results.length, problems: Object.values(byRule).reduce((a, b) => a + b, 0), parseErrors, byRule, byFile };
-fs.appendFileSync(process.env.STATE_OUTPUTS, `r2s.lint=${JSON.stringify(summary)}\n`);
-console.log(`${summary.problems} problems in ${summary.files} files`, JSON.stringify(byRule));
+console.error(`${summary.problems} problems in ${summary.files} files`, JSON.stringify(byRule));
+console.log(JSON.stringify(summary));

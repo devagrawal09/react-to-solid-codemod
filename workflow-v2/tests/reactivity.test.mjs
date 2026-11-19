@@ -127,6 +127,14 @@ describe("hook contracts across files", () => {
     expect(settle(`const { count } = useThing(items); return <p>{count}</p>;`)[0].decision).toBe("getter-read");
   });
 
+  it("a hook that returns an object literal hands back the getters its callers read", () => {
+    const source = `export function useFilter(initial) {\n  const [filter, setFilter] = useState(initial);\n  const label = filter === "all" ? "Everything" : "Some";\n  return { filter, setFilter, label };\n}\n`;
+    const results = [decide(extract(source, "/repo/apps/web/src/useFilter.ts"))];
+    applyContracts(results);
+    expect(results[0].functions[0].values.find((v) => v.name === "(return)").decision).toBe("getter-object");
+    expect(rewrite(source, results[0]).code).toContain("return { get filter() { return filter; }, get setFilter() { return setFilter; }, get label() { return label(); } };");
+  });
+
   it("an arrow hook that returns its body expression takes that expression's contract", () => {
     expect(settle(`const ctx = useCtx(); return <p>{ctx.open}</p>;`)[0].decision).toBe("getter-object");
   });

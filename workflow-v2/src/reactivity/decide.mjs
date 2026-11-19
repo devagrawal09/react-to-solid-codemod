@@ -102,6 +102,9 @@ function decideValue(value, fn, byName) {
   }
   if (kinds.length && kinds.every((k) => CALL_TIME.has(k))) return out("call-time", `only read in ${[...new Set(kinds)].join(", ")}`);
   if (kinds.length && kinds.every((k) => k === "provider-value") && value.initKind === "object") return out("getter-object", "context provider value");
+  // The contract pass gives callers of a hook that returns an object literal an object contract
+  // (they keep `r.k`), so the hook hands back getters rather than one memo of the whole object.
+  if (fn.kind === "hook" && value.name === "(return)" && value.initKind === "object") return out("getter-object", "a hook's returned object: callers keep `r.k`");
   if (value.compiler.scope === "ast") return out("memo", "allocates");
   if (value.compiler.scope != null) return out("memo", `React scope @${value.compiler.scope}`);
   return out("accessor", "reactive, no own scope");

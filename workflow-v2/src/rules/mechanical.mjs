@@ -364,7 +364,11 @@ export function transform(input, { parse, Lang }) {
     }),
   );
 
-  // R3 <Ctx.Provider> -> <Ctx>
+  // R3 <Ctx.Provider> -> <Ctx>. R36 needs to know which tags were providers.
+  const contexts = new Set([
+    ...[...src.matchAll(/<([A-Z][\w.]*)\.Provider\b/g)].map((m) => m[1]),
+    ...[...src.matchAll(/\b(?:const|let|var)\s+([A-Z]\w*)\s*=\s*(?:React\.)?createContext\b/g)].map((m) => m[1]),
+  ]);
   pass((root) =>
     root.findAll({ rule: { any: [{ kind: "jsx_opening_element" }, { kind: "jsx_closing_element" }], has: { field: "name", regex: "\\.Provider$" } } }).map((el) => {
       note("Ctx.Provider -> Ctx");
@@ -382,6 +386,26 @@ export function transform(input, { parse, Lang }) {
       return [call.replace(fn.text())];
     }),
   );
+
+  // R35 createRoot(el).render(<App />) from react-dom/client -> render(() => <App />, el) from
+  // @solidjs/web. A <StrictMode> wrapper is dropped: Solid has no counterpart.
+  const createRootImport = /^import\s+\{\s*createRoot\s*\}\s+from\s+["']react-dom\/client["'];?[ \t]*\n/m;
+  let renders = 0;
+  if (createRootImport.test(src)) {
+    renders = pass((root) =>
+      root.findAll({ rule: { kind: "call_expression", has: { field: "function", kind: "member_expression", has: { field: "object", kind: "call_expression", has: { field: "function", regex: "^createRoot$" } } } } }).flatMap((call) => {
+        const member = call.field("function");
+        if (member.field("property")?.text() !== "render") return [];
+        const [el] = kids(member.field("object").field("arguments"));
+        const [app] = kids(call.field("arguments"));
+        if (!el || !app) return [];
+        const strict = app.text().match(/^<(?:React\.)?StrictMode>\s*([\s\S]*?)\s*<\/(?:React\.)?StrictMode>$/);
+        note("createRoot().render -> render");
+        return [call.replace(`render(() => ${strict ? strict[1] : app.text()}, ${el.text()})`)];
+      }),
+    );
+    if (renders && !/\bcreateRoot\b/.test(src.replace(createRootImport, ""))) src = src.replace(createRootImport, "");
+  }
 
   // R20 use(Context) -> useContext(Context); flushSync(() => x) -> x; flush()
   pass((root) => [
@@ -979,6 +1003,27 @@ export function transform(input, { parse, Lang }) {
     }),
   );
 
+  // R36 a context provider's inline value object is read once in Solid: a property that reads
+  // reactive values (a call, or props) becomes a getter, so consumers see it change.
+  if (contexts.size) {
+    pass((root) =>
+      root.findAll({ rule: { kind: "jsx_attribute", inside: { any: [{ kind: "jsx_opening_element" }, { kind: "jsx_self_closing_element" }] } } }).flatMap((attr) => {
+        if (attrName(attr) !== "value" || !contexts.has(tagName(attr))) return [];
+        const object = attrValue(attr);
+        if (object?.kind() !== "object") return [];
+        return kids(object).flatMap((pair) => {
+          if (pair.kind() !== "pair") return [];
+          const key = pair.field("key");
+          const value = pair.field("value");
+          if (!key || !value || key.kind() === "computed_property_name" || ["arrow_function", "function_expression", "function"].includes(value.kind())) return [];
+          if (!/[\w)\]]\(|\bprops\./.test(value.text())) return [];
+          note("provider value -> getters");
+          return [rep(pair, `get ${key.text()}() { return ${value.text()}; }`)];
+        });
+      }),
+    );
+  }
+
   // R9 types and React namespace members; R18 the rest of React's type vocabulary
   const reactImports = new Set([...src.matchAll(/^import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+["']react["']/gm)].flatMap((m) => m[1].split(",").map((s) => s.replace(/^\s*type\s+/, "").trim().split(/\s+as\s+/).pop())));
   const isReactType = (name) => name.startsWith("React.") || reactImports.has(name);
@@ -1025,7 +1070,7 @@ export function transform(input, { parse, Lang }) {
     if (!/^use(Context|State|Memo|Callback|Effect|LayoutEffect|Ref)$/.test(c.field("function").text())) flag("custom hook call", c, `${c.field("function").text()}() returns values in React; decide value vs accessor`);
 
   // R10 imports
-  const code = src.replace(/^import[^;]+;$/gm, "");
+  const code = src.replace(/^import\b[^;]*?\bfrom\s*["'][^"'\n]*["'];?[ \t]*$|^import\s*["'][^"'\n]*["'];?[ \t]*$/gm, "");
   const used = (re) => re.test(code);
   const solidNames = [
     ...["createSignal", "createMemo", "createContext", "useContext", "createEffect", "onSettled", "merge", "omit", "For", "createUniqueId"].filter((n) => used(new RegExp(`\\b${n}\\b`))),
@@ -1035,9 +1080,9 @@ export function transform(input, { parse, Lang }) {
   const typeNames = ["JSX", "ComponentProps"].filter((n) => used(new RegExp(`\\b${n}\\b`)));
   const solidTypes = ["Component", "Setter"].filter((n) => used(new RegExp(`\\b${n}<`)) && !new RegExp(`\\b(const|function|class|type|interface)\\s+${n}\\b`).test(code));
   let removedReact = false;
-  src = src.replace(/^import\s+(type\s+)?(\*\s+as\s+React|React(,\s*\{[^}]*\})?|\{[^}]*\})\s+from\s+["']react["'];\n/gm, () => { removedReact = true; return ""; });
-  src = src.replace(/^import\s+\{\s*flushSync\s*\}\s+from\s+["']react-dom["'];\n/gm, "");
-  const header = [solidNames.length ? `import { ${solidNames.join(", ")} } from "solid-js";` : "", solidTypes.length ? `import type { ${solidTypes.join(", ")} } from "solid-js";` : "", typeNames.length ? `import type { ${typeNames.join(", ")} } from "@solidjs/web";` : ""].filter(Boolean).join("\n");
+  src = src.replace(/^import\s+(type\s+)?(\*\s+as\s+React|React(,\s*\{[^}]*\})?|\{[^}]*\})\s+from\s+["']react["'];?[ \t]*\n/gm, () => { removedReact = true; return ""; });
+  src = src.replace(/^import\s+\{\s*flushSync\s*\}\s+from\s+["']react-dom["'];?[ \t]*\n/gm, "");
+  const header = [solidNames.length ? `import { ${solidNames.join(", ")} } from "solid-js";` : "", solidTypes.length ? `import type { ${solidTypes.join(", ")} } from "solid-js";` : "", renders ? `import { render } from "@solidjs/web";` : "", typeNames.length ? `import type { ${typeNames.join(", ")} } from "@solidjs/web";` : ""].filter(Boolean).join("\n");
   if (header) src = src.replace(/^(["']use client["'];\n\n?)?/, (m) => `${m}${header}\n`);
   if (removedReact) note("react imports -> solid-js");
   src = src.replace(/^["']use client["'];\n\n?/m, () => { note("drop 'use client'"); return ""; });
