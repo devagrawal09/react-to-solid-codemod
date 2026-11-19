@@ -325,3 +325,37 @@ it("R39 leaves classes that don't extend React's Component alone", () => {
   expect(code).not.toContain("// solid:");
   expect(flags).toEqual([]);
 });
+
+it("an async component is flagged as a server component, and its props and body are left alone", () => {
+  const code = `export default async function Page({ searchParams }) {\n  const { q } = await searchParams;\n  if (!q) return null;\n  return <div className="results">{q}</div>;\n}\nconst Side = async ({ id }) => <aside>{id}</aside>;\n`;
+  const { code: out, flags } = run(code);
+  expect(out).toBe(code.replace(`className="results"`, `class="results"`));
+  expect(flags.filter((f) => f.kind === "server component")).toEqual([
+    { kind: "server component", line: 1, detail: expect.stringMatching(/^Page is async, a React Server Component, and a Solid component can't be async.*async createMemo/) },
+    { kind: "server component", line: 6, detail: expect.stringMatching(/^Side is async/) },
+  ]);
+});
+
+it("R40 flags each Next.js import once, naming what to use from Solid 2's router and web packages", () => {
+  const { code, flags } = run(`import type { Metadata } from "next";\nimport Link from "next/link";\nimport { useRouter, usePathname as path, notFound } from "next/navigation";\nimport Image from "next/image";\nimport dynamic from "next/dynamic";\nimport { cookies } from "next/headers";\nimport { GeistSans } from "geist/font/sans";\nexport const metadata: Metadata = {};\n`);
+  expect(code).toContain(`import Link from "next/link";`);
+  expect(flags.filter((f) => f.kind === "Next.js").map((f) => [f.line, f.detail])).toEqual([
+    [1, "Metadata from next: Metadata and generateMetadata -> useHead from @solidjs/web"],
+    [2, "Link from next/link: @solidjs/router has no link component: use <a href>, which the router intercepts"],
+    [3, "useRouter, usePathname as path, notFound from next/navigation: useRouter -> useNavigate() (router.push(p) -> navigate(p)); usePathname as path -> useLocation().pathname; notFound -> a catch-all *404 route, with httpStatus(404) from @solidjs/web (from @solidjs/router unless noted)"],
+    [4, `Image from next/image: use <img> with width, height and loading="lazy"`],
+    [5, "dynamic from next/dynamic: use lazy from solid-js, rendered under <Loading>"],
+    [6, `cookies from next/headers: server-only: read it in a server function ("use server") in start mode`],
+  ]);
+});
+
+it("removing a key that had its own line removes the line", () => {
+  const code = `function L(props) {\n  return (\n    <ul>\n      {props.rows.map((row) => (\n        <li\n          key={row.id}\n          class="row"\n        >\n          {row.name}\n        </li>\n      ))}\n    </ul>\n  );\n}\n`;
+  expect(convert(code)).toContain(`{(row) => (\n        <li\n          class="row"\n        >`);
+  expect(convert(`const el = <li\n  key="a"\n/>;`)).toBe(`const el = <li\n/>;`);
+});
+
+it("R24 gives each destructured result of the same hook its own object", () => {
+  const out = flat(`function C() { const { data: jobs } = useQuery(a); const { data: counts } = useQuery(b); return <p>{jobs}{counts}</p>; }`);
+  expect(out).toContain(`const query = useQuery(a); const query2 = useQuery(b); return <p>{query.data}{query2.data}</p>;`);
+});

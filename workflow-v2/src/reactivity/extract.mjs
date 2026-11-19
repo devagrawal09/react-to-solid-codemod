@@ -87,6 +87,25 @@ function nestedHookCall(init) {
   return found;
 }
 
+// An `await` or `yield` in a derivation, outside any nested function: a memo or accessor can't
+// wrap it, since their functions aren't async.
+function awaitIn(init) {
+  let found = false;
+  const visit = (n) => {
+    if (found || !n || typeof n !== "object") return;
+    if (/Function/.test(n.type ?? "")) return;
+    if (n.type === "AwaitExpression" || n.type === "YieldExpression") return void (found = true);
+    for (const k of Object.keys(n)) {
+      if (k === "loc") continue;
+      const v = n[k];
+      if (Array.isArray(v)) v.forEach(visit);
+      else if (v && typeof v.type === "string") visit(v);
+    }
+  };
+  if (init && !/Function/.test(init.type)) visit(init);
+  return found;
+}
+
 function boundIdentifiers(pattern, out = []) {
   if (!pattern) return out;
   switch (pattern.type) {
@@ -262,6 +281,7 @@ function analyzeFunction(fnPath, code) {
           declarationKind: st.kind,
           initKind: initKind(decl.init),
           nestedHook: initKind(decl.init) === "hook" ? null : nestedHookCall(decl.init),
+          awaits: awaitIn(decl.init),
           destructured: decl.id.type !== "Identifier",
           text: code.slice(decl.start, decl.end).split("\n")[0].slice(0, 120),
           range: { statement: [st.start, st.end], declarator: [decl.start, decl.end], init: decl.init ? [decl.init.start, decl.init.end] : null, id: [decl.id.start, decl.id.end] },
@@ -621,6 +641,9 @@ function compile(code, filename, { prestep, liftIn }) {
           Function(path) {
             const name = functionName(path);
             if (!name || !(/^[A-Z]/.test(name) || HOOK_NAME.test(name))) return;
+            // An async component is a React Server Component, and an async or generator hook isn't
+            // a hook: their bodies aren't rewritten (the rule pass flags them).
+            if (path.node.async || path.node.generator) return;
             astFunctions.set(posKey(path.node.loc), analyzeFunction(path, code));
           },
         });

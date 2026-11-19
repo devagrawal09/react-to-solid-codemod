@@ -179100,6 +179100,22 @@ ${printAliasingSignature(signature)}`
     visit(init, true);
     return found;
   }
+  function awaitIn(init) {
+    let found = false;
+    const visit = (n) => {
+      if (found || !n || typeof n !== "object") return;
+      if (/Function/.test(n.type ?? "")) return;
+      if (n.type === "AwaitExpression" || n.type === "YieldExpression") return void (found = true);
+      for (const k of Object.keys(n)) {
+        if (k === "loc") continue;
+        const v = n[k];
+        if (Array.isArray(v)) v.forEach(visit);
+        else if (v && typeof v.type === "string") visit(v);
+      }
+    };
+    if (init && !/Function/.test(init.type)) visit(init);
+    return found;
+  }
   function boundIdentifiers(pattern, out = []) {
     if (!pattern) return out;
     switch (pattern.type) {
@@ -179266,6 +179282,7 @@ ${printAliasingSignature(signature)}`
             declarationKind: st.kind,
             initKind: initKind(decl.init),
             nestedHook: initKind(decl.init) === "hook" ? null : nestedHookCall(decl.init),
+            awaits: awaitIn(decl.init),
             destructured: decl.id.type !== "Identifier",
             text: code.slice(decl.start, decl.end).split("\n")[0].slice(0, 120),
             range: { statement: [st.start, st.end], declarator: [decl.start, decl.end], init: decl.init ? [decl.init.start, decl.init.end] : null, id: [decl.id.start, decl.id.end] },
@@ -179615,6 +179632,7 @@ ${printAliasingSignature(signature)}`
             Function(path2) {
               const name = functionName(path2);
               if (!name || !(/^[A-Z]/.test(name) || HOOK_NAME.test(name))) return;
+              if (path2.node.async || path2.node.generator) return;
               astFunctions.set(posKey(path2.node.loc), analyzeFunction(path2, code));
             }
           });
@@ -179740,6 +179758,7 @@ ${printAliasingSignature(signature)}`
   }
   function decideValue(value2, fn, byName) {
     const out = (decision, why) => ({ decision, why });
+    if (value2.awaits) return out("flag", "awaits during render: a memo or accessor can't await; load it with an async createMemo or in the route");
     if (value2.initKind === "hook") return decideHookValue(value2, out);
     if (fn.compiler.status !== "compiled" && !value2.compiler?.fallback) return out("flag", `compiler ${fn.compiler.status}: ${fn.compiler.reason ?? "no reason given"}`);
     if (value2.reassigned) return out("flag", "reassigned after declaration");
@@ -179911,7 +179930,7 @@ ${printAliasingSignature(signature)}`
       if (imp) {
         const resolved = resolveImport(file, imp.source, files);
         if (resolved && imp.imported !== "default" && imp.imported !== "*") return { key: `${resolved}#${imp.imported}` };
-        if (BUILTIN[imp.imported]) return { builtin: imp.imported };
+        if (BUILTIN[imp.imported] && !/^next(\/|$)/.test(imp.source)) return { builtin: imp.imported };
         return { external: `${imp.source}:${imp.imported}` };
       }
       if (hooks.has(`${file}#${callee}`)) return { key: `${file}#${callee}` };
@@ -180083,6 +180102,7 @@ ${indent}}`;
 ${out.slice(lineStart)}`;
       } else out = out.slice(0, e.start) + e.text + out.slice(e.end);
     }
+    out = out.replace(/^([ \t]*\/\/ solid: .*\n)[ \t]+\n/gm, "$1");
     if (needsMemo) out = `import { createMemo } from "solid-js";
 ${out}`;
     return { code: out, rewrittenFunctions: safeFunctions.map((f) => f.name) };

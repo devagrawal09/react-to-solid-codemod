@@ -91,7 +91,8 @@ export function buildContracts(results) {
     if (imp) {
       const resolved = resolveImport(file, imp.source, files);
       if (resolved && imp.imported !== "default" && imp.imported !== "*") return { key: `${resolved}#${imp.imported}` };
-      if (BUILTIN[imp.imported]) return { builtin: imp.imported };
+      // Next.js's useRouter and useParams aren't the router hooks the table describes.
+      if (BUILTIN[imp.imported] && !/^next(\/|$)/.test(imp.source)) return { builtin: imp.imported };
       return { external: `${imp.source}:${imp.imported}` };
     }
     if (hooks.has(`${file}#${callee}`)) return { key: `${file}#${callee}` };

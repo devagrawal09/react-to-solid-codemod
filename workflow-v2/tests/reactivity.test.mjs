@@ -156,3 +156,43 @@ describe("hook contracts across files", () => {
     expect(settle(`const open = useStore(useShallow((s) => s.open)); return <p>{open}</p>;`)[0].decision).toBe("accessor");
   });
 });
+
+describe("async components", () => {
+  // Trimmed from a Next.js login page.
+  const page = `import { env } from "~/env";\n\nexport default async function LoginPage({ searchParams }) {\n  const resolvedParams = await searchParams;\n  const origins = [env.BENCHMARKS_URL, env.PHOENIX_URL].filter(Boolean);\n  return <LoginContent redirect={resolvedParams.redirect} origins={origins} />;\n}\n`;
+
+  it("an async component, a React Server Component, isn't analyzed, so the rewrite leaves it as it is", () => {
+    const result = run(page);
+    expect(result.functions).toEqual([]);
+    expect(rewrite(page, result).code).toBe(page);
+  });
+
+  it("an async arrow component and an async hook aren't analyzed either", () => {
+    expect(run(`const Page = async ({ id }) => { const data = await load(id); return <p>{data}</p>; };\nasync function useData() { return await load(); }`).functions).toEqual([]);
+  });
+
+  it("an await inside a callback doesn't count as awaiting during render", () => {
+    expect(valueIn(`function C({ id }) { const save = async () => { await send(id); }; return <button onClick={save} />; }`, "save")).toMatchObject({ awaits: false, decision: "function" });
+  });
+
+  it("a value that awaits during render is flagged instead of wrapped in a memo, which can't await", () => {
+    const extracted = extract(`function C({ p }) { const v = p.value; return <b>{v}</b>; }`, "Fixture.tsx");
+    extracted.functions[0].values[0].awaits = true;
+    expect(decide(extracted).functions[0].values[0]).toMatchObject({ decision: "flag", why: expect.stringContaining("awaits during render") });
+  });
+});
+
+it("Next.js's useRouter isn't the router hook the contract table describes", () => {
+  const contract = (source) => {
+    const results = [decide(extract(`import { useRouter } from "${source}";\nfunction C({ id }) { const router = useRouter(); return <p onClick={() => router.push(id)} />; }`, "/repo/apps/web/src/C.tsx"))];
+    applyContracts(results);
+    return results[0].functions[0].values.find((v) => v.name === "router").contract;
+  };
+  expect(contract("@tanstack/react-router")).toMatchObject({ kind: "static", builtin: true });
+  expect(contract("next/navigation")).toMatchObject({ kind: "opaque", builtin: false });
+});
+
+it("inlining JSX used once leaves no line of indentation behind", () => {
+  const code = `function C({ a }) {\n  const badge = <b>{a}</b>;\n\n  return <p>{badge}</p>;\n}\n`;
+  expect(rewrite(code, run(code)).code).toBe(`function C({ a }) {\n  // solid: badge: inline (one JSX use)\n\n  return <p>{(<b>{a}</b>)}</p>;\n}\n`);
+});

@@ -184,11 +184,19 @@ export function transform(input, { parse, Lang }) {
   };
   const readAs = (id, text) => rep(id, id.kind() === "shorthand_property_identifier" ? `${id.text()}: ${text}` : text);
 
-  // drop an attribute and the space before it
-  const dropAttr = (a) => ({ start: charAt(src, a.range().start.index - 1) === " " ? a.range().start.index - 1 : a.range().start.index, end: a.range().end.index, text: "" });
-  const componentFns = (root) =>
+  // drop an attribute and the space before it, or its whole line when it has one to itself
+  const dropAttr = (a) => {
+    const at = a.range().start.index;
+    let start = at;
+    while (charAt(src, start - 1) === " " || charAt(src, start - 1) === "\t") start--;
+    if (charAt(src, start - 1) === "\n") return { start: start - 1, end: a.range().end.index, text: "" };
+    return { start: charAt(src, at - 1) === " " ? at - 1 : at, end: a.range().end.index, text: "" };
+  };
+  // Async components are React Server Components: no component rule touches them (flagged below).
+  const componentFns = (root, async = false) =>
     root.findAll({
       rule: {
+        ...(async ? { regex: "^async\\b" } : { not: { regex: "^async\\b" } }),
         any: [
           { kind: "function_declaration", has: { field: "name", regex: "^[A-Z]" } },
           { kind: "function_expression", has: { field: "name", regex: "^[A-Z]" } },
@@ -198,9 +206,10 @@ export function transform(input, { parse, Lang }) {
         ],
       },
     });
-  const freeName = (base) => {
+  // `taken`: names a pass has already chosen, which aren't in src until the pass ends
+  const freeName = (base, taken = []) => {
     let n = base;
-    for (let i = 2; new RegExp(`\\b${n}\\b`).test(src); i++) n = `${base}${i}`;
+    for (let i = 2; new RegExp(`\\b${n}\\b`).test(src) || taken.includes(n); i++) n = `${base}${i}`;
     return n;
   };
 
@@ -677,6 +686,7 @@ export function transform(input, { parse, Lang }) {
   // R24 a destructured hook result reads every field once; keep the object and read fields lazily.
   pass((root) => {
     const edits = [];
+    const named = [];
     for (const decl of root.findAll({ rule: { kind: "variable_declarator", all: [{ has: { field: "name", kind: "object_pattern" } }, { has: { field: "value", kind: "call_expression", has: { field: "function", regex: "^use[A-Z]\\w*$" } } }] } })) {
       const call = decl.field("value");
       const callee = call.field("function").text();
@@ -693,7 +703,8 @@ export function transform(input, { parse, Lang }) {
       }
       if (!ok) { flag("destructured hook result", decl, `${callee}() result has defaults or rest; keep the object and read fields lazily`); continue; }
       const ctxArg = callee === "useContext" ? kids(call.field("arguments"))[0]?.text() : null;
-      const obj = freeName(lcfirst(ctxArg ? ctxArg.replace(/Context$/, "") : callee.replace(/^use/, "")) || "value");
+      const obj = freeName(lcfirst(ctxArg ? ctxArg.replace(/Context$/, "") : callee.replace(/^use/, "")) || "value", named);
+      named.push(obj);
       edits.push(rep(decl.field("name"), obj));
       for (const [local, k] of fields) for (const id of readsOf(scope, local, { exclude: [statement] })) edits.push(readAs(id, `${obj}.${k}`));
       note("destructured hook result -> object reads");
@@ -1152,6 +1163,28 @@ export function transform(input, { parse, Lang }) {
   const root = parse(Lang.Tsx, src).root();
   for (const c of root.findAll({ rule: { kind: "comment", regex: "^// solid: class component: " } }))
     flag("class component", c.next(), c.text().replace("// solid: class component: ", ""));
+  for (const fn of componentFns(root, true)) {
+    const name = fn.field("name")?.text() ?? fn.parent()?.field("name")?.text() ?? "this component";
+    flag("server component", fn, `${name} is async, a React Server Component, and a Solid component can't be async; its body was left as is. In SolidStart or @solidjs/vite-plugin's start mode, load the data in the route with an async createMemo (Solid 2 memos can be async; reads suspend under <Loading>) or a server function, and render synchronously`);
+  }
+  // R40 Next.js imports: no Solid 2 equivalent is installed for them, so each import is flagged
+  // with what to use instead. @solidjs/router 2 has no link component and no notFound.
+  for (const imp of root.findAll({ rule: { kind: "import_statement", has: { field: "source", regex: "^[\"']next([/\"'])" } } })) {
+    const source = imp.field("source").text().slice(1, -1);
+    const names = (imp.text().match(/^import\s+(?:type\s+)?([\s\S]*?)\s+from\s/)?.[1] ?? "").replace(/^type\s+|[{}]|\btype\s+/g, "").split(",").map((n) => n.trim()).filter(Boolean);
+    const navigation = { useRouter: "useNavigate() (router.push(p) -> navigate(p))", usePathname: "useLocation().pathname", useSearchParams: "useSearchParams()", useParams: "useParams()", redirect: "redirect from @solidjs/web", permanentRedirect: "redirect from @solidjs/web", notFound: "a catch-all *404 route, with httpStatus(404) from @solidjs/web" };
+    const guidance = {
+      "next/link": "@solidjs/router has no link component: use <a href>, which the router intercepts",
+      "next/navigation": names.map((n) => `${n} -> ${navigation[n.split(/\s+as\s+/)[0]] ?? "no direct equivalent; see @solidjs/router"}`).join("; ") + " (from @solidjs/router unless noted)",
+      "next/image": "use <img> with width, height and loading=\"lazy\"",
+      "next/dynamic": "use lazy from solid-js, rendered under <Loading>",
+      "next/headers": "server-only: read it in a server function (\"use server\") in start mode",
+      "next/server": "server-only: move it to a server function or a server route in start mode",
+      "next/script": "use a <script> tag, or useHead from @solidjs/web",
+      next: "Metadata and generateMetadata -> useHead from @solidjs/web",
+    }[source] ?? "Next.js has no Solid 2 equivalent";
+    flag("Next.js", imp, `${names.join(", ") || "import"} from ${source}: ${guidance}`);
+  }
   for (const c of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^(React\\.)?(useEffect|useLayoutEffect)$" } } }))
     flag("effect", c, `${kids(c.field("arguments"))[1]?.text() ?? "no deps"} -> createEffect(compute, apply) or onSettled`);
   for (const c of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^(React\\.)?useRef$" } } }))

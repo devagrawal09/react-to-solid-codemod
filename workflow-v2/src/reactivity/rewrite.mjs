@@ -119,6 +119,8 @@ export function rewrite(code, extracted) {
       out = `${out.slice(0, lineStart)}${indent}${e.text}\n${out.slice(lineStart)}`;
     } else out = out.slice(0, e.start) + e.text + out.slice(e.end);
   }
+  // An inlined statement leaves its indentation on a line of its own, under its note.
+  out = out.replace(/^([ \t]*\/\/ solid: .*\n)[ \t]+\n/gm, "$1");
   if (needsMemo) out = `import { createMemo } from "solid-js";\n${out}`;
   return { code: out, rewrittenFunctions: safeFunctions.map((f) => f.name) };
 }

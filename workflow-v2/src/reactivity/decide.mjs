@@ -82,6 +82,7 @@ function demote(fn) {
 
 function decideValue(value, fn, byName) {
   const out = (decision, why) => ({ decision, why });
+  if (value.awaits) return out("flag", "awaits during render: a memo or accessor can't await; load it with an async createMemo or in the route");
   if (value.initKind === "hook") return decideHookValue(value, out);
   if (fn.compiler.status !== "compiled" && !value.compiler?.fallback) return out("flag", `compiler ${fn.compiler.status}: ${fn.compiler.reason ?? "no reason given"}`);
   if (value.reassigned) return out("flag", "reassigned after declaration");
