@@ -16,7 +16,7 @@ import { step, forEachFile, shell, agent, approval, branch, commit } from "codem
 import { parse } from "codemod/ast-grep";
 import { applyContracts, decide, extract, rewrite } from "./lib/reactivity.mjs";
 import { transform } from "./rules/mechanical.mjs";
-import { NO_PORT, PORTS, migratePackageJson, migrateTsconfig, migrateViteConfig } from "./manifests.mjs";
+import { NO_PORT, PORTS, migratePackageJson, migrateTsconfig, migrateViteConfig, reactPeers } from "./manifests.mjs";
 
 const NOT_SHIPPED = /^(@types\/|babel-plugin-react-compiler$|eslint-plugin-react|typescript$)/;
 
@@ -30,7 +30,9 @@ export default async function main({ params }: { params: { include?: string; app
     const pkg = JSON.parse(file.text);
     return { path: file.path, deps: { ...pkg.peerDependencies, ...pkg.devDependencies, ...pkg.dependencies }, packageManager: pkg.packageManager ?? null };
   }));
-  const lockfiles = await step("Find the lockfile", forEachFile(["pnpm-lock.yaml", "yarn.lock", "bun.lock", "package-lock.json"], (file) => file.path));
+  // The lockfile names the package manager, and which packages peer on React.
+  const lockfiles = await step("Read the lockfile", forEachFile(["pnpm-lock.yaml", "yarn.lock", "bun.lock", "package-lock.json"], (file) => ({ path: file.path, peers: reactPeers(file.path, file.text) })));
+  const peers = lockfiles.outputs.find((l) => l.peers)?.peers ?? null;
   const plan = await step("Check React libraries for Solid ports", () => {
     // Only the package.json files on the way to the converted directory: in a monorepo, the
     // other apps' dependencies say nothing about this one. The deepest one owns the directory.
@@ -44,10 +46,11 @@ export default async function main({ params }: { params: { include?: string; app
       }
     }
     if (!deps.react) throw new Error("No package.json here depends on react; nothing to migrate.");
-    const reactish = Object.keys(deps).filter((name) => (/react/i.test(name) || name in PORTS || name in NO_PORT) && !NOT_SHIPPED.test(name)).sort();
+    // Without a lockfile that records peers, a name with "react" in it stands in for a React peer.
+    const reactish = Object.keys(deps).filter((name) => ((peers ? peers.includes(name) : /react/i.test(name)) || name in PORTS || name in NO_PORT) && !NOT_SHIPPED.test(name)).sort();
     // The root package.json's packageManager field, then the lockfile.
     const managers: Record<string, string> = { "pnpm-lock.yaml": "pnpm", "yarn.lock": "yarn", "bun.lock": "bun", "package-lock.json": "npm" };
-    const manager = manifests.outputs.find((m) => m.path === "package.json")?.packageManager?.replace(/@.*$/, "") ?? managers[lockfiles.outputs[0] ?? ""] ?? "npm";
+    const manager = manifests.outputs.find((m) => m.path === "package.json")?.packageManager?.replace(/@.*$/, "") ?? managers[lockfiles.outputs[0]?.path ?? ""] ?? "npm";
     return {
       react: deps.react,
       usesReactCompiler: "babel-plugin-react-compiler" in deps,
@@ -91,7 +94,7 @@ export default async function main({ params }: { params: { include?: string; app
   // above it is shared with the rest of the workspace, so what would change there is reported.
   const owner = plan.manifest.replace(/\/?package\.json$/, "");
   const configs = await step(apply ? "Move package.json, tsconfig and the Vite config to Solid 2" : "Preview the package.json, tsconfig and Vite config changes", forEachFile({
-    include: ["**/package.json", "**/tsconfig*.json", "**/vite.config.ts", "**/vite.config.js", "**/vite.config.mts", "**/vite.config.mjs"],
+    include: ["**/package.json", "**/tsconfig*.json", "**/vite.config.ts", "**/vite.config.js", "**/vite.config.mts", "**/vite.config.mjs", "**/next.config.ts", "**/next.config.js", "**/next.config.mjs", "**/next.config.cjs"],
     exclude: ["**/node_modules/**"],
   }, (file) => {
     const dir = file.path.replace(/\/?[^/]+$/, "");
@@ -99,7 +102,11 @@ export default async function main({ params }: { params: { include?: string; app
     if (!(dir === "" || root === dir || root.startsWith(`${dir}/`))) return undefined;
     const shared = !(owner === "" || dir === owner || dir.startsWith(`${owner}/`));
     let edit;
-    if (name === "package.json") edit = migratePackageJson(file.text);
+    if (name.startsWith("next.config")) {
+      if (dir !== owner) return undefined;
+      return { file: file.path, shared: false, changes: [], flags: [{ kind: "build config", detail: `${name} configures Next.js, which has no Solid 2 equivalent: move what it sets (rewrites, redirects, headers, images, env) to @solidjs/vite-plugin's start mode or SolidStart and vite.config, then delete it` }], jsx: false };
+    }
+    if (name === "package.json") edit = migratePackageJson(file.text, peers);
     else if (name.startsWith("tsconfig")) edit = migrateTsconfig(file.text);
     else if (dir === owner) edit = migrateViteConfig(file.text, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" } });
     else return undefined;

@@ -122,6 +122,40 @@ describe.skipIf(!bin)("react-to-solid workflow on a Vite app with apply=true", {
   });
 });
 
+describe.skipIf(!bin)("react-to-solid workflow on a Next.js app", { tags: ["slow"] }, () => {
+  let app;
+  let run;
+  const page = `import Link from "next/link";\n\nexport default async function Page({ searchParams }: { searchParams: Promise<{ q?: string }> }) {\n  const { q } = await searchParams;\n  const label = q ? \`Results for \${q}\` : "Search";\n  return <Link href="/" className="title">{label}</Link>;\n}\n`;
+  beforeAll(() => {
+    app = givenApp((dir) => {
+      const pkg = JSON.parse(read(dir, "package.json"));
+      Object.assign(pkg.dependencies, { next: "16.0.0", "framer-motion": "12.0.0" });
+      fs.writeFileSync(path.join(dir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
+      fs.writeFileSync(path.join(dir, "next.config.mjs"), "export default {};\n");
+      fs.writeFileSync(path.join(dir, "pnpm-lock.yaml"), `lockfileVersion: '9.0'\n\npackages:\n\n  framer-motion@12.0.0:\n    peerDependencies:\n      react: ^18.0.0 || ^19.0.0\n\n  next@16.0.0:\n    peerDependencies:\n      react: ^19.0.0\n`);
+      fs.mkdirSync(path.join(dir, "src/app"));
+      fs.writeFileSync(path.join(dir, "src/app/page.tsx"), page);
+    });
+    run = migrate(app);
+  }, 120_000);
+
+  it("leaves an async page as it is, but for the JSX attribute names, and flags it as a server component", () => {
+    expect(read(app, "src/app/page.tsx")).toBe(page.replace(`className="title"`, `class="title"`));
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "src/app/page.tsx", line: 3, kind: "server component" }));
+  });
+
+  it("flags Next.js imports, next.config and the next dependency", () => {
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "src/app/page.tsx", line: 1, kind: "Next.js", detail: expect.stringContaining("use <a href>") }));
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "next.config.mjs", kind: "build config" }));
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "package.json", detail: expect.stringMatching(/^next has no Solid 2 port: Next.js has no Solid 2 equivalent/) }));
+  });
+
+  it("flags a dependency the lockfile says peers on React", () => {
+    expect(run.output.plan.noPort).toContain("framer-motion");
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "package.json", detail: "framer-motion depends on React (peer) and has no known Solid 2 port" }));
+  });
+});
+
 describe.skipIf(!bin)("react-to-solid workflow on one app of a monorepo", { tags: ["slow"] }, () => {
   let repo;
   let run;

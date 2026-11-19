@@ -30,11 +30,11 @@ The converted directory is `src` by default; in a monorepo, point it at one app 
 - JSX: `.map` → `<For>` (keyed the way React keyed it), early returns → `<Show>` or `<Switch>`/`<Match>`, `className` → `class` and the other DOM attribute names, `onChange` on text fields → `onInput`, inline style keys → CSS names, `Ctx.Provider` → `Ctx`, React types → Solid's.
 - The project: `react` and `react-dom` → `solid-js` and `@solidjs/web`, React libraries → their Solid 2 ports where one is verified, `@vitejs/plugin-react` → `@solidjs/vite-plugin`, and `tsconfig` → Solid's JSX. It doesn't install anything; it prints the install command.
 
-**Flags** (with its file, and line where there is one, in the run's result) what it can't convert safely: effects, refs it can't turn into a `let`, custom hook results, values read once in a component body, class components (an error boundary becomes `<Errored>`), React libraries without a Solid 2 port, and build config it can't rewrite mechanically.
+**Flags** (with its file, and line where there is one, in the run's result) what it can't convert safely: effects, refs it can't turn into a `let`, custom hook results, values read once in a component body, class components (an error boundary becomes `<Errored>`), async components (React Server Components, left as they are), each Next.js import with what to use from Solid 2 instead, React libraries without a Solid 2 port (found through the lockfile's peer dependencies), and build config it can't rewrite mechanically.
 
 **Leaves to a person or an agent:** the flagged spots, tests (`*.test.*` and `*.spec.*` files aren't converted), and replacing libraries that have no Solid 2 port yet. With `--param agent=true`, the workflow can hand the flagged spots to a coding agent after an approval; that step is untested.
 
-On create-vite's React TypeScript template, an apply run followed by `npm install` and `npm run build` builds with no hand edits. A large app gets most of each component converted and a list of flagged spots to finish.
+On create-vite's React TypeScript template, an apply run followed by `npm install` and `npm run build` builds with no hand edits. A large app gets most of each component converted and a list of flagged spots to finish. Next.js apps convert component by component; Next.js itself has no Solid 2 equivalent, so its routing, server components and APIs are flagged for a person to move.
 
 ## How the React Compiler drives reactivity
 

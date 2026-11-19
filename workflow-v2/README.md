@@ -32,7 +32,15 @@ With `apply=true`, the package that owns the converted directory moves to Solid 
 - **`vite.config.{ts,js,mts,mjs}`**: `import react from "@vitejs/plugin-react"` and `plugins: [react()]` become `import solid from "@solidjs/vite-plugin"` and `solid()`. React-only options (a `babel` setup that only runs the React Compiler, `jsxRuntime`, `jsxImportSource`, `fastRefresh`) are dropped; any other shape is flagged with what to write.
 - **Entry**: `createRoot(el).render(<StrictMode><App /></StrictMode>)` becomes `render(() => <App />, el)` from `@solidjs/web`.
 
-It flags rather than changes: a `catalog:` or `workspace:` range (change it where the catalog defines it), a `package.json` or `tsconfig` above the package (shared with the rest of a monorepo), the React lint plugins (`eslint-plugin-react-hooks` and the like, which your lint config loads), and every React library without a Solid 2 port.
+It flags rather than changes: a `catalog:` or `workspace:` range (change it where the catalog defines it), a `package.json` or `tsconfig` above the package (shared with the rest of a monorepo), the React lint plugins (`eslint-plugin-react-hooks` and the like, which your lint config loads), a `next.config.*`, and every React library without a Solid 2 port. A library counts as a React library when the lockfile (`pnpm-lock.yaml`, `package-lock.json`, or yarn berry's `yarn.lock`) says it peers on `react` or `react-dom`, directly or through another peer (`nuqs` peers on `next`); without such a lockfile, when its name contains "react".
+
+### Next.js
+
+Next.js has no Solid 2 equivalent; the closest is `@solidjs/vite-plugin`'s start mode (file routes through `fileRoutes()` from `@solidjs/router/fs`) or SolidStart. So a Next.js app is converted component by component, and the Next.js parts are flagged, not rewritten:
+
+- **Async components** (React Server Components, such as an `async` page) are left as they are, but for JSX attribute names, and flagged `server component`: a Solid component can't be async. Load the data in the route with an async `createMemo` (Solid 2 memos can be async; reads suspend under `<Loading>`) or a server function, and render synchronously.
+- **Each `next/*` import** is flagged once, with what to use: `next/link` → `<a href>` (`@solidjs/router` 2 has no link component and intercepts plain anchors); `next/navigation` → `useNavigate`, `useLocation`, `useSearchParams` and `useParams` from `@solidjs/router`, `redirect` from `@solidjs/web`, and a catch-all route for `notFound`; `next/image` → `<img>`; `next/dynamic` → `lazy` from `solid-js`; `next/headers` and `next/server` → server functions; `next/script` → `<script>` or `useHead`; `Metadata` from `next` → `useHead` from `@solidjs/web`.
+- **`next`, `next-themes`, `nuqs`, `@t3-oss/env-nextjs`, `geist` and `next-intl`** are flagged as dependencies with no Solid 2 port.
 
 ### React libraries and their Solid 2 ports
 
@@ -53,7 +61,7 @@ No Solid 2 port yet, so these stay and are reported as blockers: `zustand`'s Rea
 ### After it runs
 
 1. Run the install command it printed.
-2. Finish each flagged spot. The most common are effects (`useEffect` becomes `createEffect(compute, apply)` or `onSettled`), custom hook results, values read in a component body (which runs once in Solid), class components (Solid has none; an error boundary becomes `<Errored>`), and libraries without a Solid 2 port.
+2. Finish each flagged spot. The most common are effects (`useEffect` becomes `createEffect(compute, apply)` or `onSettled`), custom hook results, values read in a component body (which runs once in Solid), class components (Solid has none; an error boundary becomes `<Errored>`), server components, Next.js imports, and libraries without a Solid 2 port.
 3. Type-check, build and run the app.
 
 On create-vite's React TypeScript template (create-vite 9.3.4, Nov 19), `apply=true`, then `npm install` and `npm run build`, builds with no hand edits. On t3code's `apps/web/src`, 0.1.3 converted every file and was type-checked against Solid 2.0.1, which is where the 0.1.3 fixes came from; a large app still needs its flagged spots and libraries finished by hand, and t3code hasn't been built.
@@ -63,12 +71,12 @@ On create-vite's React TypeScript template (create-vite 9.3.4, Nov 19), `apply=t
 | Step | Task | What it does |
 |---|---|---|
 | Read package.json files | `forEachFile` | Collects dependencies from every package.json |
-| Find the lockfile | `forEachFile` | For the install command |
+| Read the lockfile | `forEachFile` | Which packages peer on React, and the install command |
 | Check React libraries for Solid ports | function | Fails if nothing on the way to the converted directory depends on `react`; lists React libraries with and without a Solid 2 port, and which package.json owns the directory |
 | branch / commit | `branch`, `commit` | Only with `--param apply=true` and `--managed-git` |
 | Run the React Compiler on each file | `forEachFile` | `babel-plugin-react-compiler@1.0.0` decides what each component-body value becomes; each file's result is a step output |
 | Resolve hook contracts across files | function | The whole-program hook-contract pass, over every file's result |
-| Convert each file to Solid 2 (preview: Preview the conversion of each file) | `forEachFile` | Writes each decision with a `// solid:` note, then runs the rule pass (`src/rules/mechanical.mjs`, R1-R39) on that text; applied rules and flags are step outputs. A preview writes nothing |
+| Convert each file to Solid 2 (preview: Preview the conversion of each file) | `forEachFile` | Writes each decision with a `// solid:` note, then runs the rule pass (`src/rules/mechanical.mjs`, R1-R40) on that text; applied rules and flags are step outputs. A preview writes nothing |
 | Move package.json, tsconfig and the Vite config to Solid 2 (preview: Preview the package.json, tsconfig and Vite config changes) | `forEachFile` | `src/manifests.mjs`, as above. A preview writes nothing |
 | Summarize the conversion | function | Decision counts, applied rules, flags |
 | Install the Solid 2 lint, Lint | `shell` | Only with `--param apply=true`: `eslint-plugin-solid` 0.19.0, `configs/v2`, on the converted files; the summary is the last line of the lint step's output |
@@ -93,8 +101,8 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 | `src/workflow.ts` | The workflow |
 | `src/reactivity/` | The reactivity pass: the root `src/` of this repo with fixes found on t3code, and `enableReanimatedCheck` off |
 | `src/lib/reactivity.mjs` | `src/reactivity/` with Babel and the React Compiler, bundled by `pnpm build`; committed, so the workflow runs without a build step |
-| `src/rules/mechanical.mjs` | The rule pass, R1-R39 (R1-R10 from the root `gate/mechanical.js`, R11-R34 from hand-converted screens, R35-R39 from later runs on apps), as `transform(src, { parse, Lang })`, so it runs under `@ast-grep/napi` and `codemod/ast-grep` |
-| `src/manifests.mjs` | The port table, and the `package.json`, `tsconfig` and Vite config edits |
+| `src/rules/mechanical.mjs` | The rule pass, R1-R40 (R1-R10 from the root `gate/mechanical.js`, R11-R34 from hand-converted screens, R35-R40 from later runs on apps), as `transform(src, { parse, Lang })`, so it runs under `@ast-grep/napi` and `codemod/ast-grep` |
+| `src/manifests.mjs` | The port table, the lockfile's React peers, and the `package.json`, `tsconfig` and Vite config edits |
 | `src/lint/` | ESLint 9 with `eslint-plugin-solid/configs/v2`; the workflow finds it through `import.meta.dirname` |
 | `workflow.yaml` | A stub: codemod 2.0.0-alpha.4 won't start a registry package without one. `codemod.yaml` runs `src/workflow.ts` |
 | `docs/` | The Nov 16 report on t3code, engine gaps found along the way, and that run's logs |
@@ -102,6 +110,6 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 ## Tests
 
 ```sh
-pnpm test                                       # reactivity (30), rule (69) and project file (15) specs
-CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (18, tagged slow), which run the CLI on copies of tests/fixtures/todo-app
+pnpm test                                       # reactivity (36), rule (73) and project file (23) specs
+CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (21, tagged slow), which run the CLI on copies of tests/fixtures/todo-app
 ```

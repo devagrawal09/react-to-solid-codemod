@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { parse, Lang } from "@ast-grep/napi";
-import { migratePackageJson, migrateTsconfig, migrateViteConfig } from "../src/manifests.mjs";
+import { migratePackageJson, migrateTsconfig, migrateViteConfig, reactPeers } from "../src/manifests.mjs";
 
 const viteConfig = (code) => migrateViteConfig(code, { parse, Lang });
 
@@ -153,4 +153,127 @@ it.each([
 it("vite.config without the React plugin is left alone", () => {
   const code = `import { defineConfig } from "vite";\nexport default defineConfig({});\n`;
   expect(viteConfig(code)).toEqual({ text: code, changes: [], flags: [] });
+});
+
+it.each([
+  ["pnpm-lock.yaml", "pnpm 9", `lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      jotai:
+        specifier: ^2.0.0
+        version: 2.10.0(react@19.0.0)
+
+packages:
+
+  '@radix-ui/react-slot@1.1.0':
+    resolution: {integrity: sha512-x}
+    peerDependencies:
+      '@types/react': '*'
+      react: ^16.8 || ^17.0 || ^18.0 || ^19.0
+
+  jotai@2.10.0:
+    resolution: {integrity: sha512-x}
+    engines: {node: '>=12.20.0'}
+    peerDependencies:
+      '@types/react': '>=17.0.0'
+      react: '>=17.0.0'
+    peerDependenciesMeta:
+      react:
+        optional: true
+
+  motion@11.0.0:
+    resolution: {integrity: sha512-x}
+    peerDependencies:
+      react-dom: ^18.0.0 || ^19.0.0
+
+  zod@3.23.0:
+    resolution: {integrity: sha512-x}
+
+snapshots:
+
+  jotai@2.10.0(react@19.0.0):
+    optionalDependencies:
+      react: 19.0.0
+`],
+  ["pnpm-lock.yaml", "pnpm 6", `lockfileVersion: '6.0'
+
+packages:
+
+  /@radix-ui/react-slot@1.1.0(react@18.2.0):
+    resolution: {integrity: sha512-x}
+    peerDependencies:
+      react: ^18.0
+    dev: false
+
+  /jotai@2.10.0(react@18.2.0):
+    peerDependencies:
+      react: '>=17.0.0'
+
+  /motion@11.0.0:
+    peerDependencies:
+      react-dom: ^18.0.0
+
+  /zod@3.23.0:
+    dev: false
+`],
+  ["package-lock.json", "npm", JSON.stringify({ lockfileVersion: 3, packages: {
+    "": { dependencies: { jotai: "^2.0.0" } },
+    "node_modules/@radix-ui/react-slot": { version: "1.1.0", peerDependencies: { react: "^18" } },
+    "node_modules/jotai": { version: "2.10.0", peerDependencies: { "@types/react": ">=17", react: ">=17" } },
+    "node_modules/a/node_modules/motion": { version: "11.0.0", peerDependencies: { "react-dom": "^18" } },
+    "node_modules/zod": { version: "3.23.0" },
+  } }, null, 2)],
+  ["yarn.lock", "yarn berry", `__metadata:
+  version: 8
+  cacheKey: 10
+
+"@radix-ui/react-slot@npm:^1.1.0":
+  version: 1.1.0
+  resolution: "@radix-ui/react-slot@npm:1.1.0"
+  peerDependencies:
+    react: ^18.0
+  checksum: 10/x
+
+"jotai@npm:^2.0.0, jotai@npm:^2.10.0":
+  version: 2.10.0
+  peerDependencies:
+    "@types/react": ">=17.0.0"
+    react: ">=17.0.0"
+
+"motion@npm:^11.0.0":
+  version: 11.0.0
+  peerDependencies:
+    react-dom: ^18.0.0
+
+"zod@npm:^3.23.0":
+  version: 3.23.0
+`],
+])("the %s of %s says which packages peer on React", (path, _manager, text) => {
+  expect(reactPeers(path, text)).toEqual(["@radix-ui/react-slot", "jotai", "motion"]);
+});
+
+it("a yarn 1 lockfile records no peers", () => {
+  expect(reactPeers("yarn.lock", `# yarn lockfile v1\n\njotai@^2.0.0:\n  version "2.10.0"\n`)).toBeNull();
+});
+
+it("package.json flags a dependency that peers on React, from the lockfile, instead of guessing from its name", () => {
+  const code = `{\n  "dependencies": {\n    "jotai": "^2.0.0",\n    "react": "^19.0.0",\n    "react-use-measure": "^2.0.0",\n    "zod": "^3.0.0"\n  }\n}\n`;
+  expect(migratePackageJson(code, ["jotai"]).flags).toEqual([{ kind: "dependency", detail: "jotai depends on React (peer) and has no known Solid 2 port" }]);
+  expect(migratePackageJson(code).flags).toEqual([{ kind: "dependency", detail: "react-use-measure has no known Solid 2 port" }]);
+});
+
+it("package.json flags Next.js and the libraries made for it", () => {
+  const { flags } = migratePackageJson(`{\n  "dependencies": {\n    "next": "^15.0.0",\n    "next-themes": "^0.4.0",\n    "react": "^19.0.0"\n  }\n}\n`);
+  expect(flags.map((f) => f.detail)).toEqual([
+    expect.stringMatching(/^next has no Solid 2 port: Next.js has no Solid 2 equivalent: the closest is @solidjs\/vite-plugin's start mode, with file routes through fileRoutes\(\) from @solidjs\/router\/fs, or SolidStart$/),
+    expect.stringMatching(/^next-themes has no Solid 2 port: made for Next.js/),
+  ]);
+});
+
+it("a package that peers on a React package depends on React too", () => {
+  const lock = `lockfileVersion: '9.0'\n\npackages:\n\n  next@16.0.0:\n    peerDependencies:\n      react: ^19.0.0\n      sass: ^1.3.0\n\n  nuqs@1.20.0:\n    peerDependencies:\n      next: '>=13.4'\n\n  sass@1.99.0:\n    resolution: {integrity: sha512-x}\n\n  zundo@2.3.0:\n    peerDependencies:\n      zustand: ^5.0.0\n\n  zustand@5.0.9:\n    peerDependencies:\n      '@types/react': '>=18'\n      react: '>=18'\n`;
+  expect(reactPeers("pnpm-lock.yaml", lock)).toEqual(["next", "nuqs", "zundo", "zustand"]);
 });
