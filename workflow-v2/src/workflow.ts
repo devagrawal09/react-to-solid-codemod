@@ -40,8 +40,13 @@ export default async function main({ params }: { params: { include?: string; app
     return { path: file.path, deps: { ...pkg.peerDependencies, ...pkg.devDependencies, ...pkg.dependencies } };
   }));
   const plan = await step("Check React libraries for Solid ports", () => {
+    // Only the package.json files on the way to the converted directory: in a monorepo, the
+    // other apps' dependencies say nothing about this one.
     const deps: Record<string, string> = {};
-    for (const m of manifests.outputs as { deps: Record<string, string> }[]) Object.assign(deps, m.deps);
+    for (const m of manifests.outputs) {
+      const dir = m.path.replace(/\/?package\.json$/, "");
+      if (dir === "" || root === dir || root.startsWith(`${dir}/`)) Object.assign(deps, m.deps);
+    }
     if (!deps.react) throw new Error("No package.json here depends on react; nothing to migrate.");
     const reactish = Object.keys(deps).filter((name) => /react/i.test(name) && !NOT_SHIPPED.test(name)).sort();
     return {

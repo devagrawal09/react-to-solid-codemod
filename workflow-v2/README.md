@@ -43,7 +43,7 @@ Verified on create-vite's React TypeScript template and on the todo app in `test
 | branch / commit | `branch`, `commit` | Only with `--param apply=true` and `--managed-git` |
 | Run the React Compiler on each file | `forEachFile` | `babel-plugin-react-compiler@1.0.0` decides what each component-body value becomes; each file's result is a step output |
 | Resolve hook contracts across files | function | The whole-program hook-contract pass, over every file's result |
-| Convert each file to Solid 2 (preview: Preview the conversion of each file) | `forEachFile` | Writes each decision with a `// solid:` note, then runs the rule pass (`src/rules/mechanical.mjs`, R1-R36) on that text; applied rules and flags are step outputs. A preview writes nothing |
+| Convert each file to Solid 2 (preview: Preview the conversion of each file) | `forEachFile` | Writes each decision with a `// solid:` note, then runs the rule pass (`src/rules/mechanical.mjs`, R1-R38) on that text; applied rules and flags are step outputs. A preview writes nothing |
 | Summarize the conversion | function | Decision counts, applied rules, flags |
 | Install the Solid 2 lint, Lint | `shell` | Only with `--param apply=true`: `eslint-plugin-solid` 0.19.0, `configs/v2`, on the converted files; the summary is the last line of the lint step's output |
 | Finish flagged spots | `approval`, `agent` | Only with `--param apply=true --param agent=true` |
@@ -71,6 +71,6 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 ## Tests
 
 ```sh
-pnpm test                                        # reactivity (30) and rule (55) specs
+pnpm test                                        # reactivity (30) and rule (65) specs
 CODEMOD_BIN=<path to codemod 2.0.0-alpha.4> pnpm test # plus the workflow specs on tests/fixtures/todo-app (9, tagged slow)
 ```

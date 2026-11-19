@@ -245,3 +245,59 @@ it("R36 makes a provider's inline value read reactive state through getters", ()
 it("R36 leaves value props on other components alone", () => {
   expect(flat(`const el = <Select value={{ id: pick() }} />;`)).toContain(`value={{ id: pick() }}`);
 });
+
+it("R37 turns <Suspense> into Solid 2's <Loading>, imported from solid-js", () => {
+  const out = convert(`import { Suspense } from "react";\nexport function A() {\n  return <Suspense fallback={<p>…</p>}><B /></Suspense>;\n}\n`);
+  expect(out).toContain(`<Loading fallback={<p>…</p>}><B /></Loading>`);
+  expect(out).toMatch(/import \{[^}]*\bLoading\b[^}]*\} from "solid-js";/);
+});
+
+it("R37 keeps lazy, from solid-js, and turns useId() into createUniqueId()", () => {
+  const out = convert(`import React, { lazy, useId } from "react";\nconst Page = React.lazy(() => import("./Page"));\nconst Other = lazy(() => import("./Other"));\nexport function A() {\n  const id = useId();\n  return <label for={id}><Page /><Other /></label>;\n}\n`);
+  expect(out).toContain(`const Page = lazy(() => import("./Page"));`);
+  expect(out).toContain(`const id = createUniqueId();`);
+  expect(out).toMatch(/import \{[^}]*\blazy\b[^}]*\} from "solid-js";/);
+  expect(out).toMatch(/import \{[^}]*\bcreateUniqueId\b[^}]*\} from "solid-js";/);
+});
+
+it("R37 turns a <Fragment> into <>, after R22 moves its key to a keyed <Show>", () => {
+  const out = convert(`import { Fragment } from "react";\nexport function A(props) {\n  return <div><Fragment><i /><b /></Fragment><Fragment key={props.k}><u /></Fragment></div>;\n}\n`);
+  expect(out).toContain(`<div><><i /><b /></><Show when={[props.k]} keyed>{(_key) => <><u /></>}</Show></div>`);
+  expect(out).not.toContain("Fragment");
+});
+
+it("R37 leaves a Suspense that doesn't come from react alone", () => {
+  expect(convert(`import { Suspense } from "./mine";\nexport const a = <Suspense />;\n`)).toContain(`<Suspense />`);
+});
+
+it("R10 flags a React import it drops while the code still uses it", () => {
+  const { flags } = run(`import { Children, useState } from "react";\nexport function A(props) {\n  const [n] = useState(Children.count(props.children));\n  return <b>{n}</b>;\n}\n`);
+  expect(flags).toContainEqual(expect.objectContaining({ kind: "React API", detail: expect.stringContaining("Children") }));
+});
+
+it("R10 doesn't import a Solid name the file declares itself", () => {
+  const out = convert(`import { useState } from "react";\nfunction Switch(props) { return <i />; }\nexport function A() {\n  const [on] = useState(false);\n  return <Switch on={on} />;\n}\n`);
+  expect(out).not.toMatch(/import \{[^}]*\bSwitch\b[^}]*\} from "solid-js";/);
+});
+
+it("R10 flags a clash when the conversion uses a Solid name the file declares", () => {
+  const { code, flags } = run(`import { flushSync } from "react-dom";\nconst flush = () => {};\nexport function f(set) {\n  flushSync(() => set(1));\n}\n`);
+  expect(code).not.toMatch(/import \{[^}]*\bflush\b[^}]*\} from "solid-js";/);
+  expect(flags.map((f) => f.kind)).toContain("name clash");
+});
+
+it("R38 writes inline style keys as CSS names and gives numbers React's px", () => {
+  const { code, flags } = run(`export function A(props) {\n  return <div style={{ backgroundColor: "red", marginTop: 4, opacity: 0.5, zIndex: 2, WebkitLineClamp: 2, "--gap": "1px", width: props.w, color: props.c }} />;\n}\n`);
+  expect(code.replace(/\s+/g, " ")).toContain(`style={{ "background-color": "red", "margin-top": "4px", opacity: 0.5, "z-index": 2, "-webkit-line-clamp": 2, "--gap": "1px", width: props.w, color: props.c }}`);
+  expect(flags.filter((f) => f.kind === "style number").map((f) => f.detail)).toEqual([expect.stringContaining('"width"'), expect.stringContaining('"color"')]);
+});
+
+it("R38 leaves style props on components alone", () => {
+  expect(convert(`export const a = <Box style={{ marginTop: 4 }} />;`)).toContain(`style={{ marginTop: 4 }}`);
+});
+
+it("R10 doesn't flag a React event type that becomes the DOM's once its import is gone", () => {
+  const { flags } = run(`import { type KeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";\nexport function f(e: KeyboardEvent, m: ReactMouseEvent) { return [e.key, m.button]; }\n`);
+  const details = flags.filter((f) => f.kind === "React API").map((f) => f.detail);
+  expect(details).toEqual([expect.stringContaining("ReactMouseEvent")]);
+});

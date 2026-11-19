@@ -11,6 +11,8 @@ const FN_KINDS = new Set(["arrow_function", "function_expression", "function_dec
 const SVG_ATTRS = ["strokeWidth", "strokeLinecap", "strokeLinejoin", "strokeDasharray", "strokeDashoffset", "strokeOpacity", "strokeMiterlimit", "fillOpacity", "fillRule", "clipRule", "clipPath", "stopColor", "stopOpacity", "textAnchor", "dominantBaseline", "markerStart", "markerMid", "markerEnd", "vectorEffect", "shapeRendering", "colorInterpolationFilters", "floodColor", "floodOpacity", "lightingColor", "pointerEvents", "fontFamily", "fontSize", "fontWeight"];
 const NON_TEXT_INPUTS = new Set(["checkbox", "radio", "file", "submit", "button", "reset", "image", "color", "hidden"]);
 const REACT_EVENTS = { MouseEvent: "MouseEvent", KeyboardEvent: "KeyboardEvent", FocusEvent: "FocusEvent", PointerEvent: "PointerEvent", DragEvent: "DragEvent", TouchEvent: "TouchEvent", WheelEvent: "WheelEvent", ClipboardEvent: "ClipboardEvent", CompositionEvent: "CompositionEvent", AnimationEvent: "AnimationEvent", TransitionEvent: "TransitionEvent", UIEvent: "UIEvent", ChangeEvent: "Event", FormEvent: "Event", SyntheticEvent: "Event", InputEvent: "InputEvent" };
+// React's unitless CSS properties: it adds px to any other number.
+const UNITLESS = new Set(["animationIterationCount", "aspectRatio", "borderImageOutset", "borderImageSlice", "borderImageWidth", "boxFlex", "boxFlexGroup", "boxOrdinalGroup", "columnCount", "columns", "flex", "flexGrow", "flexPositive", "flexShrink", "flexNegative", "flexOrder", "gridArea", "gridRow", "gridRowEnd", "gridRowSpan", "gridRowStart", "gridColumn", "gridColumnEnd", "gridColumnSpan", "gridColumnStart", "fontWeight", "lineClamp", "lineHeight", "opacity", "order", "orphans", "scale", "tabSize", "widows", "zIndex", "zoom", "fillOpacity", "floodOpacity", "stopOpacity", "strokeDasharray", "strokeDashoffset", "strokeMiterlimit", "strokeOpacity", "strokeWidth"]);
 const QUERY_HOOKS = /^(useQuery|useSuspenseQuery|useInfiniteQuery|useQueries|useMutation)$/;
 
 const same = (a, b) => !!a && !!b && a.range().start.index === b.range().start.index && a.range().end.index === b.range().end.index && a.kind() === b.kind();
@@ -408,6 +410,67 @@ export function transform(input, { parse, Lang }) {
     );
     if (renders && !/\bcreateRoot\b/.test(src.replace(createRootImport, ""))) src = src.replace(createRootImport, "");
   }
+
+  // R37 React APIs with a Solid 2 counterpart, when imported from react: <Suspense> -> <Loading>,
+  // lazy -> Solid's lazy, useId() -> createUniqueId(), and a <Fragment> without props -> <>.
+  const fromReact = new Set([...input.matchAll(/^import\s+(?:type\s+)?(?:(\w+)\s*,?\s*)?(?:\{([^}]*)\})?\s*from\s*["']react["']/gm)].flatMap((m) => [
+    ...(m[1] ? [m[1]] : []),
+    ...(m[2] ?? "").split(",").map((part) => part.trim().replace(/^type\s+/, "").split(/\s+as\s+/).pop()).filter(Boolean),
+  ]));
+  const reactName = (name) => (name.startsWith("React.") ? fromReact.has("React") : fromReact.has(name));
+  pass((root) => [
+    ...root.findAll({ rule: { any: [{ kind: "jsx_opening_element" }, { kind: "jsx_closing_element" }, { kind: "jsx_self_closing_element" }], has: { field: "name", regex: "^(React\\.)?(Suspense|Fragment)$" } } }).flatMap((el) => {
+      const name = el.field("name");
+      if (!reactName(name.text())) return [];
+      if (/Suspense$/.test(name.text())) {
+        if (el.kind() !== "jsx_closing_element") note("Suspense -> Loading");
+        return [name.replace("Loading")];
+      }
+      if (el.kind() === "jsx_self_closing_element") return [];
+      const open = el.kind() === "jsx_opening_element" ? el : el.parent()?.children().find((c) => c.kind() === "jsx_opening_element");
+      if (open && kids(open).some((c) => c.kind() === "jsx_attribute" || c.kind() === "jsx_expression")) {
+        if (el.kind() === "jsx_opening_element") flag("Fragment with props", el, "Solid has no Fragment component; keep the children and move the props (key) elsewhere");
+        return [];
+      }
+      if (el.kind() === "jsx_opening_element") note("Fragment -> <>");
+      return [rep(el, el.kind() === "jsx_opening_element" ? "<>" : "</>")];
+    }),
+    ...root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^(React\\.)?(lazy|useId)$" } } }).flatMap((call) => {
+      const fn = call.field("function");
+      if (!reactName(fn.text())) return [];
+      const lazy = /lazy$/.test(fn.text());
+      note(lazy ? "lazy -> lazy" : "useId -> createUniqueId");
+      return [fn.replace(lazy ? "lazy" : "createUniqueId")];
+    }),
+  ]);
+
+  // R38 inline style objects on intrinsic elements: Solid sets each key with style.setProperty, so
+  // camelCase keys become CSS names, and a number gets the px React added on its own. A value that
+  // may be a number at runtime is flagged.
+  pass((root) =>
+    root.findAll({ rule: { kind: "jsx_attribute", inside: { any: [{ kind: "jsx_opening_element" }, { kind: "jsx_self_closing_element" }] } } }).flatMap((attr) => {
+      if (attrName(attr) !== "style" || !/^[a-z]/.test(tagName(attr))) return [];
+      const object = attrValue(attr);
+      if (object?.kind() !== "object") return [];
+      return kids(object).flatMap((prop) => {
+        const shorthand = prop.kind() === "shorthand_property_identifier";
+        if (!shorthand && prop.kind() !== "pair") return [];
+        const key = shorthand ? prop : prop.field("key");
+        const value = shorthand ? prop : prop.field("value");
+        if (!key || !value || !["property_identifier", "shorthand_property_identifier", "string"].includes(key.kind())) return [];
+        const name = key.kind() === "string" ? key.text().slice(1, -1) : key.text();
+        if (name.startsWith("--")) return [];
+        const css = name.replace(/^(Webkit|Moz|O|ms)(?=[A-Z])/, (prefix) => `-${prefix.toLowerCase()}`).replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
+        let text = value.text();
+        const unitless = UNITLESS.has(name.replace(/^(Webkit|Moz|O|ms)([A-Z])/, (_, _prefix, c) => c.toLowerCase()));
+        if (value.kind() === "number" && !unitless && Number(value.text()) !== 0) text = JSON.stringify(`${value.text()}px`);
+        else if (!unitless && !["string", "template_string", "number"].includes(value.kind())) flag("style number", prop, `style "${css}" gets a number as-is in Solid (React added px); make it a string with its unit`);
+        if (css === name && text === value.text() && !shorthand) return [];
+        note("style keys -> CSS names");
+        return [rep(prop, `${JSON.stringify(css)}: ${text}`)];
+      });
+    }),
+  );
 
   // R20 use(Context) -> useContext(Context); flushSync(() => x) -> x; flush()
   pass((root) => [
@@ -1074,19 +1137,40 @@ export function transform(input, { parse, Lang }) {
   // R10 imports
   const code = src.replace(/^import\b[^;]*?\bfrom\s*["'][^"'\n]*["'];?[ \t]*$|^import\s*["'][^"'\n]*["'];?[ \t]*$/gm, "");
   const used = (re) => re.test(code);
+  // A name the file declares or imports from another module stays that binding: importing Solid's
+  // too would clash. When the conversion added that use, which one it means needs a person.
+  const elsewhere = [...src.matchAll(/^import\s+(?:type\s+)?([\s\S]*?)\s+from\s*["']([^"']+)["']/gm)]
+    .filter((m) => !/^(react|react-dom|solid-js|@solidjs\/web)$/.test(m[2])).map((m) => m[1]).join(" ");
+  const free = (pattern) => (n) => {
+    if (!new RegExp(`\\b(const|let|var|function|class|type|interface|enum)\\s+${n}\\b`).test(code) && !new RegExp(`\\b${n}\\b`).test(elsewhere)) return true;
+    if (!pattern(n).test(input)) flag("name clash", null, `${n} is declared in this file, and the conversion uses Solid's ${n}; check which one each use means`);
+    return false;
+  };
   const solidNames = [
-    ...["createSignal", "createMemo", "createContext", "useContext", "createEffect", "onSettled", "merge", "omit", "For", "createUniqueId"].filter((n) => used(new RegExp(`\\b${n}\\b`))),
-    ...["Show", "Switch", "Match"].filter((n) => used(new RegExp(`<${n}\\b`)) || (n === "Show" && used(/\bShow\b/) && !/\bShow\w/.test(code) && false)),
-    ...["untrack", "flush"].filter((n) => used(new RegExp(`\\b${n}\\(`))),
+    ...["createSignal", "createMemo", "createContext", "useContext", "createEffect", "onSettled", "merge", "omit", "For", "createUniqueId", "lazy"].filter((n) => used(new RegExp(`\\b${n}\\b`))).filter(free((n) => new RegExp(`\\b${n}\\b`))),
+    ...["Show", "Switch", "Match", "Loading"].filter((n) => used(new RegExp(`<${n}\\b`))).filter(free((n) => new RegExp(`<${n}\\b`))),
+    ...["untrack", "flush"].filter((n) => used(new RegExp(`\\b${n}\\(`))).filter(free((n) => new RegExp(`\\b${n}\\(`))),
   ];
-  const typeNames = ["JSX", "ComponentProps"].filter((n) => used(new RegExp(`\\b${n}\\b`)));
-  const solidTypes = ["Component", "Setter"].filter((n) => used(new RegExp(`\\b${n}<`)) && !new RegExp(`\\b(const|function|class|type|interface)\\s+${n}\\b`).test(code));
+  const typeNames = ["JSX", "ComponentProps"].filter((n) => used(new RegExp(`\\b${n}\\b`))).filter(free((n) => new RegExp(`\\b${n}\\b`)));
+  const solidTypes = ["Component", "Setter"].filter((n) => used(new RegExp(`\\b${n}<`))).filter(free((n) => new RegExp(`\\b${n}<`)));
   let removedReact = false;
   src = src.replace(/^import\s+(type\s+)?(\*\s+as\s+React|React(,\s*\{[^}]*\})?|\{[^}]*\})\s+from\s+["']react["'];?[ \t]*\n/gm, () => { removedReact = true; return ""; });
   src = src.replace(/^import\s+\{\s*flushSync\s*\}\s+from\s+["']react-dom["'];?[ \t]*\n/gm, "");
   const header = [solidNames.length ? `import { ${solidNames.join(", ")} } from "solid-js";` : "", solidTypes.length ? `import type { ${solidTypes.join(", ")} } from "solid-js";` : "", renders ? `import { render } from "@solidjs/web";` : "", typeNames.length ? `import type { ${typeNames.join(", ")} } from "@solidjs/web";` : ""].filter(Boolean).join("\n");
   if (header) src = src.replace(/^(["']use client["'];\n\n?)?/, (m) => `${m}${header}\n`);
   if (removedReact) note("react imports -> solid-js");
+  // Anything else the file imported from react and still uses has no conversion here. Hooks are
+  // flagged where they're called; `use` is only converted for a context.
+  if (removedReact) {
+    const body = src.replace(/^import\b[^;]*?\bfrom\s*["'][^"'\n]*["'];?[ \t]*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+    const imported = (src.match(/^import\b[^;]*?\bfrom\s*["'][^"'\n]*["'];?[ \t]*$/gm) ?? []).join("\n");
+    for (const name of fromReact) {
+      if (name === "React" || /^use[A-Z]/.test(name)) continue;
+      // Without the import, an event type React and the DOM share a name with is the DOM's: right.
+      if (REACT_EVENTS[name] === name) continue;
+      if (new RegExp(`\\b${name}\\b`).test(body) && !new RegExp(`\\b${name}\\b`).test(imported)) flag("React API", null, `${name} was imported from react and has no conversion here; its import was removed`);
+    }
+  }
   src = src.replace(/^["']use client["'];\n\n?/m, () => { note("drop 'use client'"); return ""; });
   if (/\bReact\.\w+/.test(src)) flag("React namespace", null, [...new Set(src.match(/\bReact\.\w+/g))].join(", "));
 
