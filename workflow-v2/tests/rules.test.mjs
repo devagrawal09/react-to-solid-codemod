@@ -359,3 +359,104 @@ it("R24 gives each destructured result of the same hook its own object", () => {
   const out = flat(`function C() { const { data: jobs } = useQuery(a); const { data: counts } = useQuery(b); return <p>{jobs}{counts}</p>; }`);
   expect(out).toContain(`const query = useQuery(a); const query2 = useQuery(b); return <p>{query.data}{query2.data}</p>;`);
 });
+
+const effectFlags = (code) => run(code).flags.filter((f) => f.kind === "effect" || f.kind === "effect read");
+
+it("R41 turns useEffect(fn, [dep]) into createEffect(compute, apply), handing apply the dep it reads", () => {
+  const code = `import { useEffect } from "react";\nfunction Clock({ tickMs }: { tickMs: number }) {\n  useEffect(() => {\n    const id = setInterval(tick, tickMs);\n    return () => clearInterval(id);\n  }, [tickMs]);\n  return null;\n}\n`;
+  const { code: out, flags } = run(code);
+  expect(out).toBe(`import { createEffect } from "solid-js";\nfunction Clock(props: { tickMs: number }) {\n  createEffect(() => props.tickMs, (tickMs) => {\n    const id = setInterval(tick, tickMs);\n    return () => clearInterval(id);\n  });\n  return null;\n}\n`);
+  expect(flags).toEqual([]);
+});
+
+it("R41 hands several deps to apply as one object, and tracks the ones it doesn't read", () => {
+  const code = `function C({ user }) { const [open, setOpen] = useState(false); const [n, setN] = useState(0); useEffect(() => { log(open, user.id); }, [open, n, user.id]); return null; }`;
+  expect(flat(code)).toContain(`createEffect(() => ({ open: open(), n: n(), id: props.user.id }), ({ open, id }) => { log(open, id); });`);
+  expect(effectFlags(code)).toEqual([]);
+});
+
+it("R41 keeps the deps array as compute when apply reads none of them", () => {
+  const code = `function C() { const [a, setA] = useState(0); const [b, setB] = useState(0); useEffect(() => { ping(); }, [a, b]); return null; }`;
+  expect(flat(code)).toContain(`createEffect(() => [a(), b()], () => { ping(); });`);
+});
+
+it("R41 turns useEffect(fn, []) into onSettled(fn), cleanup and all", () => {
+  const code = `function C() {\n  useEffect(() => {\n    window.addEventListener("resize", onResize);\n    return () => window.removeEventListener("resize", onResize);\n  }, []);\n  return null;\n}\n`;
+  expect(convert(code)).toBe(`import { onSettled } from "solid-js";\nfunction C() {\n  onSettled(() => {\n    window.addEventListener("resize", onResize);\n    return () => window.removeEventListener("resize", onResize);\n  });\n  return null;\n}\n`);
+});
+
+it("R41 converts useLayoutEffect the same way: Solid's effect runs after the DOM update, before paint", () => {
+  const code = `function C() { const [w, setW] = useState(0); useLayoutEffect(() => { measure(w); }, [w]); useLayoutEffect(() => { focus(); }, []); return null; }`;
+  expect(flat(code)).toContain(`createEffect(() => w(), (w) => { measure(w); }); onSettled(() => { focus(); });`);
+});
+
+it("R41 gives a setter call a block body: a setter returns its value, and Solid only takes a function as a cleanup", () => {
+  const code = `function C({ id }) { const [x, setX] = useState(0); useEffect(() => setX(0), [id]); useEffect(() => setX(1), []); return null; }`;
+  expect(flat(code)).toContain(`createEffect(() => props.id, () => { setX(0); }); onSettled(() => { setX(1); });`);
+});
+
+it("R41 keeps an expression body that may return a cleanup", () => {
+  expect(flat(`function C({ id }) { useEffect(() => subscribe(id), [id]); return null; }`)).toContain(`createEffect(() => props.id, (id) => subscribe(id));`);
+});
+
+it("R41 converts setState in apply, including a write to the effect's own dep", () => {
+  const code = `function C() { const [count, setCount] = useState(0); useEffect(() => { if (count < 3) setCount(count + 1); }, [count]); return null; }`;
+  expect(flat(code)).toContain(`createEffect(() => count(), (count) => { if (count < 3) setCount(count + 1); });`);
+});
+
+it("R41 reads deps through the parameter in nested functions too, so a cleanup sees its own run's value", () => {
+  const code = `function C() { const [room, setRoom] = useState("a"); useEffect(() => { const c = connect(room); c.on("msg", () => show(room)); return () => c.leave(room); }, [room]); return null; }`;
+  expect(flat(code)).toContain(`createEffect(() => room(), (room) => { const c = connect(room); c.on("msg", () => show(room)); return () => c.leave(room); });`);
+});
+
+it("R41 renames a parameter that would shadow a name the body uses", () => {
+  const code = `function C({ id }) { useEffect(() => { const id2 = 1; load(id, id2); }, [id]); return null; }`;
+  expect(flat(code)).toContain(`createEffect(() => props.id, (id) => {`);
+  const clash = `function C({ user }) { const id = "x"; useEffect(() => { load(user.id, id); }, [user.id]); return null; }`;
+  expect(flat(clash)).toContain(`createEffect(() => props.user.id, (idValue) => { load(idValue, id); });`);
+});
+
+it("R41 flags a signal or prop read in apply that isn't a dep", () => {
+  const code = `function C({ a, b }) { const [n, setN] = useState(0); useEffect(() => { log(a, b, n); props.onChange(a); }, [a]); return null; }`;
+  expect(flat(code)).toContain(`createEffect(() => props.a, (a) => {`);
+  expect(effectFlags(code)).toEqual([{ kind: "effect read", line: 1, detail: expect.stringMatching(/^props\.b, n\(\) are read in the effect but not in its deps: Solid warns \(STRICT_READ_UNTRACKED\)/) }]);
+});
+
+it.each([
+  ["no deps array", `useEffect(() => { document.title = String(n); });`, /^no deps array: it ran after every render/],
+  ["deps that aren't an array literal", `useEffect(() => { ping(); }, deps);`, /^props\.deps: the deps aren't an array literal/],
+  ["a spread in the deps", `useEffect(() => { ping(); }, [...deps]);`, /^\[\.\.\.props\.deps\]: the deps aren't an array literal/],
+  ["a ref in the deps", `useEffect(() => { ping(); }, [other.current]);`, /^\[props\.other\.current\]: props\.other\.current is a ref/],
+  ["a ref the ref rule made a let", `useEffect(() => { el.current?.focus(); }, [el.current]);`, /^\[el\]: el is a ref/],
+  ["an async callback", `useEffect(async () => { await load(); }, [n]);`, /an async callback returns a promise/],
+  ["a callback that isn't inline", `useEffect(handler, [n]);`, /the callback isn't an inline function/],
+  ["an effect inside a callback", `const f = () => { if (n) { useEffect(() => {}, [n]); } };`, /not at the top of a component or hook body/],
+])("R41 flags %s instead of converting it", (_shape, effect, detail) => {
+  const code = `function C({ other, deps, handler }) { const [n, setN] = useState(0); const el = useRef(null); ${effect} return <div ref={el} />; }`;
+  const { code: out, flags } = run(code);
+  expect(out).not.toMatch(/createEffect|onSettled/);
+  expect(flags.filter((f) => f.kind === "effect")).toEqual([{ kind: "effect", line: 1, detail: expect.stringMatching(detail) }]);
+});
+
+it("R41 converts effects in a custom hook the same way", () => {
+  const code = `export function useWidth(el) { const [w, setW] = useState(0); useEffect(() => { const o = new ResizeObserver(() => setW(el.offsetWidth)); o.observe(el); return () => o.disconnect(); }, [el]); return w; }`;
+  expect(flat(code)).toContain(`createEffect(() => el, () => { const o = new ResizeObserver(() => setW(el.offsetWidth));`);
+});
+
+it("R41 leaves an effect in an async component alone, flagged", () => {
+  const code = `async function Page() { useEffect(() => { ping(); }, []); return <div />; }`;
+  const { code: out, flags } = run(code);
+  expect(out).toContain(`useEffect(() => { ping(); }, []);`);
+  expect(flags.map((f) => f.kind)).toEqual(["effect", "server component"]);
+});
+
+it("R41 doesn't flag a dep read in the component body: it moves into compute", () => {
+  const { flags } = run(`function C() { const [n, setN] = useState(0); useEffect(() => { ping(); }, [n]); return null; }`);
+  expect(flags).toEqual([]);
+});
+
+it("R41 flags a dep that is a plain value or a hook result: tracking it never re-runs the effect", () => {
+  const code = `function C() {\n  const pathname = usePathname();\n  const [debounced] = useDebounce(q);\n  const label = format(x);\n  const save = () => post();\n  const [page, setPage] = useQueryState("p");\n  // solid: client: static (useQueryClient hands back a stable value)\n  const client = useQueryClient();\n  useEffect(() => { track(pathname, debounced, label); save(); setPage(1); client.clear(); }, [pathname, debounced, label, save, setPage, client]);\n  return null;\n}`;
+  expect(flat(code)).toContain(`createEffect(() => [pathname, debounced, label, save, setPage, client], () => {`);
+  expect(run(code).flags.filter((f) => f.kind === "effect dep")).toEqual([{ kind: "effect dep", line: 9, detail: expect.stringMatching(/^pathname, debounced, label are plain values here \(the component body runs once\), so tracking them never re-runs the effect/) }]);
+});

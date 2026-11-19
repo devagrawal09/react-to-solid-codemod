@@ -58,12 +58,16 @@ describe.skipIf(!bin)("react-to-solid workflow on a small todo app", { tags: ["s
     expect(read(app, "src/App.tsx")).toBe(read(fixture, "src/App.tsx"));
   });
 
-  it("reports what the rules could not convert, with file and line", () => {
-    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "src/components/Clock.tsx", line: 8, kind: "effect" }));
+  it("turns an effect into createEffect, handing apply the prop it tracks", () => {
+    expect(read(app, "src/components/Clock.tsx")).toContain("  createEffect(() => props.tickMs, (tickMs) => {\n    const id = setInterval(() => setNow(new Date()), tickMs);\n    return () => clearInterval(id);\n  });");
   });
 
-  it("reports eslint-plugin-solid's Solid 2 warnings by rule", () => {
-    expect(run.output.lint.byRule).toEqual({ "solid/reactivity": 1 });
+  it("reports what the rules could not convert, with file and line", () => {
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "src/components/TodoList.tsx", line: 14, kind: "custom hook call" }));
+  });
+
+  it("reports eslint-plugin-solid's Solid 2 warnings by rule: none on the fixture", () => {
+    expect(run.output.lint).toMatchObject({ files: 6, problems: 0, parseErrors: 0, byRule: {} });
   });
 });
 
@@ -73,7 +77,7 @@ describe.skipIf(!bin)("react-to-solid workflow without apply=true", { tags: ["sl
     const run = migrate(app, []);
     expect(run.output.preview).toBe(true);
     expect(run.output.wouldChange).toContain("src/components/TodoList.tsx");
-    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "src/components/Clock.tsx", line: 8, kind: "effect" }));
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "src/components/TodoList.tsx", line: 14, kind: "custom hook call" }));
     expect(run.output.config).toContainEqual({ file: "package.json", changes: expect.arrayContaining(["react -> solid-js@^2.0.3"]) });
     expect(execFileSync("git", ["status", "--porcelain"], { cwd: app, encoding: "utf8" })).toBe("");
   });

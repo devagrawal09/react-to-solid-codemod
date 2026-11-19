@@ -14,6 +14,7 @@ const REACT_EVENTS = { MouseEvent: "MouseEvent", KeyboardEvent: "KeyboardEvent",
 // React's unitless CSS properties: it adds px to any other number.
 const UNITLESS = new Set(["animationIterationCount", "aspectRatio", "borderImageOutset", "borderImageSlice", "borderImageWidth", "boxFlex", "boxFlexGroup", "boxOrdinalGroup", "columnCount", "columns", "flex", "flexGrow", "flexPositive", "flexShrink", "flexNegative", "flexOrder", "gridArea", "gridRow", "gridRowEnd", "gridRowSpan", "gridRowStart", "gridColumn", "gridColumnEnd", "gridColumnSpan", "gridColumnStart", "fontWeight", "lineClamp", "lineHeight", "opacity", "order", "orphans", "scale", "tabSize", "widows", "zIndex", "zoom", "fillOpacity", "floodOpacity", "stopOpacity", "strokeDasharray", "strokeDashoffset", "strokeMiterlimit", "strokeOpacity", "strokeWidth"]);
 const QUERY_HOOKS = /^(useQuery|useSuspenseQuery|useInfiniteQuery|useQueries|useMutation)$/;
+const EFFECT_HOOKS = /^(React\.)?(useEffect|useLayoutEffect)$/;
 
 const same = (a, b) => !!a && !!b && a.range().start.index === b.range().start.index && a.range().end.index === b.range().end.index && a.kind() === b.kind();
 const kids = (n) => (n ? n.children().filter((c) => c.isNamed()) : []);
@@ -133,9 +134,11 @@ export function transform(input, { parse, Lang }) {
       }
       if (shadowed) continue;
       // deferred if any ancestor below the component body is a function or JSX expression/attribute
+      // An effect's deps array becomes its compute function (R41).
       let deferred = false;
       for (let a = id.parent(); a && !same(a, bodyNode); a = a.parent()) {
         if (FN_KINDS.has(a.kind()) || a.kind() === "jsx_expression") { deferred = true; break; }
+        if (a.kind() === "array" && a.parent()?.kind() === "arguments" && EFFECT_HOOKS.test(a.parent().parent()?.field("function")?.text() ?? "")) { deferred = true; break; }
       }
       if (!deferred && bodyNode) flag("render-dependent read", id, `${label} '${name}' is read in the component body; it runs once in Solid (needs createMemo/<Show>)`);
       edits.push(id.kind() === "shorthand_property_identifier" ? id.replace(`${name}: ${toRead}`) : id.replace(toRead));
@@ -1159,6 +1162,102 @@ export function transform(input, { parse, Lang }) {
     }),
   );
 
+  // R41 useEffect/useLayoutEffect(fn, [deps]) -> createEffect(compute, apply); (fn, []) -> onSettled(fn).
+  // The deps (their reads already rewritten) become compute, and apply takes the ones its body
+  // reads as parameters: Solid warns about a signal read directly in apply, and a cleanup that
+  // reads the parameter sees its own run's value, as in React. Solid's effect runs after the DOM
+  // is updated and before paint, so useLayoutEffect converts the same way. Anything else is
+  // flagged. tests/solid-effects.test.mjs pins down the solid-js behavior this relies on.
+  pass((root) => {
+    const edits = [];
+    for (const call of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: EFFECT_HOOKS.source } } })) {
+      const [cb, deps] = kids(call.field("arguments")).filter((a) => a.kind() !== "comment");
+      const statement = call.parent();
+      const fn = statement?.parent()?.parent();
+      const at = deps ? `${deps.text()}: ` : "";
+      if (statement?.kind() !== "expression_statement" || statement.parent().kind() !== "statement_block" || !FN_KINDS.has(fn?.kind() ?? "") || /^async\b/.test(fn.text())) {
+        flag("effect", call, `${at}not at the top of a component or hook body; convert to createEffect(compute, apply) or onSettled by hand`);
+        continue;
+      }
+      if (!cb || !["arrow_function", "function_expression"].includes(cb.kind())) { flag("effect", call, `${at}the callback isn't an inline function; call it from createEffect(compute, apply) or onSettled`); continue; }
+      if (/^async\b/.test(cb.text())) { flag("effect", call, `${at}an async callback returns a promise, which Solid rejects as a cleanup (React warns and ignores it): run the async work inside a sync apply`); continue; }
+      if (!deps) { flag("effect", call, `${at}no deps array: it ran after every render, and a Solid component doesn't re-render. Track what it reads in compute: createEffect(() => [...], (values) => ...)`); continue; }
+      if (deps.kind() !== "array" || kids(deps).some((d) => d.kind() === "spread_element")) { flag("effect", call, `${at}the deps aren't an array literal; list what it tracks in createEffect's compute`); continue; }
+      const fnBody = fn.field("body");
+      const lets = new Set(fnBody.findAll({ rule: { kind: "variable_declarator", inside: { kind: "lexical_declaration", regex: "^let\\b" } } }).map((d) => d.field("name")?.text()));
+      const items = kids(deps).filter((d) => d.kind() !== "comment");
+      const ref = items.find((d) => /\.current\b/.test(d.text()) || [d, ...d.findAll({ rule: { kind: "identifier" } })].some((id) => id.kind() === "identifier" && lets.has(id.text())));
+      if (ref) { flag("effect", call, `${at}${ref.text()} is a ref or a let, which isn't reactive: track the signal that changes it, or set it up in the ref callback`); continue; }
+      const body = cb.field("body");
+      // A setter returns the value it set, and Solid rejects anything but a function as a cleanup.
+      const writes = body.kind() !== "statement_block" && (["assignment_expression", "augmented_assignment_expression", "update_expression"].includes(unparen(body).kind()) || (unparen(body).kind() === "call_expression" && /^set[A-Z]/.test(unparen(body).field("function")?.text() ?? "")));
+      const hook = call.field("function").text().replace("React.", "");
+      if (!items.length) {
+        edits.push(rep(call, `onSettled(${textWith(cb, writes ? [rep(body, `{ ${unparen(body).text()}; }`)] : [])})`));
+        note(`${hook}(fn, []) -> onSettled`);
+        continue;
+      }
+      // Each dep read as `x()` or `a.b` in the body becomes a parameter named after it.
+      const taken = new Set(body.findAll({ rule: { any: [{ kind: "identifier" }, { kind: "shorthand_property_identifier" }] } }).map((id) => id.text()));
+      const names = [];
+      const reads = [];
+      for (const dep of items) {
+        const d = unparen(dep);
+        const accessor = d.kind() === "call_expression" && d.field("function")?.kind() === "identifier" && !kids(d.field("arguments")).length;
+        const base = accessor ? d.field("function").text() : d.kind() === "member_expression" ? d.field("property")?.text() : d.kind() === "identifier" ? d.text() : null;
+        // a plain identifier (a function, a constant) isn't reactive: it's tracked as is
+        const hits = !base || d.kind() === "identifier" ? [] : accessor
+          ? readsOf(body, base).map((id) => id.parent()).filter((p) => p?.kind() === "call_expression" && !kids(p.field("arguments")).length)
+          : body.findAll({ rule: { kind: "member_expression" } }).filter((m) => m.text() === d.text() && !(m.parent()?.kind() === "assignment_expression" && same(m.parent().field("left"), m)));
+        // A parameter can't shadow a name the body uses for something else (the accessor it replaces
+        // is fine); a key only has to be unique.
+        const ownReads = accessor && readsOf(body, base).every((id) => hits.some((h) => inside(id, h)));
+        let name = base ?? `dep${names.length + 1}`;
+        for (let i = 2; names.includes(name) || (hits.length && taken.has(name) && !(ownReads && name === base)); i++) name = `${base ?? "dep"}Value${i > 2 ? i - 1 : ""}`;
+        names.push(name);
+        reads.push(hits);
+      }
+      const used = reads.map((hits) => hits.length > 0);
+      const replace = reads.flatMap((hits, i) => hits.map((h) => rep(h, names[i])));
+      let applyBody = textWith(body, replace);
+      if (writes) applyBody = `{ ${textWith(unparen(body), replace)}; }`;
+      let compute, params;
+      if (items.length === 1) {
+        compute = `() => ${items[0].kind() === "object" ? `(${items[0].text()})` : items[0].text()}`;
+        params = used[0] ? `(${names[0]})` : "()";
+      } else if (used.some(Boolean)) {
+        compute = `() => ({ ${items.map((d, i) => (d.text() === names[i] ? names[i] : `${names[i]}: ${d.text()}`)).join(", ")} })`;
+        params = `({ ${names.filter((_, i) => used[i]).join(", ")} })`;
+      } else {
+        compute = `() => ${deps.text()}`;
+        params = "()";
+      }
+      // Reads of this component's signals and memos left in apply warn in dev: they aren't deps.
+      const accessors = new Set(fnBody.findAll({ rule: { kind: "variable_declarator", has: { field: "value", kind: "call_expression", has: { field: "function", regex: "^(createSignal|createMemo)$" } } } }).map((d) => (d.field("name")?.kind() === "array_pattern" ? kids(d.field("name"))[0] : d.field("name"))?.text()));
+      const untracked = [...new Set(body.findAll({ rule: { any: [{ kind: "call_expression", has: { field: "function", kind: "identifier" } }, { kind: "member_expression", has: { field: "object", regex: "^(props|merged)$" } }] } })
+        // a read in a nested function runs later, outside apply, and doesn't warn
+        .filter((n) => !n.ancestors().some((a) => inside(a, body) && !same(a, body) && FN_KINDS.has(a.kind())) && !replace.some((r) => r.start <= n.range().start.index && n.range().end.index <= r.end))
+        .filter((n) => (n.kind() === "call_expression" ? accessors.has(n.field("function").text()) && !kids(n.field("arguments")).length : !(n.parent()?.kind() === "call_expression" && same(n.parent().field("function"), n))))
+        .map((n) => n.text()))];
+      // A dep the body declared as a plain value (or got from a hook) was read once: React re-ran
+      // the effect when it changed between renders, and nothing changes it here. Setters, and
+      // values the compiler pass found stable (a `static` note), don't change in React either.
+      const plain = items.filter((d) => d.kind() === "identifier" && !/^set[A-Z]/.test(d.text())).map((d) => d.text()).filter((n) => {
+        const binds = { any: [{ kind: "identifier" }, { kind: "shorthand_property_identifier_pattern" }], regex: `^${n.replace(/\$/g, "\\$")}$` };
+        const decl = fnBody.find({ rule: { kind: "variable_declarator", has: { field: "name", any: [binds, { has: { ...binds, stopBy: "end" } }] } } });
+        const v = decl?.field("value");
+        const noted = decl?.parent()?.prev();
+        if (noted?.kind() === "comment" && new RegExp(`^// solid:.*\\b${n.replace(/\$/g, "\\$")}: static\\b`).test(noted.text())) return false;
+        return !!v && !FN_KINDS.has(v.kind()) && !/^(createSignal|createMemo|useContext)\b/.test(v.text());
+      });
+      if (plain.length) flag("effect dep", call, `${plain.join(", ")} ${plain.length > 1 ? "are plain values" : "is a plain value"} here (the component body runs once), so tracking ${plain.length > 1 ? "them" : "it"} never re-runs the effect; React re-ran it when ${plain.length > 1 ? "they" : "it"} changed. Make ${plain.length > 1 ? "each" : "it"} an accessor (a signal, a memo, or a hook that returns one) and track it as ${plain[0]}()`);
+      if (untracked.length) flag("effect read", call, `${untracked.join(", ")} ${untracked.length > 1 ? "are" : "is"} read in the effect but not in its deps: Solid warns (STRICT_READ_UNTRACKED) in dev. Add ${untracked.length > 1 ? "them" : "it"} to compute if the effect should re-run on ${untracked.length > 1 ? "them" : "it"}, or read ${untracked.length > 1 ? "them" : "it"} with untrack() for a deliberate snapshot`);
+      edits.push(rep(cb, compute), rep(deps, `${params} => ${applyBody}`), rep(call.field("function"), "createEffect"));
+      note(`${hook}(fn, deps) -> createEffect(compute, apply)`);
+    }
+    return edits;
+  });
+
   // Flags for the judgment bucket
   const root = parse(Lang.Tsx, src).root();
   for (const c of root.findAll({ rule: { kind: "comment", regex: "^// solid: class component: " } }))
@@ -1185,8 +1284,6 @@ export function transform(input, { parse, Lang }) {
     }[source] ?? "Next.js has no Solid 2 equivalent";
     flag("Next.js", imp, `${names.join(", ") || "import"} from ${source}: ${guidance}`);
   }
-  for (const c of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^(React\\.)?(useEffect|useLayoutEffect)$" } } }))
-    flag("effect", c, `${kids(c.field("arguments"))[1]?.text() ?? "no deps"} -> createEffect(compute, apply) or onSettled`);
   for (const c of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^(React\\.)?useRef$" } } }))
     flag("ref", c, "useRef -> DOM ref callback or plain let");
   for (const c of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^(React\\.)?(createContext)$" } } }))

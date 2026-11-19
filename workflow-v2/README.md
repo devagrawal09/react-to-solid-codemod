@@ -58,13 +58,31 @@ The table is in `src/manifests.mjs`, checked on npm on Nov 19 against `solid-js@
 
 No Solid 2 port yet, so these stay and are reported as blockers: `zustand`'s React hook (`solid-zustand` is Solid 1 only; a small bridge into a signal works), `@effect/atom-react` (Solid 2 support is unreleased), `@tanstack/react-pacer` (`@tanstack/pacer`'s `Debouncer` and `Throttler` work as they are), `@clerk/react`, `@clerk/electron`, `@legendapp/list`, `gt-react`, `react-day-picker`, `@pierre/diffs` and `@pierre/trees` (their `/react` entries), and `@dnd-kit/*`.
 
+### Effects
+
+R41 converts `useEffect` and `useLayoutEffect` at the top of a component or custom hook:
+
+| React | Solid 2 |
+|---|---|
+| `useEffect(() => { sub(id); return () => unsub(id); }, [id])` | `createEffect(() => props.id, (id) => { sub(id); return () => unsub(id); })` |
+| `useEffect(() => { log(a, b); }, [a, b, c])` | `createEffect(() => ({ a: a(), b: b(), c: c() }), ({ a, b }) => { log(a, b); })` |
+| `useEffect(() => { ping(); }, [a, b])` | `createEffect(() => [a(), b()], () => { ping(); })` |
+| `useEffect(() => { ...; return cleanup; }, [])` | `onSettled(() => { ...; return cleanup; })` |
+| `useEffect(() => setX(0), [id])` | `createEffect(() => props.id, () => { setX(0); })` |
+
+The deps become compute, and apply takes the ones its body reads as parameters, named after them (renamed when the name is taken). That is what Solid asks for: a signal read directly in apply warns `STRICT_READ_UNTRACKED` in dev. It also keeps React's semantics for closures: a cleanup or a listener in the effect sees its own run's value, not the next one's. A setter call gets a block body, because a setter returns its value and Solid throws on a cleanup that isn't a function. `useLayoutEffect` converts the same way: Solid's effect runs after the DOM is updated and before paint (on mount, inside `render()`), which is `useLayoutEffect`'s timing; React's `useEffect` ran after paint, so it now runs earlier. Writes in apply are allowed, with no diagnostic. `tests/solid-effects.test.mjs` pins all of this down on solid-js 2.0.3.
+
+Flagged and left as React code (`effect`): no deps array (it ran after every render; a Solid component doesn't re-render), deps that aren't an array literal or have a spread, a ref in the deps (`ref.current`, or a `let` from the ref rule), an async callback (it returns a promise, which Solid rejects as a cleanup), a callback that isn't an inline function, an effect not at the top of a component or hook body, and an effect in an async component. Converted but flagged: `effect dep` when a dep is a plain value in Solid, declared in the body or from a hook, so tracking it never re-runs the effect (make it an accessor and track `x()`; setters and values the compiler found stable aren't flagged), and `effect read` when apply reads a signal, memo or prop that isn't a dep (it warns in dev: add it to compute, or `untrack` it for a deliberate snapshot).
+
+Differences that remain: Solid's effects don't compare, so a dep like `user()?.id` re-runs the effect whenever `user()` changes (React's effects must already tolerate extra runs); cleanups on dispose run in reverse creation order; and there is no loop guard for an effect that always writes its own dep.
+
 ### After it runs
 
 1. Run the install command it printed.
-2. Finish each flagged spot. The most common are effects (`useEffect` becomes `createEffect(compute, apply)` or `onSettled`), custom hook results, values read in a component body (which runs once in Solid), class components (Solid has none; an error boundary becomes `<Errored>`), server components, Next.js imports, and libraries without a Solid 2 port.
+2. Finish each flagged spot. The most common are custom hook results, values read in a component body (which runs once in Solid), class components (Solid has none; an error boundary becomes `<Errored>`), server components, Next.js imports, effect deps that are plain values (see [Effects](#effects)), and libraries without a Solid 2 port.
 3. Type-check, build and run the app.
 
-On create-vite's React TypeScript template (create-vite 9.3.4, Nov 19), `apply=true`, then `npm install` and `npm run build`, builds with no hand edits. On t3code's `apps/web/src`, 0.1.3 converted every file and was type-checked against Solid 2.0.1, which is where the 0.1.3 fixes came from; a large app still needs its flagged spots and libraries finished by hand, and t3code hasn't been built.
+On create-vite's React TypeScript template (create-vite 9.3.4, Nov 19), `apply=true`, then `npm install` and `npm run build`, builds with no hand edits; with two components added that subscribe in an effect and log on mount, it builds too, and a jsdom test shows the effect subscribe, re-subscribe on a prop change and clean up. On t3code's `apps/web/src`, 0.1.3 converted every file and was type-checked against Solid 2.0.1, which is where the 0.1.3 fixes came from; a large app still needs its flagged spots and libraries finished by hand, and t3code hasn't been built.
 
 ## Steps
 
@@ -76,7 +94,7 @@ On create-vite's React TypeScript template (create-vite 9.3.4, Nov 19), `apply=t
 | branch / commit | `branch`, `commit` | Only with `--param apply=true` and `--managed-git` |
 | Run the React Compiler on each file | `forEachFile` | `babel-plugin-react-compiler@1.0.0` decides what each component-body value becomes; each file's result is a step output |
 | Resolve hook contracts across files | function | The whole-program hook-contract pass, over every file's result |
-| Convert each file to Solid 2 (preview: Preview the conversion of each file) | `forEachFile` | Writes each decision with a `// solid:` note, then runs the rule pass (`src/rules/mechanical.mjs`, R1-R40) on that text; applied rules and flags are step outputs. A preview writes nothing |
+| Convert each file to Solid 2 (preview: Preview the conversion of each file) | `forEachFile` | Writes each decision with a `// solid:` note, then runs the rule pass (`src/rules/mechanical.mjs`, R1-R41) on that text; applied rules and flags are step outputs. A preview writes nothing |
 | Move package.json, tsconfig and the Vite config to Solid 2 (preview: Preview the package.json, tsconfig and Vite config changes) | `forEachFile` | `src/manifests.mjs`, as above. A preview writes nothing |
 | Summarize the conversion | function | Decision counts, applied rules, flags |
 | Install the Solid 2 lint, Lint | `shell` | Only with `--param apply=true`: `eslint-plugin-solid` 0.19.0, `configs/v2`, on the converted files; the summary is the last line of the lint step's output |
@@ -101,7 +119,7 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 | `src/workflow.ts` | The workflow |
 | `src/reactivity/` | The reactivity pass: the root `src/` of this repo with fixes found on t3code, and `enableReanimatedCheck` off |
 | `src/lib/reactivity.mjs` | `src/reactivity/` with Babel and the React Compiler, bundled by `pnpm build`; committed, so the workflow runs without a build step |
-| `src/rules/mechanical.mjs` | The rule pass, R1-R40 (R1-R10 from the root `gate/mechanical.js`, R11-R34 from hand-converted screens, R35-R40 from later runs on apps), as `transform(src, { parse, Lang })`, so it runs under `@ast-grep/napi` and `codemod/ast-grep` |
+| `src/rules/mechanical.mjs` | The rule pass, R1-R41 (R1-R10 from the root `gate/mechanical.js`, R11-R34 from hand-converted screens, R35-R40 from later runs on apps, R41 effects), as `transform(src, { parse, Lang })`, so it runs under `@ast-grep/napi` and `codemod/ast-grep` |
 | `src/manifests.mjs` | The port table, the lockfile's React peers, and the `package.json`, `tsconfig` and Vite config edits |
 | `src/lint/` | ESLint 9 with `eslint-plugin-solid/configs/v2`; the workflow finds it through `import.meta.dirname` |
 | `workflow.yaml` | A stub: codemod 2.0.0-alpha.4 won't start a registry package without one. `codemod.yaml` runs `src/workflow.ts` |
@@ -110,6 +128,6 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 ## Tests
 
 ```sh
-pnpm test                                       # reactivity (36), rule (73) and project file (23) specs
-CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (21, tagged slow), which run the CLI on copies of tests/fixtures/todo-app
+pnpm test                                       # reactivity (36), rule (96), project file (23) and Solid effect behavior (10) specs
+CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (22, tagged slow), which run the CLI on copies of tests/fixtures/todo-app
 ```
