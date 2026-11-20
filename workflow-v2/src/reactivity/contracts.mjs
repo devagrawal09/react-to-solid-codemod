@@ -30,6 +30,9 @@ export const BUILTIN = {
   // function declared in the body (decided `function`). It isn't an accessor: reading it as
   // `cb()` would call it.
   useCallback: { ...F, decision: "function", note: "useCallback(fn) becomes fn, a plain function that reads reactive values when called" },
+  // R6 turns it into createMemo and rewrites its reads itself. Unlisted, its callback argument
+  // made it look like a store selector, and both passes added the call (`x()()`).
+  useMemo: A,
   useDeferredValue: A,
   useSyncExternalStore: A,
   useContext: { kind: "object", props: {} },

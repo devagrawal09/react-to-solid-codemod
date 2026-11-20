@@ -8,22 +8,61 @@ export const SOLID = "2.0.3";
 // @solidjs/vite-plugin 3 needs Vite 8 or 9.
 const VITE = "8.3.8";
 
+// What the React package's types are called, when the port doesn't export them.
+const SOLID_QUERY_TYPE = "not exported by @tanstack/solid-query: use the closest one it has (UseQueryOptions, UseQueryResult, UseInfiniteQueryOptions, UseMutationOptions, UseMutationResult)";
+const SOLID_TESTING_TYPE = "not exported by @solidjs/testing-library: use ReturnType<typeof render> or Parameters<typeof render>[1]";
+
 // React libraries and their Solid 2 ports. With a version, apply mode installs the port in the
 // React package's place (a prerelease exactly, a release with ^); without one, it's only reported.
+// With `lacks`, the port exports the React package's names but those (each with what to use): the
+// rule pass (R44) points the code's imports at the port and flags an import of one of them.
+// Checked against each port's type declarations on Nov 19 (@tanstack/react-query 5.102.8,
+// lucide-react 1.31.0, @testing-library/react 16.2.0).
 export const PORTS = {
   react: { to: "solid-js", version: SOLID },
   "react-dom": { to: "@solidjs/web", version: SOLID },
-  "@tanstack/react-query": { to: "@tanstack/solid-query", version: "6.0.0-rc.6", note: "the first version for Solid 2, on the rc tag" },
+  "@tanstack/react-query": {
+    to: "@tanstack/solid-query",
+    version: "6.0.0-rc.6",
+    note: "the first version for Solid 2, on the rc tag",
+    lacks: {
+      useSuspenseQuery: "use useQuery: reading its data suspends under <Loading>, which is what useSuspenseQuery did",
+      useSuspenseInfiniteQuery: "use useInfiniteQuery: reading its data suspends under <Loading>",
+      useSuspenseQueries: "use useQueries: reading a query's data suspends under <Loading>",
+      usePrefetchQuery: "call useQueryClient().prefetchQuery(...) in the component body",
+      usePrefetchInfiniteQuery: "call useQueryClient().prefetchInfiniteQuery(...) in the component body",
+      HydrationBoundary: "no HydrationBoundary: call hydrate(queryClient, state) (re-exported from @tanstack/query-core) before rendering",
+      QueryErrorResetBoundary: "no error reset boundary: wrap the queries in <Errored fallback={(err, reset) => ...}> and call queryClient.resetQueries() before reset()",
+      useQueryErrorResetBoundary: "no error reset boundary: wrap the queries in <Errored fallback={(err, reset) => ...}> and call queryClient.resetQueries() before reset()",
+      IsRestoringProvider: "use IsRestoringContext, whose value is an accessor",
+      ...Object.fromEntries(["AnyUseBaseQueryOptions", "AnyUseInfiniteQueryOptions", "AnyUseMutationOptions", "AnyUseQueryOptions", "AnyUseSuspenseInfiniteQueryOptions", "AnyUseSuspenseQueryOptions", "HydrationBoundaryProps", "QueriesOptions", "QueriesResults", "QueryErrorClearResetFunction", "QueryErrorIsResetFunction", "QueryErrorResetBoundaryFunction", "QueryErrorResetBoundaryProps", "QueryErrorResetFunction", "SuspenseQueriesOptions", "SuspenseQueriesResults", "UnusedSkipTokenInfiniteOptions", "UnusedSkipTokenOptions", "UseMutateAsyncFunction", "UsePrefetchInfiniteQueryOptions", "UsePrefetchQueryOptions", "UseSuspenseInfiniteQueryOptions", "UseSuspenseInfiniteQueryResult", "UseSuspenseQueryOptions", "UseSuspenseQueryResult"].map((name) => [name, SOLID_QUERY_TYPE])),
+    },
+  },
   "@tanstack/react-router": { to: "@tanstack/solid-router", version: "2.0.0-rc.11", note: "on the rc tag; it still depends on some Solid 1 helper packages, so expect peer warnings" },
   "react-router": { to: "@solidjs/router", version: "2.0.0", note: "a different API: routes, loaders and hooks need rewriting" },
   "react-router-dom": { to: "@solidjs/router", version: "2.0.0", note: "a different API: routes, loaders and hooks need rewriting" },
   // lucide-solid is the Solid 1 package.
-  "lucide-react": { to: "@lucide/solid", version: "1.76.0" },
+  "lucide-react": {
+    to: "@lucide/solid",
+    version: "1.76.0",
+    lacks: {
+      createLucideIcon: "@lucide/solid has no createLucideIcon: render <Icon iconNode={...} /> (Icon from @lucide/solid)",
+      useLucideContext: "@lucide/solid exports LucideContext: read it with useContext(LucideContext)",
+    },
+  },
   "@base-ui/react": { to: "@solidports/base-ui", note: "installs and works on Solid 2.0.x, with type errors on stable (HTMLAttributes gained a data-* index signature in @solidjs/web rc.16) and dev warnings in a few form components until a fix release; render takes a tag or a function, render={(p) => <a {...p} />}, not an element" },
   "@base-ui-components/react": { to: "@solidports/base-ui", note: "Base UI's old name. The port installs and works on Solid 2.0.x, with type errors on stable (HTMLAttributes gained a data-* index signature in @solidjs/web rc.16) and dev warnings in a few form components until a fix release; render takes a tag or a function, render={(p) => <a {...p} />}, not an element" },
   "@vitejs/plugin-react": { to: "@solidjs/vite-plugin", version: "3.0.1", note: "needs Vite 8 or 9 and Node 22.12 or newer" },
   "@vitejs/plugin-react-swc": { to: "@solidjs/vite-plugin", version: "3.0.1", note: "needs Vite 8 or 9 and Node 22.12 or newer" },
-  "@testing-library/react": { to: "@solidjs/testing-library", version: "1.0.0-rc.2", note: "tests aren't converted: render takes a function, render(() => <App />), and there is no rerender with new props" },
+  "@testing-library/react": {
+    to: "@solidjs/testing-library",
+    version: "1.0.0-rc.2",
+    note: "tests aren't converted: render takes a function, render(() => <App />), and there is no rerender with new props",
+    lacks: {
+      act: "@solidjs/testing-library has no act: Solid 2 applies writes on flush() (from solid-js); call it, or await a findBy query",
+      ...Object.fromEntries(["RenderResult", "RenderOptions", "BaseRenderOptions", "ClientRenderOptions", "HydrateOptions", "RenderHookResult", "RenderHookOptions", "BaseRenderHookOptions", "ClientRenderHookOptions", "HydrateHookOptions"].map((name) => [name, SOLID_TESTING_TYPE])),
+    },
+  },
   // Not a port: the same package, given Solid's JSX runtime instead of React's.
   "hast-util-to-jsx-runtime": { to: "hast-util-to-jsx-runtime", note: "pass jsx, jsxs and Fragment from @solidjs/h/jsx-runtime, with elementAttributeNameCase: \"html\" and stylePropertyNameCase: \"css\"" },
 };
@@ -202,7 +241,8 @@ export function migratePackageJson(text, peers = null) {
         changed = true;
         continue;
       }
-      if (port?.version || REMOVED.has(e.key)) flags.push({ kind: "dependency", detail: `${e.key} is "${range}": ${port ? `replace it with ${port.to}@${port.version}` : "remove it"} where that range is defined` });
+      // The converted code already imports the port (R44), so it matches once the range is swapped.
+      if (port?.version || REMOVED.has(e.key)) flags.push({ kind: "dependency", detail: `${e.key} is "${range}": ${port ? `replace it with ${port.to}@${port.version}` : "remove it"} where that range is defined${port?.lacks ? `; the converted files already import ${port.to}` : ""}` });
       else if (port) flags.push({ kind: "dependency", detail: `${e.key} -> ${port.to}: ${port.note}` });
       else if (NO_PORT[e.key]) flags.push({ kind: "dependency", detail: `${e.key} has no Solid 2 port: ${NO_PORT[e.key]}` });
       else if (LINT_PLUGINS.has(e.key)) flags.push({ kind: "dependency", detail: `${e.key} lints React code: remove it and its lint config, or switch to eslint-plugin-solid` });
@@ -248,13 +288,30 @@ export function migratePackageJson(text, peers = null) {
 }
 
 // tsconfig: Solid's JSX. Only a file that sets `jsx` gets `jsxImportSource` (`jsx` says whether
-// it's on); `types` loses React's.
-export function migrateTsconfig(text) {
+// it's on); `types` loses React's. A `paths` entry into the source of another workspace package
+// that depends on React is flagged: that source now compiles as Solid JSX. `dir` is the tsconfig's
+// directory and `reactPackages` those packages' directories, both from the repo root.
+export function migrateTsconfig(text, { dir = "", reactPackages = [] } = {}) {
   const changes = [];
   const flags = [];
   const root = parseJsonc(text);
   const options = root.entries?.find((e) => e.key === "compilerOptions")?.value;
   if (!options?.entries) return { text, changes, flags, jsx: false };
+  const baseUrl = options.entries.find((e) => e.key === "baseUrl");
+  const base = [dir, baseUrl ? JSON.parse(text.slice(baseUrl.value.start, baseUrl.value.end)) : ""].filter(Boolean).join("/");
+  for (const path of options.entries.find((e) => e.key === "paths")?.value.entries ?? []) {
+    for (const target of path.value.entries ?? []) {
+      const to = JSON.parse(text.slice(target.start, target.end));
+      const segments = [];
+      for (const s of `${to.startsWith("/") ? "" : base}/${to.replace(/\*.*$/, "")}`.split("/")) {
+        if (s === "..") segments.pop();
+        else if (s && s !== ".") segments.push(s);
+      }
+      const resolved = segments.join("/");
+      const pkg = reactPackages.find((p) => resolved === p || resolved.startsWith(`${p}/`));
+      if (pkg) flags.push({ kind: "build config", detail: `paths maps "${path.key}" to ${to}, the source of ${pkg}, which depends on React: with "jsxImportSource": "@solidjs/web" it now compiles as Solid JSX. Convert ${pkg} too, or point the path at its built output` });
+    }
+  }
   const edits = [];
   const jsx = options.entries.find((e) => e.key === "jsx");
   if (jsx && text.slice(jsx.value.start, jsx.value.end) !== '"preserve"') {

@@ -277,3 +277,17 @@ it("a package that peers on a React package depends on React too", () => {
   const lock = `lockfileVersion: '9.0'\n\npackages:\n\n  next@16.0.0:\n    peerDependencies:\n      react: ^19.0.0\n      sass: ^1.3.0\n\n  nuqs@1.20.0:\n    peerDependencies:\n      next: '>=13.4'\n\n  sass@1.99.0:\n    resolution: {integrity: sha512-x}\n\n  zundo@2.3.0:\n    peerDependencies:\n      zustand: ^5.0.0\n\n  zustand@5.0.9:\n    peerDependencies:\n      '@types/react': '>=18'\n      react: '>=18'\n`;
   expect(reactPeers("pnpm-lock.yaml", lock)).toEqual(["next", "nuqs", "zundo", "zustand"]);
 });
+
+it("package.json tells a catalog range of a library imported by name that the converted files already import its port", () => {
+  const { flags } = migratePackageJson(`{\n  "dependencies": {\n    "lucide-react": "catalog:",\n    "react": "^19.0.0",\n    "react-router": "catalog:"\n  }\n}\n`);
+  expect(flags.map((f) => f.detail)).toEqual([
+    `lucide-react is "catalog:": replace it with @lucide/solid@1.76.0 where that range is defined; the converted files already import @lucide/solid`,
+    `react-router is "catalog:": replace it with @solidjs/router@2.0.0 where that range is defined`,
+  ]);
+});
+
+it("tsconfig flags a path into the source of another workspace package that depends on React, resolved from baseUrl", () => {
+  const code = `{\n  "compilerOptions": {\n    "baseUrl": ".",\n    "jsx": "preserve",\n    "paths": {\n      "@acme/ui/*": ["../../packages/ui/src/*"],\n      "@acme/db": ["../../packages/db/src/index.ts"],\n      "~/*": ["./src/*"]\n    }\n  }\n}\n`;
+  const { flags } = migrateTsconfig(code, { dir: "apps/web", reactPackages: ["packages/ui", "packages/ui-kit"] });
+  expect(flags).toEqual([{ kind: "build config", detail: expect.stringMatching(/^paths maps "@acme\/ui\/\*" to \.\.\/\.\.\/packages\/ui\/src\/\*, the source of packages\/ui, which depends on React: with "jsxImportSource": "@solidjs\/web" it now compiles as Solid JSX/) }]);
+});

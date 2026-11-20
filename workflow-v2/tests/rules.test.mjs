@@ -5,6 +5,7 @@ import { extract } from "../src/reactivity/extract.mjs";
 import { decide } from "../src/reactivity/decide.mjs";
 import { rewrite } from "../src/reactivity/rewrite.mjs";
 import { applyContracts } from "../src/reactivity/contracts.mjs";
+import { PORTS } from "../src/manifests.mjs";
 
 const run = (code) => transform(code, { parse, Lang });
 const convert = (code) => run(code).code;
@@ -70,7 +71,7 @@ it("R14 turns a render element into a render function that spreads the part's pr
 
 it("R15 keeps literal defaults literal in merge()", () => {
   const code = `function B({ variant = "default", ...rest }: P) { return <b data-v={variant} {...rest} />; }`;
-  expect(convert(code)).toContain(`merge({ variant: "default" } as const, props)`);
+  expect(convert(code)).toContain(`merge({ variant: "default" as const }, props)`);
 });
 
 it("R16 writes boolean aria attributes as strings", () => {
@@ -176,8 +177,18 @@ it("R27 turns a DOM-only useRef into a let and a ref callback", () => {
   expect(flat(code)).toContain(`let box: HTMLDivElement | null = null; const f = () => box?.focus(); return <div ref={(element) => (box = element)} onClick={f} />;`);
 });
 
-it("R27 keeps useRef when the ref object is passed on", () => {
-  expect(convert(`function C() { const r = useRef(null); useThing(r); return <div ref={r} />; }`)).toContain(`useRef(null)`);
+it("R27 makes a ref object passed on a plain { current } object: the body runs once, so that is what useRef was", () => {
+  const code = `import { useRef } from "react";\nfunction C() { const r = useRef<HTMLDivElement>(null); useThing(r); return <div ref={r} />; }`;
+  const { code: out, flags } = run(code);
+  expect(out).toBe(`function C() { const r: { current: HTMLDivElement | null } = { current: null }; useThing(r); return <div ref={(element) => (r.current = element)} />; }`);
+  expect(flags.map((f) => f.kind)).toEqual(["custom hook call"]);
+});
+
+it("R27 flags a ref written while the component renders: it keeps the first value now", () => {
+  const code = `import { useRef } from "react";\nfunction C({ data }) {\n  const latest = useRef(data);\n  latest.current = data;\n  return <button onClick={() => send(latest.current)} />;\n}`;
+  const { code: out, flags } = run(code);
+  expect(out).toContain(`const latest = { current: props.data };\n  latest.current = props.data;`);
+  expect(flags.filter((f) => f.kind === "ref")).toEqual([{ kind: "ref", line: 4, detail: expect.stringMatching(/^latest\.current is written while the component renders/) }]);
 });
 
 it("R28 passes TanStack Query options as a function", () => {
@@ -360,12 +371,12 @@ it("R42 turns a class with only render() into a function component reading props
 
 it("R42 turns static defaultProps into merge, and keeps render's return type", () => {
   const code = convert(`import * as React from "react";\nexport class Badge extends React.PureComponent<{ tone?: "info" | "warn"; children?: React.ReactNode }> {\n  static defaultProps = { tone: "info" };\n  render(): React.ReactNode { return <span data-tone={this.props.tone}>{this.props.children}</span>; }\n}\n`);
-  expect(code).toBe(`import { merge } from "solid-js";\nimport type { JSX } from "@solidjs/web";\nexport function Badge(props: { tone?: "info" | "warn"; children?: JSX.Element }): JSX.Element {\n  const merged = merge({ tone: "info" } as const, props);\n  return <span data-tone={merged.tone}>{merged.children}</span>;\n}\n`);
+  expect(code).toBe(`import { merge } from "solid-js";\nimport type { JSX } from "@solidjs/web";\nexport function Badge(props: { tone?: "info" | "warn"; children?: JSX.Element }): JSX.Element {\n  const merged = merge({ tone: "info" as const }, props);\n  return <span data-tone={merged.tone}>{merged.children}</span>;\n}\n`);
 });
 
 it("R42 moves `const { ... } = this.props` into the parameter, where R8 converts it like any destructured props", () => {
   const code = convert(`import { Component } from "react";\nclass Row extends Component<{ label: string; size?: number }> {\n  render() {\n    const { label, size = 2 } = this.props;\n    return <td colSpan={size}>{label}</td>;\n  }\n}\n`);
-  expect(code).toContain(`function Row(props: { label: string; size?: number }) {\n  const merged = merge({ size: 2 } as const, props);\n  return <td colspan={merged.size}>{merged.label}</td>;\n}`);
+  expect(code).toContain(`function Row(props: { label: string; size?: number }) {\n  const merged = merge({ size: 2 as const }, props);\n  return <td colspan={merged.size}>{merged.label}</td>;\n}`);
 });
 
 it("R42 reads this.props in a nested arrow, which keeps render's this", () => {
@@ -544,4 +555,188 @@ it("R41 flags a dep that is a plain value or a hook result: tracking it never re
   const code = `function C() {\n  const pathname = usePathname();\n  const [debounced] = useDebounce(q);\n  const label = format(x);\n  const save = () => post();\n  const [page, setPage] = useQueryState("p");\n  // solid: client: static (useQueryClient hands back a stable value)\n  const client = useQueryClient();\n  useEffect(() => { track(pathname, debounced, label); save(); setPage(1); client.clear(); }, [pathname, debounced, label, save, setPage, client]);\n  return null;\n}`;
   expect(flat(code)).toContain(`createEffect(() => [pathname, debounced, label, save, setPage, client], () => {`);
   expect(run(code).flags.filter((f) => f.kind === "effect dep")).toEqual([{ kind: "effect dep", line: 9, detail: expect.stringMatching(/^pathname, debounced, label are plain values here \(the component body runs once\), so tracking them never re-runs the effect/) }]);
+});
+
+it.each([
+  ["imported by name", `import { useMemo, useState } from "react";\n`, "useMemo", "useState"],
+  ["through the React namespace", `import * as React from "react";\n`, "React.useMemo", "React.useState"],
+])("R6 reads a useMemo %s once: the compiler pass and the rule don't both add the call", (_how, imports, useMemo, useState) => {
+  const code = `${imports}export function A({ items }: { items: string[] }) {\n  const [n, setN] = ${useState}(0);\n  const label = ${useMemo}(() => (items.length === 0 ? null : \`\${items.length} items\`), [items]);\n  return <p onClick={() => setN(n + 1)}>{label ? <span>{label}</span> : null}{n}</p>;\n}\n`;
+  const results = [decide(extract(code, "/repo/apps/web/src/A.tsx"))];
+  applyContracts(results);
+  const out = run(rewrite(code, results[0]).code).code;
+  expect(out).toContain("{label() ? <span>{label()}</span> : null}");
+  expect(out).not.toContain("label()()");
+});
+
+it("R4 converts a useCallback inside a memo'd component", () => {
+  const code = `import { memo, useCallback, useState } from "react";\nexport const Panel = memo(function Panel() {\n  const [open, setOpen] = useState<Record<string, boolean>>({});\n  const toggle = useCallback((k: string) => {\n    setOpen((prev) => ({ ...prev, [k]: !prev[k] }));\n  }, []);\n  return <Row onToggle={toggle} />;\n});\n`;
+  const out = convert(code);
+  expect(out).toContain(`export const Panel = function Panel() {`);
+  expect(out).toContain(`const toggle = (k: string) => {\n    setOpen((prev) => ({ ...prev, [k]: !prev[k] }));\n  };`);
+  expect(out).not.toContain("useCallback");
+});
+
+it("R6 makes a useMemo that isn't assigned, such as a hook's return, a createMemo", () => {
+  const code = `import { useMemo, useState } from "react";\nexport function usePair() {\n  const [a, setA] = useState(0);\n  return useMemo(() => ({ a, setA }), [a]);\n}\n`;
+  expect(convert(code)).toContain(`return createMemo(() => ({ a: a(), setA }));`);
+});
+
+it("R9 converts FC from a default-and-named react import, and imports Component when it has no type arguments", () => {
+  const code = `import React, { type FC, type ComponentType } from "react";\nexport const Note: FC<{ text: string }> = (props) => <p>{props.text}</p>;\nexport type Slot = { render?: ComponentType };\n`;
+  const out = convert(code);
+  expect(out).toContain(`import type { Component } from "solid-js";`);
+  expect(out).toContain(`export const Note: Component<{ text: string }> = (props) => <p>{props.text}</p>;`);
+  expect(out).toContain(`export type Slot = { render?: Component };`);
+});
+
+it("R9 converts PropsWithChildren to ParentProps and ElementType to ValidComponent, with their imports", () => {
+  const code = `import type * as React from "react";\nexport function Box(props: React.PropsWithChildren<{ as?: React.ElementType }>) { return <div>{props.children}</div>; }\n`;
+  const out = convert(code);
+  expect(out).toContain(`export function Box(props: ParentProps<{ as?: ValidComponent }>)`);
+  expect(out).toContain(`import type { ParentProps } from "solid-js";`);
+  expect(out).toContain(`import type { ValidComponent } from "@solidjs/web";`);
+});
+
+it("R37 reads React.createContext and React.useContext as Solid's", () => {
+  const code = `import * as React from "react";\nconst Ctx = React.createContext<string | null>(null);\nexport function useCtx() { return React.useContext(Ctx); }\n`;
+  const { code: out, flags } = run(code);
+  expect(out).toContain(`import { createContext, useContext } from "solid-js";\nconst Ctx = createContext<string | null>(null);\nexport function useCtx() { return useContext(Ctx); }`);
+  expect(flags.map((f) => f.kind)).not.toContain("React namespace");
+});
+
+it("R10 flags a React hook left without its import where it's used, with what to use, and not as a custom hook", () => {
+  const code = `import { useState, useTransition } from "react";\nexport function Save() {\n  const [n, setN] = useState(0);\n  const [pending, start] = useTransition();\n  return <button onClick={() => start(() => setN(n + 1))}>{String(pending)}</button>;\n}\n`;
+  const { flags } = run(code);
+  expect(flags.filter((f) => f.kind !== "render-dependent read")).toEqual([{ kind: "React API", line: 4, detail: expect.stringMatching(/^useTransition was imported from react and has no conversion here; its import was removed\. Solid 2 has no transition to start/) }]);
+});
+
+it("R10 flags each name still imported from react-dom", () => {
+  const code = `import { hydrateRoot } from "react-dom/client";\nhydrateRoot(document.body, <App />);\n`;
+  expect(run(code).flags).toEqual([{ kind: "React API", line: 2, detail: "hydrateRoot from react-dom/client: @solidjs/web replaces react-dom. use hydrate(() => <App />, element) from @solidjs/web" }]);
+});
+
+it("R10 adds to the file's own solid-js import instead of importing a name twice", () => {
+  const code = `import { createEffect } from "solid-js";\nimport { useState } from "react";\nexport function C() {\n  const [n, setN] = useState(0);\n  createEffect(() => n(), () => {});\n  return <p onClick={() => setN(1)}>{n()}</p>;\n}\n`;
+  const out = convert(code);
+  expect(out).toContain(`import { createEffect, createSignal } from "solid-js";`);
+  expect(out.match(/from "solid-js"/g)).toHaveLength(1);
+});
+
+it("R10 leaves a file already converted to Solid as it is", () => {
+  const code = `import { createSignal, Show } from "solid-js";\nexport function C() {\n  const [n, setN] = createSignal(0);\n  return <Show when={n()}><p onClick={() => setN(1)}>{n()}</p></Show>;\n}\n`;
+  expect(convert(code)).toBe(code);
+});
+
+const ported = (code, names) => transform(code, { parse, Lang, ports: Object.fromEntries(names.map((name) => [name, PORTS[name]])) });
+
+it("R44 imports lucide icons and their types from @lucide/solid", () => {
+  const code = `import { Check, ChevronDownIcon as Chevron } from "lucide-react";\nimport type { LucideIcon, LucideProps } from "lucide-react";\nexport const icons: LucideIcon[] = [Check, Chevron];\n`;
+  const { code: out, flags } = ported(code, ["lucide-react"]);
+  expect(out).toBe(`import { Check, ChevronDownIcon as Chevron } from "@lucide/solid";\nimport type { LucideIcon, LucideProps } from "@lucide/solid";\nexport const icons: LucideIcon[] = [Check, Chevron];\n`);
+  expect(flags).toEqual([]);
+});
+
+it("R44 imports TanStack Query from @tanstack/solid-query and flags what it doesn't export, with what to use", () => {
+  const code = `import { QueryClientProvider, useQuery, useSuspenseQuery } from "@tanstack/react-query";\nexport { useMutation } from "@tanstack/react-query";\n`;
+  const { code: out, flags } = ported(code, ["@tanstack/react-query"]);
+  expect(out).toBe(`import { QueryClientProvider, useQuery, useSuspenseQuery } from "@tanstack/solid-query";\nexport { useMutation } from "@tanstack/solid-query";\n`);
+  expect(flags).toEqual([{ kind: "ported library", line: 1, detail: "useSuspenseQuery from @tanstack/solid-query: use useQuery: reading its data suspends under <Loading>, which is what useSuspenseQuery did" }]);
+});
+
+it("R44 leaves a library alone when the project doesn't move it to its port, and flags a subpath when it does", () => {
+  const code = `import { Check } from "lucide-react";\nimport { DynamicIcon } from "lucide-react/dynamic";\n`;
+  expect(run(code).code).toBe(code);
+  expect(ported(code, ["lucide-react"]).flags).toEqual([{ kind: "ported library", line: 2, detail: "lucide-react/dynamic is a subpath of lucide-react, whose imports now come from @lucide/solid: find its counterpart there" }]);
+});
+
+it("R45 turns createPortal into <Portal mount>", () => {
+  const code = `import { createPortal } from "react-dom";\nexport function Modal(props: { open: boolean }) {\n  return <div>{props.open && createPortal(<dialog open />, document.body)}{createPortal(<p />, document.body)}</div>;\n}\n`;
+  const out = convert(code);
+  expect(out).toBe(`import { Portal } from "@solidjs/web";\nexport function Modal(props: { open: boolean }) {\n  return <div>{props.open && <Portal mount={document.body}><dialog open /></Portal>}<Portal mount={document.body}><p /></Portal></div>;\n}\n`);
+});
+
+it("R8 makes a prop used as a JSX tag a component with dynamic()", () => {
+  const code = `export function Item({ icon: Icon, label }: { icon: Comp; label: string }) {\n  return <li><Icon class="size-4" />{label}</li>;\n}\n`;
+  const out = convert(code);
+  expect(out).toContain(`import { dynamic } from "@solidjs/web";`);
+  expect(out).toContain(`export function Item(props: { icon: Comp; label: string }) {\n  const Icon = dynamic(() => props.icon);\n  return <li><Icon class="size-4" />{props.label}</li>;`);
+});
+
+it("R8 flags a prop used as a JSX tag in a file with a dynamic of its own", () => {
+  const code = `import dynamic from "next/dynamic";\nconst Chart = dynamic(() => import("./chart"));\nexport function Item({ icon: Icon }: { icon: Comp }) {\n  return <Icon />;\n}\n`;
+  const { code: out, flags } = run(code);
+  expect(out).not.toContain("const Icon =");
+  expect(flags.filter((f) => f.kind === "prop as tag")).toEqual([{ kind: "prop as tag", line: 3, detail: "<Icon> renders the icon prop: write const Icon = dynamic(() => props.icon) with dynamic from @solidjs/web (this file has a dynamic of its own)" }]);
+});
+
+it("R8 makes a default that reads another prop a getter over props", () => {
+  const code = `export function Toolbar({ isMarkdown, limit = 10, showRefresh = !isMarkdown, rows = limit }: P) {\n  return <p>{showRefresh}{rows}</p>;\n}\n`;
+  expect(convert(code)).toContain(`const merged = merge({ limit: 10 as const, get showRefresh() { return !props.isMarkdown; }, get rows() { return (props.limit ?? 10); } }, props);`);
+});
+
+it("R8 reads a default that reads another default through that one, in parentheses", () => {
+  const code = "export function Chip({ label, labelPrefix, ariaLabel = labelPrefix ? `${labelPrefix}${label}` : label, title = ariaLabel }: P) {\n  return <b aria-label={ariaLabel} title={title} />;\n}\n";
+  expect(convert(code)).toContain("const merged = merge({ get ariaLabel() { return props.labelPrefix ? `${props.labelPrefix}${props.label}` : props.label; }, get title() { return (props.ariaLabel ?? (props.labelPrefix ? `${props.labelPrefix}${props.label}` : props.label)); } }, props);");
+});
+
+it("R8 applies an empty [] or {} default where the prop is read, so merge doesn't type it never[]", () => {
+  const code = `export function Tags({ tags = [], meta = {}, size = "sm" }: P) {\n  return <ul data-size={size}>{tags.length}{meta.x}</ul>;\n}\n`;
+  const out = convert(code);
+  expect(out).toContain(`const merged = merge({ size: "sm" as const }, props);`);
+  expect(out).toContain(`<ul data-size={merged.size}>{(merged.tags ?? []).length}{(merged.meta ?? {}).x}</ul>`);
+});
+
+it("R31 makes a hook's return type Accessor<T> when it now returns an accessor", () => {
+  const code = `export function useLabel(n: number): string | undefined {\n  // solid: return: memo (React scope @1)\n  return createMemo(() => (n ? String(n) : undefined));\n}\nexport function useCount(): number {\n  const [count, setCount] = createSignal(0);\n  return count;\n}\nexport function useName(): string {\n  return "x";\n}\n`;
+  const out = convert(code);
+  expect(out).toContain(`import type { Accessor } from "solid-js";`);
+  expect(out).toContain(`export function useLabel(n: number): Accessor<string | undefined> {`);
+  expect(out).toContain(`export function useCount(): Accessor<number> {`);
+  expect(out).toContain(`export function useName(): string {`);
+});
+
+it("R1 renames React's other camelCase HTML attributes the way Solid's JSX types spell them, on intrinsic elements only", () => {
+  const code = `const el = <><iframe frameBorder="0" allowFullScreen /><img crossOrigin="anonymous" srcSet={s} /><meta httpEquiv="refresh" /><Frame frameBorder="0" /></>;`;
+  expect(convert(code)).toBe(`const el = <><iframe frameborder="0" allowfullscreen /><img crossorigin="anonymous" srcset={s} /><meta http-equiv="refresh" /><Frame frameBorder="0" /></>;`);
+});
+
+it("R1 drops suppressHydrationWarning, which only React reads", () => {
+  expect(convert(`const el = <html lang="en" suppressHydrationWarning><body /></html>;`)).toBe(`const el = <html lang="en"><body /></html>;`);
+});
+
+it("R30 hands a guarded field of an accessor to <Show>'s callback, and a ternary's other branch becomes the fallback", () => {
+  const code = `const el = <div>{node().icon ? <AgentIcon name={node().icon} /> : <Dot />}{user() ? <b>{user().name}</b> : <i>guest</i>}</div>;`;
+  expect(convert(code)).toBe(`import { Show } from "solid-js";\nconst el = <div><Show when={node().icon} fallback={<Dot />}>{(icon) => <AgentIcon name={icon()} />}</Show><Show when={user()} fallback={<i>guest</i>}>{(user) => <b>{user().name}</b>}</Show></div>;`);
+});
+
+it("R30 names the callback's parameter apart from a name the branch already uses", () => {
+  const code = `const el = <div>{item().label && <Tag label={item().label} other={label} />}</div>;`;
+  expect(convert(code)).toBe(`import { Show } from "solid-js";\nconst el = <div><Show when={item().label}>{(labelValue) => <Tag label={labelValue()} other={label} />}</Show></div>;`);
+});
+
+it("R10 drops the React Compiler's directives, and doesn't take them for uses of memo", () => {
+  const code = `import { memo, useState } from "react";\nexport function C() {\n  "use no memo";\n  const [n, setN] = useState(0);\n  return <p onClick={() => setN(1)}>{n}</p>;\n}\nexport const D = memo(C);\n`;
+  const { code: out, flags } = run(code);
+  expect(out).not.toContain("use no memo");
+  expect(flags.filter((f) => f.kind === "React API")).toEqual([]);
+});
+
+it("R10 doesn't take JSX.CSSProperties for a use of React's CSSProperties", () => {
+  const code = `import type { CSSProperties } from "react";\nexport function C(props: { style: CSSProperties }) { return <p style={props.style} />; }\n`;
+  const { code: out, flags } = run(code);
+  expect(out).toContain(`props: { style: JSX.CSSProperties }`);
+  expect(flags).toEqual([]);
+});
+
+it("R8 rewrites a prop read as what a for...of iterates, and as a nested function's parameter default", () => {
+  const code = `function C({ items = [], value }: P) {\n  const seen = new Set();\n  for (const item of items) seen.add(item);\n  function snapshot(query = value, value2 = 1) { return query + value2; }\n  return <p onClick={() => snapshot()}>{seen.size}</p>;\n}\n`;
+  const out = convert(code);
+  expect(out).toContain(`for (const item of (props.items ?? [])) seen.add(item);`);
+  expect(out).toContain(`function snapshot(query = props.value, value2 = 1) {`);
+});
+
+it("R8 leaves a nested function's parameter of the same name alone", () => {
+  const code = `function C({ value }: P) {\n  const f = (value = 2) => value;\n  return <p>{f()}{value}</p>;\n}\n`;
+  expect(convert(code)).toContain(`const f = (value = 2) => value;\n  return <p>{f()}{props.value}</p>;`);
 });

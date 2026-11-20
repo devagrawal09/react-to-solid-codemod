@@ -58,8 +58,11 @@ export default async function main({ params }: { params: { include?: string; app
       install: `${manager} install`,
       ported: reactish.filter((name) => PORTS[name]).map((name) => `${name} -> ${PORTS[name].to}${PORTS[name].version ? `@${PORTS[name].version}` : ""}${PORTS[name].note ? ` (${PORTS[name].note})` : ""}`),
       noPort: reactish.filter((name) => !PORTS[name]).map((name) => (NO_PORT[name] ? `${name}: ${NO_PORT[name]}` : name)),
+      // Ports that export the React library's names: the rule pass imports them instead (R44).
+      byName: reactish.filter((name) => PORTS[name]?.lacks),
     };
   });
+  const ports = Object.fromEntries(plan.byName.map((name) => [name, PORTS[name]]));
 
   if (apply) await step(branch("react-to-solid-2"));
   // Each step returns its per-file results; nothing goes through state.
@@ -84,7 +87,7 @@ export default async function main({ params }: { params: { include?: string; app
       // The rewrite adds its own createMemo import; the rule pass writes the full solid-js import.
       code = rewrite(code, result).code.replace(/^import \{ createMemo \} from "solid-js";\n/m, "");
     }
-    const { code: out, applied, flags } = transform(code, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" } });
+    const { code: out, applied, flags } = transform(code, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" }, ports });
     const changed = out !== file.text;
     if (apply && changed) file.write(out);
     return { file: file.path, changed, applied, flags };
@@ -93,6 +96,8 @@ export default async function main({ params }: { params: { include?: string; app
   // tsconfig files between it and the directory, and its Vite config. A package.json or tsconfig
   // above it is shared with the rest of the workspace, so what would change there is reported.
   const owner = plan.manifest.replace(/\/?package\.json$/, "");
+  // The other workspace packages that depend on React, which this run doesn't convert.
+  const reactPackages = manifests.outputs.map((m) => ({ dir: m.path.replace(/\/?package\.json$/, ""), react: "react" in m.deps })).filter((m) => m.react && !(m.dir === "" || root === m.dir || root.startsWith(`${m.dir}/`))).map((m) => m.dir);
   const configs = await step(apply ? "Move package.json, tsconfig and the Vite config to Solid 2" : "Preview the package.json, tsconfig and Vite config changes", forEachFile({
     include: ["**/package.json", "**/tsconfig*.json", "**/vite.config.ts", "**/vite.config.js", "**/vite.config.mts", "**/vite.config.mjs", "**/next.config.ts", "**/next.config.js", "**/next.config.mjs", "**/next.config.cjs"],
     exclude: ["**/node_modules/**"],
@@ -107,7 +112,7 @@ export default async function main({ params }: { params: { include?: string; app
       return { file: file.path, shared: false, changes: [], flags: [{ kind: "build config", detail: `${name} configures Next.js, which has no Solid 2 equivalent: move what it sets (rewrites, redirects, headers, images, env) to @solidjs/vite-plugin's start mode or SolidStart and vite.config, then delete it` }], jsx: false };
     }
     if (name === "package.json") edit = migratePackageJson(file.text, peers);
-    else if (name.startsWith("tsconfig")) edit = migrateTsconfig(file.text);
+    else if (name.startsWith("tsconfig")) edit = migrateTsconfig(file.text, { dir, reactPackages });
     else if (dir === owner) edit = migrateViteConfig(file.text, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" } });
     else return undefined;
     if (apply && !shared && edit.text !== file.text) file.write(edit.text);

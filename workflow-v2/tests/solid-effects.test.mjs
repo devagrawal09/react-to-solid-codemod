@@ -23,7 +23,7 @@
 // - onSettled in a component body runs once after mount effects, with the DOM inserted, honors a
 //   returned cleanup on dispose, and its reads don't warn. It maps useEffect(fn, []).
 import { afterEach, expect, it } from "vitest";
-import { createEffect, createRenderEffect, createSignal, flush, onCleanup, onSettled } from "solid-js";
+import { createEffect, createRenderEffect, createSignal, flush, merge, onCleanup, onSettled } from "solid-js";
 import { createComponent, render } from "@solidjs/web";
 
 const { warn, error } = console;
@@ -238,4 +238,15 @@ it("R43's zustand bridge: selected state is an accessor that follows the store, 
   expect(m.warnings).toEqual([]);
   m.dispose();
   expect(store.listeners.size).toBe(0);
+});
+
+it("merge() keeps a getter in its defaults live, so R8's default that reads another prop follows that prop", () => {
+  const [markdown, setMarkdown] = createSignal(false);
+  const props = { get isMarkdown() { return markdown(); } };
+  const merged = merge({ get showRefresh() { return !props.isMarkdown; } }, props);
+  expect(merged.showRefresh).toBe(true);
+  setMarkdown(true);
+  flush();
+  expect(merged.showRefresh).toBe(false);
+  expect(merge({ get showRefresh() { return !props.isMarkdown; } }, { showRefresh: true }).showRefresh).toBe(true);
 });

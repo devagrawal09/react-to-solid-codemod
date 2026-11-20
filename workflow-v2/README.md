@@ -23,16 +23,25 @@ npx codemod@alpha run react-to-solid --param apply=true
 
 The run's result holds the summary: the plan (which React libraries have a Solid 2 port), the compiler's decisions, the rules applied, the `package.json`, `tsconfig` and Vite config changes, every flag with its file and line, and the lint counts.
 
+### Troubleshooting
+
+If the run fails with `YAML error: invalid type: string "import { agent, approval, ... } from \"codemod/workflow\"; ...", expected struct Workflow`, the CLI that ran is older than codemod 2.0.0-alpha.2 (the 1.x `codemod`, or 2.0.0-alpha.1): it reads the TypeScript workflow as YAML. npx re-resolves `@alpha` by itself, so a stale one usually comes from a registry mirror or proxy, or an npm `prefer-offline`/`offline` setting. Pin the CLI (`codemod --version` prints `1.18.7` on the 2.0 alpha too, so it can't tell them apart):
+
+```sh
+npx codemod@2.0.0-alpha.4 run react-to-solid   # or: pnpm dlx codemod@alpha run react-to-solid
+npm view codemod dist-tags.alpha               # what your registry calls alpha
+```
+
 ### What it changes in the project
 
 With `apply=true`, the package that owns the converted directory moves to Solid 2. Nothing is installed; the run ends by printing the install command for your package manager.
 
 - **`package.json`**: `react` and `react-dom` become `solid-js` and `@solidjs/web` (`^2.0.3`); `@types/react`, `@types/react-dom` and `babel-plugin-react-compiler` are removed; `@vitejs/plugin-react` (or `-swc`) becomes `@solidjs/vite-plugin`, and a `vite` range below 8 is raised to `^8.3.8`, which that plugin needs (it also needs Node 22.12 or newer). Each library with a verified Solid 2 port is replaced by it (see below). New names go in alphabetically; the rest of the file keeps its order and indentation.
-- **`tsconfig*.json`** between the package and the converted directory: `"jsx": "preserve"` and `"jsxImportSource": "@solidjs/web"`, and React's entries leave `types`. Comments and trailing commas are kept.
+- **`tsconfig*.json`** between the package and the converted directory: `"jsx": "preserve"` and `"jsxImportSource": "@solidjs/web"`, and React's entries leave `types`. Comments and trailing commas are kept. A `paths` entry into the source of another workspace package that depends on React is flagged: that source now compiles as Solid JSX, so convert the package too or point the path at its built output.
 - **`vite.config.{ts,js,mts,mjs}`**: `import react from "@vitejs/plugin-react"` and `plugins: [react()]` become `import solid from "@solidjs/vite-plugin"` and `solid()`. React-only options (a `babel` setup that only runs the React Compiler, `jsxRuntime`, `jsxImportSource`, `fastRefresh`) are dropped; any other shape is flagged with what to write.
 - **Entry**: `createRoot(el).render(<StrictMode><App /></StrictMode>)` becomes `render(() => <App />, el)` from `@solidjs/web`.
 
-It flags rather than changes: a `catalog:` or `workspace:` range (change it where the catalog defines it), a `package.json` or `tsconfig` above the package (shared with the rest of a monorepo), the React lint plugins (`eslint-plugin-react-hooks` and the like, which your lint config loads), a `next.config.*`, and every React library without a Solid 2 port. A library counts as a React library when the lockfile (`pnpm-lock.yaml`, `package-lock.json`, or yarn berry's `yarn.lock`) says it peers on `react` or `react-dom`, directly or through another peer (`nuqs` peers on `next`); without such a lockfile, when its name contains "react".
+It flags rather than changes: a `catalog:` or `workspace:` range (change it where the catalog defines it; for a library imported by name, below, the flag says the converted files already import the port), a `package.json` or `tsconfig` above the package (shared with the rest of a monorepo), the React lint plugins (`eslint-plugin-react-hooks` and the like, which your lint config loads), a `next.config.*`, and every React library without a Solid 2 port. A library counts as a React library when the lockfile (`pnpm-lock.yaml`, `package-lock.json`, or yarn berry's `yarn.lock`) says it peers on `react` or `react-dom`, directly or through another peer (`nuqs` peers on `next`); without such a lockfile, when its name contains "react".
 
 ### Next.js
 
@@ -45,6 +54,8 @@ Next.js has no Solid 2 equivalent; the closest is `@solidjs/vite-plugin`'s start
 ### React libraries and their Solid 2 ports
 
 The table is in `src/manifests.mjs`, checked on npm on Nov 19 against `solid-js@2.0.3`. A dependency step will replace it.
+
+Three ports export the React library's names, so the code's imports move with the dependency (R44): `lucide-react` → `@lucide/solid` (every icon name, with its `Icon` and `Lucide` aliases, `LucideIcon` and `LucideProps`), `@tanstack/react-query` → `@tanstack/solid-query`, and `@testing-library/react` → `@solidjs/testing-library`. Each was compared with the port's type declarations; an import of a name the port lacks is flagged (`ported library`) with what to use: `createLucideIcon`, `useLucideContext`; `useSuspenseQuery` and the other suspense hooks (solid-query's `useQuery` suspends under `<Loading>` when its data is read), `usePrefetchQuery`, `HydrationBoundary`, `QueryErrorResetBoundary` and some types; `act` and the render option and result types. A subpath (`lucide-react/dynamic`) is flagged too. `react-dom`'s `createPortal(children, el)` becomes `<Portal mount={el}>` from `@solidjs/web` (R45); any other `react-dom` name left is flagged.
 
 | React | Solid 2 | |
 |---|---|---|
@@ -93,9 +104,18 @@ export const useStore = Object.assign((selector) => {
 
 `ownedWrite` is needed: a store write made while a component or a computation runs would otherwise throw `REACTIVE_WRITE_IN_OWNED_SCOPE`. `tests/solid-effects.test.mjs` runs this bridge on solid-js 2.0.3, over a store with `zustand/vanilla`'s API.
 
+### Props, refs and types
+
+- **Destructured props** (R8) become `props.x`. Defaults go through `merge`, each literal with `as const` so a union-typed prop keeps its type. A default that reads another prop (`{ showRefresh = !isMarkdown }`) becomes a getter, `get showRefresh() { return !props.isMarkdown; }`, which `merge` keeps live. An empty `[]` or `{}` default is applied where the prop is read (`(merged.tags ?? [])`): in `merge` it would type the prop `never[] | T[]`, whose `.map` doesn't type-check. A prop used as a JSX tag (`{ icon: Icon }` and `<Icon />`) becomes `const Icon = dynamic(() => props.icon)`, `@solidjs/web`'s replacement for `<Dynamic>`; in a file with a `dynamic` of its own (Next.js's), it's flagged.
+- **`useRef`** (R27) used only as `x.current` and `ref={x}` becomes a `let` and a ref callback. Passed on as a value (to a hook, or returned), it becomes a plain `{ current }` object, which is what `useRef` was in a body that runs once; one written while the component renders (`latest.current = value`) is converted the same way and flagged, since it now keeps its first value.
+- **Narrowing**: TypeScript doesn't narrow a call, so `{x() && <A v={x().foo} />}`, and the same over a field (`{x().icon ? <I name={x().icon} /> : <Dot />}`), become `<Show when={...} fallback={...}>` with a callback that reads the narrowed value (R30).
+- **Types** (R9, R31): `FC`, `ComponentType` → `Component`, `PropsWithChildren` → `ParentProps`, `ElementType` → `ValidComponent`, each imported; a custom hook annotated with its value's type that now returns an accessor gets `Accessor<T>`. React APIs with no conversion are flagged where they're used, with what to use (`React API`).
+- **Attributes** (R1): React's camelCase HTML attributes are spelled as `@solidjs/web`'s JSX types spell them (`frameBorder` → `frameborder`, `httpEquiv` → `http-equiv`, ...), on intrinsic elements; `suppressHydrationWarning` and the React Compiler's `"use memo"` directives are dropped.
+- **Imports** (R10): Solid names join the file's own `solid-js` or `@solidjs/web` import, so a second run, or a file already partly in Solid, doesn't import a name twice.
+
 ### Class components
 
-R42 converts a class component that is only `render()` (and optionally `static defaultProps`) and reads nothing of `this` but `this.props`: it becomes `function X(props: P)`, `this.props` becomes `props`, and `defaultProps` becomes `const merged = merge({ ... } as const, props)`. Its render can only return, after an optional `const { ... } = this.props`, which moves into the parameter for R8 to convert. Anything else stays a class and is flagged (`class component`, R39) with what its lifecycle methods become: state, lifecycle or error-boundary methods, instance fields, other statics, other uses of `this`, a value computed above the return (Solid would compute it once), or `X.defaultProps = ...` after the class.
+R42 converts a class component that is only `render()` (and optionally `static defaultProps`) and reads nothing of `this` but `this.props`: it becomes `function X(props: P)`, `this.props` becomes `props`, and `defaultProps` becomes `const merged = merge({ ... }, props)`, each literal default with `as const`. Its render can only return, after an optional `const { ... } = this.props`, which moves into the parameter for R8 to convert. Anything else stays a class and is flagged (`class component`, R39) with what its lifecycle methods become: state, lifecycle or error-boundary methods, instance fields, other statics, other uses of `this`, a value computed above the return (Solid would compute it once), or `X.defaultProps = ...` after the class.
 
 ### After it runs
 
@@ -103,7 +123,7 @@ R42 converts a class component that is only `render()` (and optionally `static d
 2. Finish each flagged spot. The most common are custom hook results, values read in a component body (which runs once in Solid), class components with state or lifecycle methods (Solid has none; an error boundary becomes `<Errored>`), server components, zustand stores (see [zustand stores](#zustand-stores)), Next.js imports, effect deps that are plain values (see [Effects](#effects)), and libraries without a Solid 2 port.
 3. Type-check, build and run the app.
 
-On create-vite's React TypeScript template (create-vite 9.3.4, Nov 19), `apply=true`, then `npm install` and `npm run build`, builds with no hand edits; with two components added that subscribe in an effect and log on mount, it builds too, and a jsdom test shows the effect subscribe, re-subscribe on a prop change and clean up. On t3code's `apps/web/src`, 0.1.3 converted every file and was type-checked against Solid 2.0.1, which is where the 0.1.3 fixes came from; a large app still needs its flagged spots and libraries finished by hand, and t3code hasn't been built.
+On create-vite's React TypeScript template (create-vite 9.3.4, Nov 19), `apply=true`, then `npm install` and `npm run build`, builds with no hand edits; with two components added that subscribe in an effect and log on mount, it builds too, and a jsdom test shows the effect subscribe, re-subscribe on a prop change and clean up. With 0.1.7 (Nov 20), the template plus a component that uses `lucide-react` icons (one passed as a prop and rendered as a tag), `useQuery` and a `useMemo`, under a `QueryClientProvider`, converts to `@lucide/solid` and `@tanstack/solid-query` and passes `tsc -b && vite build` with no hand edits. On a large Next.js app, type errors went from 13,038 with 0.1.5 to 11,089 with 0.1.7; most of the rest come from workspace packages and libraries that are still React. On t3code's `apps/web/src`, 0.1.3 converted every file and was type-checked against Solid 2.0.1, which is where the 0.1.3 fixes came from; a large app still needs its flagged spots and libraries finished by hand, and t3code hasn't been built.
 
 ## Steps
 
@@ -115,7 +135,7 @@ On create-vite's React TypeScript template (create-vite 9.3.4, Nov 19), `apply=t
 | branch / commit | `branch`, `commit` | Only with `--param apply=true` and `--managed-git` |
 | Run the React Compiler on each file | `forEachFile` | `babel-plugin-react-compiler@1.0.0` decides what each component-body value becomes; each file's result is a step output |
 | Resolve hook contracts across files | function | The whole-program hook-contract pass, over every file's result |
-| Convert each file to Solid 2 (preview: Preview the conversion of each file) | `forEachFile` | Writes each decision with a `// solid:` note, then runs the rule pass (`src/rules/mechanical.mjs`, R1-R43) on that text; applied rules and flags are step outputs. A preview writes nothing |
+| Convert each file to Solid 2 (preview: Preview the conversion of each file) | `forEachFile` | Writes each decision with a `// solid:` note, then runs the rule pass (`src/rules/mechanical.mjs`, R1-R45) on that text; applied rules and flags are step outputs. A preview writes nothing |
 | Move package.json, tsconfig and the Vite config to Solid 2 (preview: Preview the package.json, tsconfig and Vite config changes) | `forEachFile` | `src/manifests.mjs`, as above. A preview writes nothing |
 | Summarize the conversion | function | Decision counts, applied rules, flags |
 | Install the Solid 2 lint, Lint | `shell` | Only with `--param apply=true`: `eslint-plugin-solid` 0.19.0, `configs/v2`, on the converted files; the summary is the last line of the lint step's output |
@@ -140,7 +160,7 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 | `src/workflow.ts` | The workflow |
 | `src/reactivity/` | The reactivity pass: the root `src/` of this repo with fixes found on t3code, and `enableReanimatedCheck` off |
 | `src/lib/reactivity.mjs` | `src/reactivity/` with Babel and the React Compiler, bundled by `pnpm build`; committed, so the workflow runs without a build step |
-| `src/rules/mechanical.mjs` | The rule pass, R1-R43 (R1-R10 from the root `gate/mechanical.js`, R11-R34 from hand-converted screens, R35-R40 from later runs on apps, R41 effects, R42 render-only class components, R43 zustand stores), as `transform(src, { parse, Lang })`, so it runs under `@ast-grep/napi` and `codemod/ast-grep` |
+| `src/rules/mechanical.mjs` | The rule pass, R1-R45 (R1-R10 from the root `gate/mechanical.js`, R11-R34 from hand-converted screens, R35-R40 from later runs on apps, R41 effects, R42 render-only class components, R43 zustand stores, R44 ported libraries' imports, R45 `createPortal`), as `transform(src, { parse, Lang, ports })`, so it runs under `@ast-grep/napi` and `codemod/ast-grep` |
 | `src/manifests.mjs` | The port table, the lockfile's React peers, and the `package.json`, `tsconfig` and Vite config edits |
 | `src/lint/` | ESLint 9 with `eslint-plugin-solid/configs/v2`; the workflow finds it through `import.meta.dirname` |
 | `workflow.yaml` | A stub: codemod 2.0.0-alpha.4 won't start a registry package without one. `codemod.yaml` runs `src/workflow.ts` |
@@ -149,6 +169,6 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 ## Tests
 
 ```sh
-pnpm test                                       # reactivity (54), rule (115), project file (23) and Solid behavior (11) specs
-CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (24, tagged slow), which run the CLI on copies of tests/fixtures/todo-app
+pnpm test                                       # reactivity (54), rule (145), project file (25) and Solid behavior (12) specs
+CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (26, tagged slow), which run the CLI on copies of tests/fixtures/todo-app
 ```

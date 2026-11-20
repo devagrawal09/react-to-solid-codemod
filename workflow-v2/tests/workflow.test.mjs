@@ -173,7 +173,7 @@ describe.skipIf(!bin)("react-to-solid workflow on one app of a monorepo", { tags
     fs.mkdirSync(path.join(repo, "apps/web"), { recursive: true });
     fs.cpSync(path.join(fixture, "src"), path.join(repo, "apps/web/src"), { recursive: true });
     fs.writeFileSync(path.join(repo, "apps/web/package.json"), `{\n  "name": "web",\n  "dependencies": {\n    "react": "19.2.0",\n    "react-dom": "19.2.0"\n  },\n  "devDependencies": {\n    "@vitejs/plugin-react": "^5.0.0",\n    "vite": "^7.1.0"\n  }\n}\n`);
-    fs.writeFileSync(path.join(repo, "apps/web/tsconfig.json"), `{\n  "extends": "../../tsconfig.base.json",\n  "include": ["src"]\n}\n`);
+    fs.writeFileSync(path.join(repo, "apps/web/tsconfig.json"), `{\n  "extends": "../../tsconfig.base.json",\n  "compilerOptions": {\n    "paths": { "@other/*": ["../other/src/*"], "~/*": ["./src/*"] }\n  },\n  "include": ["src"]\n}\n`);
     fs.writeFileSync(path.join(repo, "apps/web/vite.config.ts"), viteConfig);
     fs.mkdirSync(path.join(repo, "apps/other"), { recursive: true });
     fs.writeFileSync(path.join(repo, "apps/other/package.json"), otherPackage);
@@ -197,6 +197,10 @@ describe.skipIf(!bin)("react-to-solid workflow on one app of a monorepo", { tags
     expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "package.json", kind: "shared config", detail: "shared with the workspace, so not changed: removed @types/react" }));
     expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "apps/web", kind: "build config", detail: expect.stringContaining("no tsconfig on the way to apps/web/src sets jsx") }));
   });
+
+  it("flags a tsconfig path into the source of another package that depends on React, which now compiles as Solid JSX", () => {
+    expect(run.output.flags.filter((f) => f.file === "apps/web/tsconfig.json")).toEqual([{ file: "apps/web/tsconfig.json", line: 0, kind: "build config", detail: expect.stringMatching(/^paths maps "@other\/\*" to \.\.\/other\/src\/\*, the source of apps\/other, which depends on React/) }]);
+  });
 });
 
 describe.skipIf(!bin)("react-to-solid workflow on an app with React libraries and a class component", { tags: ["slow"] }, () => {
@@ -209,6 +213,7 @@ describe.skipIf(!bin)("react-to-solid workflow on an app with React libraries an
       fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify(pkg, null, 2));
       fs.writeFileSync(path.join(dir, "src/components/Boundary.tsx"), `import { Component, type ReactNode } from "react";\n\nexport class Boundary extends Component<{ children: ReactNode }, { failed: boolean }> {\n  state = { failed: false };\n  static getDerivedStateFromError() {\n    return { failed: true };\n  }\n  render() {\n    return this.state.failed ? <p>Failed</p> : this.props.children;\n  }\n}\n`);
       fs.writeFileSync(path.join(dir, "src/components/Hint.tsx"), `import { Component } from "react";\n\nexport class Hint extends Component<{ text: string; tone?: string }> {\n  static defaultProps = { tone: "muted" };\n  render() {\n    return <small className={this.props.tone}>{this.props.text}</small>;\n  }\n}\n`);
+      fs.writeFileSync(path.join(dir, "src/components/Done.tsx"), `import { Check, createLucideIcon } from "lucide-react";\n\nexport const Star = createLucideIcon("star", []);\nexport function Done() {\n  return <Check className="ok" />;\n}\n`);
       fs.writeFileSync(path.join(dir, "src/chat-store.ts"), `import { create } from "zustand";\n\nexport const useChat = create<{ threadId: string | null; setThreadId: (id: string) => void }>()((set) => ({\n  threadId: null,\n  setThreadId: (id) => set({ threadId: id }),\n}));\n`);
       fs.writeFileSync(path.join(dir, "src/components/Thread.tsx"), `import { useEffect } from "react";\nimport { useChat } from "../chat-store";\n\nexport function Thread({ id }: { id: string }) {\n  const threadId = useChat((s) => s.threadId);\n  const setThreadId = useChat((s) => s.setThreadId);\n  useEffect(() => {\n    document.title = threadId ?? "";\n  }, [threadId]);\n  return <button onClick={() => setThreadId(id)}>{threadId}</button>;\n}\n`);
     });
@@ -216,7 +221,7 @@ describe.skipIf(!bin)("react-to-solid workflow on an app with React libraries an
   }, 120_000);
 
   it("turns a class with only render() into a function component, its defaultProps into merge", () => {
-    expect(read(app, "src/components/Hint.tsx")).toBe(`import { merge } from "solid-js";\n\nexport function Hint(props: { text: string; tone?: string }) {\n  const merged = merge({ tone: "muted" } as const, props);\n  return <small class={merged.tone}>{merged.text}</small>;\n}\n`);
+    expect(read(app, "src/components/Hint.tsx")).toBe(`import { merge } from "solid-js";\n\nexport function Hint(props: { text: string; tone?: string }) {\n  const merged = merge({ tone: "muted" as const }, props);\n  return <small class={merged.tone}>{merged.text}</small>;\n}\n`);
   });
 
   it("reads a zustand store's selected state as an accessor, calls its action directly, and flags the store once with the bridge", () => {
@@ -229,6 +234,11 @@ describe.skipIf(!bin)("react-to-solid workflow on an app with React libraries an
 
   it("maps React libraries to their Solid 2 ports", () => {
     expect(run.output.plan.ported).toContain("lucide-react -> @lucide/solid@1.76.0");
+  });
+
+  it("imports a ported library from its port, flagging a name the port doesn't have", () => {
+    expect(read(app, "src/components/Done.tsx")).toContain(`import { Check, createLucideIcon } from "@lucide/solid";`);
+    expect(run.output.flags.filter((f) => f.kind === "ported library")).toEqual([{ file: "src/components/Done.tsx", line: 1, kind: "ported library", detail: expect.stringMatching(/^createLucideIcon from @lucide\/solid: @lucide\/solid has no createLucideIcon/) }]);
   });
 
   it("lists libraries without a Solid 2 port, with what to do when the table knows", () => {

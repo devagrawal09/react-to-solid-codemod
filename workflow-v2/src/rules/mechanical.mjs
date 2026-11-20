@@ -7,12 +7,43 @@
 // screen ports (t3code OpenTelemetry and Keybindings, codemod-app Repositories > Indexing).
 
 const ATTRS = { className: "class", htmlFor: "for", tabIndex: "tabindex", readOnly: "readonly", autoFocus: "autofocus", autoComplete: "autocomplete", maxLength: "maxlength", minLength: "minlength", spellCheck: "spellcheck", colSpan: "colspan", rowSpan: "rowspan" };
+// React's other camelCase HTML attributes, as @solidjs/web 2.0.3's JSX types spell them (lowercase,
+// or HTML's own dashed name). Only on intrinsic elements: a component's props keep their names.
+const DOM_ATTRS = {
+  acceptCharset: "accept-charset",
+  httpEquiv: "http-equiv",
+  ...Object.fromEntries(["accessKey", "allowFullScreen", "allowTransparency", "autoCapitalize", "autoCorrect", "autoPlay", "charSet", "classID", "contentEditable", "contextMenu", "controlsList", "crossOrigin", "dateTime", "dirName", "disablePictureInPicture", "disableRemotePlayback", "encType", "enterKeyHint", "fetchPriority", "formAction", "formEncType", "formMethod", "formNoValidate", "formTarget", "frameBorder", "hrefLang", "imageSizes", "imageSrcSet", "inputMode", "itemID", "itemProp", "itemRef", "itemScope", "itemType", "keyParams", "keyType", "marginHeight", "marginWidth", "mediaGroup", "noModule", "noValidate", "playsInline", "popoverTarget", "popoverTargetAction", "referrerPolicy", "srcDoc", "srcLang", "srcSet", "useMap"].map((name) => [name, name.toLowerCase()])),
+};
 const FN_KINDS = new Set(["arrow_function", "function_expression", "function_declaration", "method_definition"]);
 const SVG_ATTRS = ["strokeWidth", "strokeLinecap", "strokeLinejoin", "strokeDasharray", "strokeDashoffset", "strokeOpacity", "strokeMiterlimit", "fillOpacity", "fillRule", "clipRule", "clipPath", "stopColor", "stopOpacity", "textAnchor", "dominantBaseline", "markerStart", "markerMid", "markerEnd", "vectorEffect", "shapeRendering", "colorInterpolationFilters", "floodColor", "floodOpacity", "lightingColor", "pointerEvents", "fontFamily", "fontSize", "fontWeight"];
 const NON_TEXT_INPUTS = new Set(["checkbox", "radio", "file", "submit", "button", "reset", "image", "color", "hidden"]);
 const REACT_EVENTS = { MouseEvent: "MouseEvent", KeyboardEvent: "KeyboardEvent", FocusEvent: "FocusEvent", PointerEvent: "PointerEvent", DragEvent: "DragEvent", TouchEvent: "TouchEvent", WheelEvent: "WheelEvent", ClipboardEvent: "ClipboardEvent", CompositionEvent: "CompositionEvent", AnimationEvent: "AnimationEvent", TransitionEvent: "TransitionEvent", UIEvent: "UIEvent", ChangeEvent: "Event", FormEvent: "Event", SyntheticEvent: "Event", InputEvent: "InputEvent" };
 // React's unitless CSS properties: it adds px to any other number.
 const UNITLESS = new Set(["animationIterationCount", "aspectRatio", "borderImageOutset", "borderImageSlice", "borderImageWidth", "boxFlex", "boxFlexGroup", "boxOrdinalGroup", "columnCount", "columns", "flex", "flexGrow", "flexPositive", "flexShrink", "flexNegative", "flexOrder", "gridArea", "gridRow", "gridRowEnd", "gridRowSpan", "gridRowStart", "gridColumn", "gridColumnEnd", "gridColumnSpan", "gridColumnStart", "fontWeight", "lineClamp", "lineHeight", "opacity", "order", "orphans", "scale", "tabSize", "widows", "zIndex", "zoom", "fillOpacity", "floodOpacity", "stopOpacity", "strokeDasharray", "strokeDashoffset", "strokeMiterlimit", "strokeOpacity", "strokeWidth"]);
+// What to use for a React or react-dom API with no conversion here (R10 flags each one left).
+const REACT_API = {
+  useTransition: "Solid 2 has no transition to start: call the callback directly; async work in a createMemo or an action shows as pending through isPending(() => value) and <Loading>",
+  startTransition: "call the callback directly: Solid 2 keeps showing the current UI under <Loading> while async work settles",
+  useDeferredValue: "read the value directly; isPending(() => value) says when a newer one is on its way",
+  useSyncExternalStore: "const [value, setValue] = createSignal(getSnapshot(), { ownedWrite: true }); onCleanup(subscribe(() => setValue(getSnapshot())))",
+  useImperativeHandle: "call the ref prop with the API object: props.ref?.(api)",
+  useActionState: "use action from solid-js, with a signal for its state",
+  useOptimistic: "use createOptimistic from solid-js",
+  useInsertionEffect: "use createRenderEffect",
+  forwardRef: "a ref is a plain prop in Solid: take props.ref",
+  Children: "use children(() => props.children) from solid-js, and its toArray()",
+  cloneElement: "Solid's elements are DOM nodes, not descriptions: pass props or a render function instead",
+  isValidElement: "Solid has no element objects: check for a DOM node or a function",
+  createElement: "use JSX, or h from @solidjs/h",
+  cache: "React's server-request cache: load the data in a server function in SolidStart or @solidjs/vite-plugin's start mode",
+  hydrateRoot: "use hydrate(() => <App />, element) from @solidjs/web",
+  renderToString: "use renderToString(() => <App />) from @solidjs/web",
+  renderToStaticMarkup: "use renderToString(() => <App />) from @solidjs/web",
+  createPortal: "use <Portal mount={container}> from @solidjs/web",
+  preconnect: "add a <link rel=\"preconnect\"> with useHead from @solidjs/web",
+  preload: "add a <link rel=\"preload\"> with useHead from @solidjs/web",
+  prefetchDNS: "add a <link rel=\"dns-prefetch\"> with useHead from @solidjs/web",
+};
 const QUERY_HOOKS = /^(useQuery|useSuspenseQuery|useInfiniteQuery|useQueries|useMutation)$/;
 const EFFECT_HOOKS = /^(React\.)?(useEffect|useLayoutEffect)$/;
 
@@ -41,7 +72,9 @@ const attrValue = (attr) => {
 const lcfirst = (s) => s.charAt(0).toLowerCase() + s.slice(1);
 const ucfirst = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
-export function transform(input, { parse, Lang }) {
+// `ports`: the React libraries the project moves to their Solid 2 port, by name, each with its
+// PORTS entry (src/manifests.mjs); R44 points their imports at the port.
+export function transform(input, { parse, Lang, ports = {} }) {
   // Offsets are per file, so the helpers that read them live in here: a module-level binding
   // that changes can't be copied into a workflow callback once the package is bundled.
   // Edits are { start, end, text } or { start, end, wrap(innerText) }. Nested edits are applied
@@ -107,6 +140,8 @@ export function transform(input, { parse, Lang }) {
   const applied = {};
   const note = (rule, n = 1) => (applied[rule] = (applied[rule] || 0) + n);
   const flag = (kind, node, detail) => flags.push({ kind, line: node ? node.range().start.line + 1 : 0, detail });
+  // Solid types the rules write, by module, for R10 to import (a bare `Component` has no `<` to find it by).
+  const introduced = { "solid-js": new Set(), "@solidjs/web": new Set() };
 
   function pass(fn) {
     useOffsetsOf(parse, Lang, src);
@@ -128,8 +163,8 @@ export function transform(input, { parse, Lang }) {
       let shadowed = false;
       for (let a = id.parent(); a && a.range().start.index >= scope.range().start.index; a = a.parent()) {
         if (FN_KINDS.has(a.kind()) && !same(a, bodyNode?.parent())) {
-          const params = a.field("parameters") ?? a.field("parameter");
-          if (params && new RegExp(`\\b${name}\\b`).test(params.text())) shadowed = true;
+          const params = a.field("parameters") ? kids(a.field("parameters")).map((p) => (p.field("pattern") ?? p).text()).join(" ") : a.field("parameter")?.text();
+          if (params && new RegExp(`\\b${name}\\b`).test(params)) shadowed = true;
         }
       }
       if (shadowed) continue;
@@ -159,12 +194,14 @@ export function transform(input, { parse, Lang }) {
       const parent = id.parent();
       const pk = parent?.kind();
       if (pk === "jsx_opening_element" || pk === "jsx_closing_element" || pk === "jsx_self_closing_element") continue;
-      if (pk === "catch_clause" || pk === "for_in_statement") continue;
+      // the binding of a catch or a for...of/in, not what the loop iterates
+      if (pk === "catch_clause" || (pk === "for_in_statement" && same(parent.field("left"), id))) continue;
       let tag = parent;
       while (tag && (tag.kind() === "member_expression" || tag.kind() === "nested_identifier")) tag = tag.parent();
       if (tag !== parent && /^jsx_(opening|closing|self_closing)_element$/.test(tag?.kind() ?? "")) out.inTag = true;
       if (pk === "variable_declarator" && same(parent.field("name"), id)) continue;
-      if (pk === "required_parameter" || pk === "optional_parameter") continue;
+      // a parameter's own name, not a default value that reads the name
+      if ((pk === "required_parameter" || pk === "optional_parameter") && same(parent.field("pattern"), id)) continue;
       if (id.ancestors().some((a) => a.kind() === "type_query" || a.kind() === "type_annotation")) continue;
       if (skipCallee && pk === "call_expression" && same(parent.field("function"), id)) continue;
       if (skipHookArgs && pk === "arguments" && /^use[A-Z]/.test(parent.parent()?.field("function")?.text() ?? "")) continue;
@@ -174,8 +211,9 @@ export function transform(input, { parse, Lang }) {
         if (a.kind() === "for_in_statement" && new RegExp(`(^|[^.\\w])${name}\\b`).test(a.field("left")?.text() ?? "")) shadowed = true;
         if (a.kind() === "statement_block" && kids(a).some((st) => st.kind() === "lexical_declaration" && kids(st).some((d) => d.kind() === "variable_declarator" && new RegExp(`(^|[^.:\\w])${name}\\b`).test(d.field("name")?.text() ?? "")))) shadowed = true;
         if (FN_KINDS.has(a.kind())) {
-          const params = a.field("parameters") ?? a.field("parameter");
-          if (params && new RegExp(`(^|[^.\\w])${name}\\b`).test(params.text())) shadowed = true;
+          // the parameters' names, not their default values
+          const params = a.field("parameters") ? kids(a.field("parameters")).map((p) => (p.field("pattern") ?? p).text()).join(" ") : a.field("parameter")?.text();
+          if (params && new RegExp(`(^|[^.\\w])${name}\\b`).test(params)) shadowed = true;
         }
       }
       if (!shadowed) out.push(id);
@@ -186,7 +224,7 @@ export function transform(input, { parse, Lang }) {
   const callReads = (scope, name, opts, node) => {
     const reads = readsOf(scope, name, opts);
     if (!reads.inTag) return reads;
-    flag("accessor in tag name", node, `<${name}.…> would need <Dynamic component={${name}().…}>; left as a plain value`);
+    flag("accessor in tag name", node, `<${name}.…> would need const Tag = dynamic(() => ${name}().…), with dynamic from @solidjs/web; left as a plain value`);
     return null;
   };
   const readAs = (id, text) => rep(id, id.kind() === "shorthand_property_identifier" ? `${id.text()}: ${text}` : text);
@@ -324,6 +362,9 @@ export function transform(input, { parse, Lang }) {
       if (n === "className" && !intrinsic) { note("className -> class (owned component prop)"); return [nameNode.replace("class")]; }
       if (ATTRS[n] && intrinsic) { note(`${n} -> ${ATTRS[n]}`); return [nameNode.replace(ATTRS[n])]; }
       if (ATTRS[n] && !intrinsic) { note(`${n} -> ${ATTRS[n]} (component prop)`); return [nameNode.replace(ATTRS[n])]; }
+      if (DOM_ATTRS[n] && intrinsic) { note(`${n} -> ${DOM_ATTRS[n]}`); return [nameNode.replace(DOM_ATTRS[n])]; }
+      // React-only hints with no Solid counterpart.
+      if (intrinsic && /^suppress(Hydration|ContentEditable)Warning$/.test(n ?? "")) { note(`drop ${n}`); return [dropAttr(attr)]; }
       if (n === "dangerouslySetInnerHTML") {
         const m = attr.text().match(/^dangerouslySetInnerHTML=\{\{\s*__html:\s*([\s\S]*?)\s*,?\s*\}\}$/);
         if (m) { note("dangerouslySetInnerHTML -> innerHTML"); return [attr.replace(`innerHTML={${m[1]}}`)]; }
@@ -398,12 +439,14 @@ export function transform(input, { parse, Lang }) {
   );
 
   // R4 useCallback(fn, deps) -> fn ; React.memo(C)/memo(C) -> C ; R20 useEffectEvent(fn) -> fn
+  // The call around fn is cut away rather than fn's text copied, so a useCallback inside a memo'd
+  // component still converts.
   pass((root) =>
     root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^(React\\.)?(useCallback|memo|useEffectEvent)$" } } }).flatMap((call) => {
       const [fn] = kids(call.field("arguments"));
       if (!fn) return [];
       note(call.field("function").text().replace("React.", ""));
-      return [call.replace(fn.text())];
+      return [{ start: call.range().start.index, end: fn.range().start.index, text: "" }, { start: fn.range().end.index, end: call.range().end.index, text: "" }];
     }),
   );
 
@@ -429,8 +472,8 @@ export function transform(input, { parse, Lang }) {
 
   // R37 React APIs with a Solid 2 counterpart, when imported from react: <Suspense> -> <Loading>,
   // lazy -> Solid's lazy, useId() -> createUniqueId(), and a <Fragment> without props -> <>.
-  const fromReact = new Set([...input.matchAll(/^import\s+(?:type\s+)?(?:(\w+)\s*,?\s*)?(?:\{([^}]*)\})?\s*from\s*["']react["']/gm)].flatMap((m) => [
-    ...(m[1] ? [m[1]] : []),
+  const fromReact = new Set([...input.matchAll(/^import\s+(?:type\s+)?(?:(\w+|\*\s+as\s+\w+)\s*,?\s*)?(?:\{([^}]*)\})?\s*from\s*["']react["']/gm)].flatMap((m) => [
+    ...(m[1] ? [m[1].split(/\s+/).pop()] : []),
     ...(m[2] ?? "").split(",").map((part) => part.trim().replace(/^type\s+/, "").split(/\s+as\s+/).pop()).filter(Boolean),
   ]));
   const reactName = (name) => (name.startsWith("React.") ? fromReact.has("React") : fromReact.has(name));
@@ -457,6 +500,11 @@ export function transform(input, { parse, Lang }) {
       const lazy = /lazy$/.test(fn.text());
       note(lazy ? "lazy -> lazy" : "useId -> createUniqueId");
       return [fn.replace(lazy ? "lazy" : "createUniqueId")];
+    }),
+    // Solid has both under the same name.
+    ...(fromReact.has("React") ? root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^React\\.(createContext|useContext)$" } } }) : []).map((call) => {
+      note("React.createContext/useContext -> Solid's");
+      return call.field("function").replace(call.field("function").text().slice("React.".length));
     }),
   ]);
 
@@ -502,7 +550,10 @@ export function transform(input, { parse, Lang }) {
         const indent = " ".repeat(column + 2);
         const rest = text.slice(1);
         // A one-line render body gets a line per statement.
-        text = `{\n${indent}const ${holder} = merge(${defaults.field("value").text()} as const, props);${rest.startsWith("\n") ? rest : `\n${indent}${rest.trimStart().replace(/\s*\}$/, `\n${" ".repeat(column)}}`)}`}`;
+        // Each literal keeps its literal type; `as const` on the object would make [] readonly never[].
+        const object = defaults.field("value");
+        const literals = kids(object).map((p) => p.kind() === "pair" && p.field("value")).filter((v) => v && (["string", "number", "true", "false"].includes(v.kind()) || (v.kind() === "unary_expression" && v.field("argument")?.kind() === "number")));
+        text = `{\n${indent}const ${holder} = merge(${textWith(object, literals.map((v) => ({ start: v.range().end.index, end: v.range().end.index, text: " as const" })))}, props);${rest.startsWith("\n") ? rest : `\n${indent}${rest.trimStart().replace(/\s*\}$/, `\n${" ".repeat(column)}}`)}`}`;
       }
       note("class component -> function component");
       return [rep(cls, `function ${name}(${param})${render.field("return_type")?.text() ?? ""} ${text}`)];
@@ -623,8 +674,20 @@ export function transform(input, { parse, Lang }) {
       });
     }
   }
+  // A useMemo that isn't assigned (a hook's `return useMemo(...)`) has no reads to rewrite.
+  pass((root) =>
+    root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^(React\\.)?useMemo$" } } }).flatMap((call) => {
+      const [fn] = kids(call.field("arguments"));
+      if (!fn || !FN_KINDS.has(fn.kind())) return [];
+      note("useMemo -> createMemo");
+      return [rep(call.field("function"), "createMemo"), { start: fn.range().end.index, end: call.range().end.index - 1, text: "" }];
+    }),
+  );
 
-  // R27 useRef used only as `x.current` and `ref={x}` -> a plain `let` and a ref callback.
+  // R27 useRef used only as `x.current` and `ref={x}` -> a plain `let` and a ref callback. A ref
+  // passed on as a value (to a hook, or returned) or written while the component renders becomes
+  // a plain `{ current }` object: the body runs once, so that is what useRef was. A render-time
+  // write is flagged: it now happens once.
   pass((root) =>
     root.findAll({ rule: { kind: "variable_declarator", has: { field: "value", kind: "call_expression", has: { field: "function", regex: "^(React\\.)?useRef$" } } } }).flatMap((decl) => {
       const name = decl.field("name");
@@ -635,20 +698,28 @@ export function transform(input, { parse, Lang }) {
       const typeArg = kids(call.field("type_arguments"))[0]?.text();
       const [init] = kids(call.field("arguments"));
       const edits = [];
+      const refAttrs = [];
+      let renderWrite = null;
+      let object = false;
       for (const id of readsOf(body, name.text(), { exclude: [decl] })) {
         const p = id.parent();
         if (p.kind() === "member_expression" && p.field("property")?.text() === "current") {
           // a write during render (not inside a function or JSX) is render state, not a ref
-          if (p.parent()?.kind() === "assignment_expression" && !p.ancestors().some((a) => inside(a, body) && !same(a, body) && (FN_KINDS.has(a.kind()) || a.kind() === "jsx_expression"))) return [];
+          if (p.parent()?.kind() === "assignment_expression" && !p.ancestors().some((a) => inside(a, body) && !same(a, body) && (FN_KINDS.has(a.kind()) || a.kind() === "jsx_expression"))) renderWrite ??= p;
           edits.push(rep(p, name.text()));
         } else if (p.kind() === "jsx_expression" && p.parent()?.kind() === "jsx_attribute" && attrName(p.parent()) === "ref") {
-          edits.push(rep(p, `{(element) => (${name.text()} = element)}`));
-        } else return []; // passed on as a value: keep the ref object
+          refAttrs.push(p);
+        } else object = true; // passed on as a value
       }
       const initText = init?.text();
       const type = typeArg ? (initText === "null" ? `${typeArg} | null` : initText ? typeArg : `${typeArg} | undefined`) : null;
+      if (object || renderWrite) {
+        if (renderWrite) flag("ref", renderWrite, `${name.text()}.current is written while the component renders, and a Solid component renders once: it keeps the first value. Read what it copies (an accessor or props) where ${name.text()}.current is read`);
+        note("useRef -> { current }");
+        return [rep(statement, `const ${name.text()}${type ? `: { current: ${type} }` : ""} = { current: ${initText ?? "undefined"} };`), ...refAttrs.map((p) => rep(p, `{(element) => (${name.text()}.current = element)}`))];
+      }
       note("useRef -> let");
-      return [rep(statement, `let ${name.text()}${type ? `: ${type}` : ""}${initText ? ` = ${initText}` : ""};`), ...edits];
+      return [rep(statement, `let ${name.text()}${type ? `: ${type}` : ""}${initText ? ` = ${initText}` : ""};`), ...edits, ...refAttrs.map((p) => rep(p, `{(element) => (${name.text()} = element)}`))];
     }),
   );
 
@@ -664,32 +735,62 @@ export function transform(input, { parse, Lang }) {
       const typeAnn = first.field("type")?.text() ?? "";
       const body = fn.field("body");
       if (!body || body.kind() !== "statement_block") { flag("expression-bodied component", fn, "add a block body first"); continue; }
+      // defaults: [prop, default value, the pattern's own name node]
       const names = [], defaults = [];
       let rest = null;
       let complex = false;
       for (const p of kids(pat)) {
         if (p.kind() === "shorthand_property_identifier_pattern") names.push([p.text(), p.text()]);
-        else if (p.kind() === "object_assignment_pattern") { const k = p.field("left").text(); names.push([k, k]); defaults.push(`${k === "className" ? "class" : k}: ${p.field("right").text()}`); }
+        else if (p.kind() === "object_assignment_pattern") { const k = p.field("left").text(); names.push([k, k]); defaults.push([k, p.field("right"), p.field("left")]); }
         else if (p.kind() === "pair_pattern" && p.field("value")?.kind() === "identifier") { names.push([p.field("value").text(), p.field("key").text()]); note("renamed prop"); }
         else if (p.kind() === "pair_pattern" && p.field("value")?.kind() === "assignment_pattern" && p.field("value").field("left")?.kind() === "identifier") {
           const k = p.field("key").text();
           names.push([p.field("value").field("left").text(), k]);
-          defaults.push(`${k === "className" ? "class" : k}: ${p.field("value").field("right").text()}`);
+          defaults.push([k, p.field("value").field("right"), p.field("value").field("left")]);
           note("renamed prop");
         }
         else if (p.kind() === "rest_pattern" && /^\.\.\.\s*[\w$]+$/.test(p.text())) rest = p.text().replace(/^\.\.\./, "").trim();
         else { flag("complex props pattern", p, p.text()); complex = true; }
       }
       if (complex) continue;
-      const propsVar = defaults.length ? "merged" : "props";
-      const restVar = rest === "props" ? "others" : rest;
-      const pre = [];
-      if (defaults.length) pre.push(`const merged = merge({ ${defaults.join(", ")} } as const, props);`);
       const key = (n) => (n === "className" ? "class" : n);
+      // merge() unions a default's type with the prop's, so an empty [] or {} default would make the
+      // merged prop never[] | T[]: it's applied where the prop is read instead. A literal keeps its
+      // literal type (`as const`). A default that reads a prop before it (destructuring defaults
+      // can) becomes a getter over props.
+      const empty = new Map(defaults.filter(([, v]) => /^(\[\s*\]|\{\s*\})$/.test(v.text())).map(([k, v]) => [k, v.text()]));
+      // A default can only read the props before it, so they're settled in order: a read of one with
+      // a default of its own takes that default, its reads rewritten too.
+      const defaultOf = new Map();
+      const entries = [];
+      for (const [k, v, own] of defaults) {
+        const reads = names.filter(([local]) => local !== own.text()).flatMap(([local, from]) => readsOf(v.parent(), local, { exclude: [own] }).map((id) => readAs(id, defaultOf.has(from) ? `(props.${key(from)} ?? ${defaultOf.get(from)})` : `props.${key(from)}`)));
+        const text = textWith(v, reads);
+        defaultOf.set(k, ["identifier", "number", "string", "template_string", "true", "false", "null", "array", "object", "member_expression", "call_expression", "parenthesized_expression"].includes(v.kind()) ? text : `(${text})`);
+        if (empty.has(k)) continue;
+        const literal = ["string", "number", "true", "false"].includes(v.kind()) || (v.kind() === "unary_expression" && v.field("argument")?.kind() === "number");
+        entries.push(reads.length ? `get ${key(k)}() { return ${text}; }` : `${key(k)}: ${text}${literal ? " as const" : ""}`);
+      }
+      const propsVar = entries.length ? "merged" : "props";
+      const restVar = rest === "props" ? "others" : rest;
+      const read = Object.fromEntries(names.map(([, k]) => [k, empty.has(k) ? `(${propsVar}.${key(k)} ?? ${empty.get(k)})` : `${propsVar}.${key(k)}`]));
+      const pre = [];
+      if (entries.length) pre.push(`const merged = merge({ ${entries.join(", ")} }, props);`);
       if (rest) pre.push(`const ${restVar} = omit(${propsVar}, ${names.map(([, k]) => JSON.stringify(key(k))).join(", ")});`);
+      // A prop used as a JSX tag (`{ icon: Icon }` and `<Icon />`) becomes a component with dynamic(),
+      // which follows the prop when it changes; the tag keeps its name.
+      for (const [local, k] of names) {
+        if (!/^[A-Z]/.test(local) || !body.find({ rule: { any: [{ kind: "jsx_opening_element" }, { kind: "jsx_self_closing_element" }], has: { field: "name", regex: `^${local}$` } } })) continue;
+        if (/^import\b[^;]*\bdynamic\b[^;]*from\s*["'](?!@solidjs\/web["'])/m.test(src) || /\b(const|let|var|function|class)\s+dynamic\b/.test(src)) {
+          flag("prop as tag", fn, `<${local}> renders the ${k} prop: write const ${local} = dynamic(() => ${read[k]}) with dynamic from @solidjs/web (this file has a dynamic of its own)`);
+          continue;
+        }
+        pre.push(`const ${local} = dynamic(() => ${read[k]});`);
+        note("prop as tag -> dynamic()");
+      }
       edits.push(first.replace(`props${typeAnn}`));
       if (pre.length) edits.push(body.child(0).replace(`{\n  ${pre.join("\n  ")}`));
-      for (const [local, k] of names) edits.push(...rewriteReads(body, null, local, `${propsVar}.${key(k)}`, body, "prop"));
+      for (const [local, k] of names) edits.push(...rewriteReads(body, null, local, read[k], body, "prop"));
       if (rest && rest !== restVar) edits.push(...rewriteReads(body, null, rest, restVar, null, "rest"));
       note("destructured props -> props/merge/omit");
     }
@@ -1098,21 +1199,38 @@ export function transform(input, { parse, Lang }) {
   });
 
   // R30 `{x() && <El a={x().b} />}` can't narrow x() in TypeScript; <Show> hands the narrowed value in.
+  // The same for a field of it (`{x().icon ? <I name={x().icon} /> : null}`: the field's reads become
+  // the callback's), and a ternary's other branch becomes the fallback. Show's callback gets an
+  // accessor of the non-null value.
   pass((root) =>
     root.findAll({ rule: { kind: "jsx_expression", inside: { kind: "jsx_element" } } }).flatMap((ex) => {
       if (ex.parent()?.kind() !== "jsx_element") return [];
       const e = kids(ex)[0];
       if (!e) return [];
-      let cond, jsx;
-      if (e.kind() === "binary_expression" && e.field("operator")?.text() === "&&") { cond = e.field("left"); jsx = unparen(e.field("right")); }
-      else if (e.kind() === "ternary_expression" && isNullish(e.field("alternative"))) { cond = e.field("condition"); jsx = unparen(e.field("consequence")); }
+      let cond, jsx, fallback = null;
+      if (e.kind() === "binary_expression" && e.field("operator")?.text() === "&&") { cond = unparen(e.field("left")); jsx = unparen(e.field("right")); }
+      else if (e.kind() === "ternary_expression") { cond = unparen(e.field("condition")); jsx = unparen(e.field("consequence")); fallback = isNullish(e.field("alternative")) ? null : e.field("alternative"); }
       else return [];
-      if (!isJsx(jsx) || cond.kind() !== "call_expression" || cond.field("function")?.kind() !== "identifier" || kids(cond.field("arguments")).length) return [];
-      const n = cond.field("function").text();
-      const calls = jsx.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: `^${n}$` } } }).filter((c) => !kids(c.field("arguments")).length);
-      if (!calls.some((c) => c.parent()?.kind() === "member_expression")) return [];
+      if (!isJsx(jsx)) return [];
+      const when = cond.text();
+      let param, hits = [];
+      if (/^[A-Za-z_$][\w$]*\(\)$/.test(when)) {
+        // the callback's parameter takes the accessor's name, so its reads inside stay as they are
+        param = when.slice(0, -2);
+        const calls = jsx.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: `^${param.replace(/\$/g, "\\$")}$` } } }).filter((c) => !kids(c.field("arguments")).length);
+        if (!calls.some((c) => c.parent()?.kind() === "member_expression")) return [];
+      } else if (/^[A-Za-z_$][\w$]*\(\)(\.[A-Za-z_$][\w$]*)+$/.test(when)) {
+        hits = jsx.findAll({ rule: { kind: "member_expression" } }).filter((m) => m.text() === when && !(["call_expression", "assignment_expression"].includes(m.parent()?.kind()) && same(m.parent().field(m.parent().kind() === "call_expression" ? "function" : "left"), m)));
+        if (!hits.length || hits.some((h) => /^jsx_(opening|closing|self_closing)_element$/.test(h.parent()?.kind() ?? ""))) return [];
+        const base = when.split(".").pop();
+        param = jsx.findAll({ rule: { kind: "identifier", regex: `^${base}$` } }).some((x) => !hits.some((h) => inside(x, h))) ? `${base}Value` : base;
+      } else return [];
       note("guarded accessor -> <Show> callback");
-      return [rep(ex, `<Show when={${n}()}>{(${n}) => ${jsx.text()}}</Show>`)];
+      return [
+        { start: ex.range().start.index, end: jsx.range().start.index, text: `<Show when={${when}}${fallback ? ` fallback=${asProp(fallback)}` : ""}>{(${param}) => ` },
+        ...hits.map((h) => rep(h, `${param}()`)),
+        { start: jsx.range().end.index, end: ex.range().end.index, text: "}</Show>" },
+      ];
     }),
   );
 
@@ -1133,6 +1251,26 @@ export function transform(input, { parse, Lang }) {
         return [rep(ann, ""), { start: v.field("function").range().end.index, end: v.field("function").range().end.index, text: `<${type.text()}>` }];
       }
       return [];
+    }),
+  );
+
+  // R31 also: a hook annotated with the type of the value it returned now returns an accessor (a
+  // createMemo, a return the compiler pass made a memo or an accessor, or its own memo or signal),
+  // so the annotation becomes Accessor<T>.
+  pass((root) =>
+    root.findAll({ rule: { any: [{ kind: "function_declaration" }, { kind: "function_expression" }, { kind: "arrow_function" }], has: { field: "return_type", kind: "type_annotation" } } }).flatMap((fn) => {
+      const type = kids(fn.field("return_type"))[0];
+      const body = fn.field("body");
+      if (!/^use[A-Z]/.test(fn.field("name")?.text() ?? fn.parent()?.field("name")?.text() ?? "") || !type || /^(Accessor|Memo)\b|=>/.test(type.text()) || body?.kind() !== "statement_block") return [];
+      const returns = body.findAll({ rule: { kind: "return_statement" } }).filter((r) => same(r.ancestors().find((a) => FN_KINDS.has(a.kind())), fn));
+      const accessors = new Set(body.findAll({ rule: { kind: "variable_declarator", has: { field: "value", kind: "call_expression", has: { field: "function", regex: "^(createMemo|createSignal)$" } } } }).map((d) => (d.field("name")?.kind() === "array_pattern" ? kids(d.field("name"))[0] : d.field("name"))?.text()));
+      if (!returns.length || !returns.every((r) => {
+        const v = unparen(arg(r));
+        return !!v && ((v.kind() === "call_expression" && v.field("function")?.text() === "createMemo") || (v.kind() === "identifier" && accessors.has(v.text())) || (r.prev()?.kind() === "comment" && /^\/\/ solid: return: (memo|accessor) /.test(r.prev().text())));
+      })) return [];
+      note("hook return type -> Accessor<T>");
+      introduced["solid-js"].add("Accessor");
+      return [rep(type, `Accessor<${type.text()}>`)];
     }),
   );
 
@@ -1158,8 +1296,7 @@ export function transform(input, { parse, Lang }) {
   }
 
   // R9 types and React namespace members; R18 the rest of React's type vocabulary
-  const reactImports = new Set([...src.matchAll(/^import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+["']react["']/gm)].flatMap((m) => m[1].split(",").map((s) => s.replace(/^\s*type\s+/, "").trim().split(/\s+as\s+/).pop())));
-  const isReactType = (name) => name.startsWith("React.") || reactImports.has(name);
+  const isReactType = (name) => name.startsWith("React.") || fromReact.has(name);
   pass((root) =>
     root.findAll({ rule: { any: [{ kind: "nested_type_identifier" }, { kind: "generic_type" }, { kind: "type_identifier" }] } }).flatMap((t) => {
       const s = t.text();
@@ -1179,7 +1316,11 @@ export function transform(input, { parse, Lang }) {
         return [];
       }
       if (bare === "CSSProperties" && (isReactType(name) || name === "CSSProperties")) { note("CSSProperties -> JSX.CSSProperties"); return [t.replace("JSX.CSSProperties")]; }
-      if (/^(ComponentType|FC|FunctionComponent)$/.test(bare) && isReactType(name)) { note("ComponentType -> Component"); return [t.replace(`Component${args.length ? `<${args.join(", ")}>` : ""}`)]; }
+      // Only the name is replaced, so edits inside the type arguments still apply.
+      if (/^(ComponentType|FC|FunctionComponent)$/.test(bare) && isReactType(name)) { note("ComponentType -> Component"); introduced["solid-js"].add("Component"); return [(t.kind() === "generic_type" ? t.field("name") : t).replace("Component")]; }
+      if (bare === "PropsWithChildren" && isReactType(name)) { note("PropsWithChildren -> ParentProps"); introduced["solid-js"].add("ParentProps"); return [(t.kind() === "generic_type" ? t.field("name") : t).replace("ParentProps")]; }
+      // React's ElementType is a tag name or a component; so is @solidjs/web's ValidComponent.
+      if (bare === "ElementType" && !args.length && isReactType(name)) { note("ElementType -> ValidComponent"); introduced["@solidjs/web"].add("ValidComponent"); return [t.replace("ValidComponent")]; }
       if (/^(RefObject|MutableRefObject)$/.test(bare) && args.length) { note("RefObject -> { current }"); return [t.replace(`{ current: ${args[0]} }`)]; }
       if (bare === "Dispatch" && isReactType(name) && /^(React\.)?SetStateAction<([\s\S]*)>$/.test(args[0] ?? "")) { note("Dispatch<SetStateAction> -> Setter"); return [t.replace(`Setter<${args[0].replace(/^(React\.)?SetStateAction</, "").slice(0, -1)}>`)]; }
       if (REACT_EVENTS[bare] && (args.length || name.startsWith("React."))) {
@@ -1353,7 +1494,47 @@ export function transform(input, { parse, Lang }) {
   for (const c of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^(React\\.)?(createContext)$" } } }))
     if (/\(\s*(undefined)?\s*\)$/.test(c.text())) flag("context default", c, "Solid 2: undefined default means 'no provider' and throws; use null for optional");
   for (const c of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^use[A-Z]\\w*$" } } }))
-    if (!/^use(Context|State|Memo|Callback|Effect|LayoutEffect|Ref)$/.test(c.field("function").text())) flag("custom hook call", c, `${c.field("function").text()}() returns values in React; decide value vs accessor`);
+    // React's own hooks left over are flagged once, as React APIs (R10).
+    if (!/^use(Context|State|Memo|Callback|Effect|LayoutEffect|Ref)$/.test(c.field("function").text()) && !fromReact.has(c.field("function").text())) flag("custom hook call", c, `${c.field("function").text()}() returns values in React; decide value vs accessor`);
+
+  // R44 a library whose Solid 2 port exports its names (`lacks` lists the ones it doesn't) is
+  // imported from the port, so the code matches the package.json the run writes (or, for a catalog
+  // range, the swap the run asks for). An import of a name the port lacks is flagged with what to
+  // use; a subpath of the library has no port to point at.
+  pass((root) =>
+    root.findAll({ rule: { any: [{ kind: "import_statement" }, { kind: "export_statement" }], has: { field: "source", kind: "string" } } }).flatMap((imp) => {
+      const source = imp.field("source");
+      const from = source.text().slice(1, -1);
+      const port = ports[from];
+      if (!port?.lacks) {
+        const library = Object.keys(ports).find((name) => ports[name].lacks && from.startsWith(`${name}/`));
+        if (library) flag("ported library", imp, `${from} is a subpath of ${library}, whose imports now come from ${ports[library].to}: find its counterpart there`);
+        return [];
+      }
+      for (const spec of imp.findAll({ rule: { any: [{ kind: "import_specifier" }, { kind: "export_specifier" }] } })) {
+        const name = spec.field("name")?.text();
+        if (Object.hasOwn(port.lacks, name)) flag("ported library", spec, `${name} from ${port.to}: ${port.lacks[name]}`);
+      }
+      note(`${from} -> ${port.to}`);
+      return [rep(source, `${source.text()[0]}${port.to}${source.text()[0]}`)];
+    }),
+  );
+
+  // R45 react-dom's createPortal(children, container) -> <Portal mount={container}>, from @solidjs/web.
+  const portalImport = /^import\s*\{\s*createPortal\s*\}\s*from\s*["']react-dom["'];?[ \t]*\n/m;
+  if (portalImport.test(src)) {
+    const portals = pass((root) =>
+      root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^createPortal$" } } }).flatMap((call) => {
+        const [children, container, ...more] = kids(call.field("arguments")).filter((a) => a.kind() !== "comment");
+        if (!children || !container || more.length) return [];
+        note("createPortal -> <Portal>");
+        const element = `<Portal mount={${container.text()}}>${asChild(children)}</Portal>`;
+        // Inside JSX, `{createPortal(...)}` becomes the element itself.
+        return [call.parent()?.kind() === "jsx_expression" ? rep(call.parent(), element) : rep(call, element)];
+      }),
+    );
+    if (portals && !/\bcreatePortal\b/.test(src.replace(portalImport, ""))) src = src.replace(portalImport, "");
+  }
 
   // R10 imports
   // A `// solid:` note names Solid APIs (R39's onSettled) without using them.
@@ -1368,33 +1549,56 @@ export function transform(input, { parse, Lang }) {
     if (!pattern(n).test(input)) flag("name clash", null, `${n} is declared in this file, and the conversion uses Solid's ${n}; check which one each use means`);
     return false;
   };
+  // Names the file already imports from Solid (it was converted before, or written for Solid): a
+  // second import of one would be a duplicate identifier.
+  const have = new Set([...src.matchAll(/^import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["'](?:solid-js|@solidjs\/web)["']/gm)].flatMap((m) => m[1].split(",").map((s) => s.trim().replace(/^type\s+/, "").split(/\s+as\s+/).pop()).filter(Boolean)));
   const solidNames = [
-    ...["createSignal", "createMemo", "createContext", "useContext", "createEffect", "onSettled", "merge", "omit", "For", "createUniqueId", "lazy"].filter((n) => used(new RegExp(`\\b${n}\\b`))).filter(free((n) => new RegExp(`\\b${n}\\b`))),
-    ...["Show", "Switch", "Match", "Loading"].filter((n) => used(new RegExp(`<${n}\\b`))).filter(free((n) => new RegExp(`<${n}\\b`))),
-    ...["untrack", "flush"].filter((n) => used(new RegExp(`\\b${n}\\(`))).filter(free((n) => new RegExp(`\\b${n}\\(`))),
+    ...["createSignal", "createMemo", "createContext", "useContext", "createEffect", "onSettled", "merge", "omit", "For", "createUniqueId", "lazy"].filter((n) => used(new RegExp(`\\b${n}\\b`))).filter((n) => !have.has(n)).filter(free((n) => new RegExp(`\\b${n}\\b`))),
+    ...["Show", "Switch", "Match", "Loading"].filter((n) => used(new RegExp(`<${n}\\b`))).filter((n) => !have.has(n)).filter(free((n) => new RegExp(`<${n}\\b`))),
+    ...["untrack", "flush"].filter((n) => used(new RegExp(`\\b${n}\\(`))).filter((n) => !have.has(n)).filter(free((n) => new RegExp(`\\b${n}\\(`))),
   ];
-  const typeNames = ["JSX", "ComponentProps"].filter((n) => used(new RegExp(`\\b${n}\\b`))).filter(free((n) => new RegExp(`\\b${n}\\b`)));
+  const webNames = [...(renders ? ["render"] : []), ...["Portal"].filter((n) => used(new RegExp(`<${n}\\b`))), ...["dynamic"].filter((n) => used(new RegExp(`\\b${n}\\(`)))].filter((n) => !have.has(n)).filter(free((n) => new RegExp(n === "Portal" ? "<Portal\\b" : `\\b${n}\\(`)));
+  const webTypes = [...new Set([...["JSX", "ComponentProps"].filter((n) => used(new RegExp(`\\b${n}\\b`))), ...introduced["@solidjs/web"]])].filter((n) => !have.has(n)).filter(free((n) => new RegExp(`\\b${n}\\b`)));
   // `extends Component<P, S>` is React's class (R39), not Solid's Component type.
-  const solidTypes = ["Component", "Setter"].filter((n) => new RegExp(`\\b${n}<`).test(code.replace(/\bextends\s+Component</g, ""))).filter(free((n) => new RegExp(`\\b${n}<`)));
+  const solidTypes = [...new Set([...["Component", "Setter"].filter((n) => new RegExp(`\\b${n}<`).test(code.replace(/\bextends\s+Component</g, ""))), ...introduced["solid-js"]])].filter((n) => !have.has(n)).filter(free((n) => new RegExp(`\\b${n}\\b`)));
   let removedReact = false;
   src = src.replace(/^import\s+(type\s+)?(\*\s+as\s+React|React(,\s*\{[^}]*\})?|\{[^}]*\})\s+from\s+["']react["'];?[ \t]*\n/gm, () => { removedReact = true; return ""; });
   src = src.replace(/^import\s+\{\s*flushSync\s*\}\s+from\s+["']react-dom["'];?[ \t]*\n/gm, "");
-  const header = [solidNames.length ? `import { ${solidNames.join(", ")} } from "solid-js";` : "", solidTypes.length ? `import type { ${solidTypes.join(", ")} } from "solid-js";` : "", renders ? `import { render } from "@solidjs/web";` : "", typeNames.length ? `import type { ${typeNames.join(", ")} } from "@solidjs/web";` : ""].filter(Boolean).join("\n");
-  if (header) src = src.replace(/^(["']use client["'];\n\n?)?/, (m) => `${m}${header}\n`);
+  // New names join the file's own import from that module when it has one.
+  const lines = [];
+  for (const [module, type, names] of [["solid-js", false, solidNames], ["solid-js", true, solidTypes], ["@solidjs/web", false, webNames], ["@solidjs/web", true, webTypes]]) {
+    if (!names.length) continue;
+    const existing = new RegExp(`^import\\s+${type ? "type\\s+" : ""}\\{([^}]*)\\}\\s*from\\s*["']${module.replace("/", "\\/")}["']`, "m");
+    if (existing.test(src)) src = src.replace(existing, (m, list) => m.replace(`{${list}}`, () => `{ ${[...list.split(",").map((s) => s.trim()).filter(Boolean), ...names].join(", ")} }`));
+    else lines.push(`import ${type ? "type " : ""}{ ${names.join(", ")} } from "${module}";`);
+  }
+  if (lines.length) src = src.replace(/^(["']use client["'];\n\n?)?/, (m) => `${m}${lines.join("\n")}\n`);
   if (removedReact) note("react imports -> solid-js");
-  // Anything else the file imported from react and still uses has no conversion here. Hooks are
-  // flagged where they're called; `use` is only converted for a context.
+  src = src.replace(/^["']use client["'];\n\n?/m, () => { note("drop 'use client'"); return ""; });
+  // The React Compiler's own directives mean nothing to Solid.
+  src = src.replace(/^[ \t]*["']use (no )?memo["'];?[ \t]*\n/gm, () => { note("drop React Compiler directive"); return ""; });
+  // Anything else the file imported from react, or still imports from react-dom, has no conversion
+  // here: each name is flagged where it's first used, with what to use when there's something.
+  const leftover = []; // [name, detail]
   if (removedReact) {
     const body = src.replace(/^import\b[^;]*?\bfrom\s*["'][^"'\n]*["'];?[ \t]*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
     const imported = (src.match(/^import\b[^;]*?\bfrom\s*["'][^"'\n]*["'];?[ \t]*$/gm) ?? []).join("\n");
     for (const name of fromReact) {
-      if (name === "React" || /^use[A-Z]/.test(name)) continue;
+      if (name === "React") continue;
       // Without the import, an event type React and the DOM share a name with is the DOM's: right.
       if (REACT_EVENTS[name] === name) continue;
-      if (new RegExp(`\\b${name}\\b`).test(body) && !new RegExp(`\\b${name}\\b`).test(imported)) flag("React API", null, `${name} was imported from react and has no conversion here; its import was removed`);
+      // `JSX.CSSProperties` isn't a use of React's CSSProperties.
+      if (new RegExp(`(^|[^.\\w$])${name}\\b`).test(body) && !new RegExp(`\\b${name}\\b`).test(imported)) leftover.push([name, `${name} was imported from react and has no conversion here; its import was removed${REACT_API[name] ? `. ${REACT_API[name]}` : ""}`]);
     }
   }
-  src = src.replace(/^["']use client["'];\n\n?/m, () => { note("drop 'use client'"); return ""; });
+  for (const m of src.matchAll(/^import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["'](react-dom(?:\/\w+)?)["']/gm)) {
+    for (const name of m[1].split(",").map((s) => s.trim().replace(/^type\s+/, "").split(/\s+as\s+/)[0]).filter(Boolean)) {
+      leftover.push([name, `${name} from ${m[2]}: @solidjs/web replaces react-dom${REACT_API[name] ? `. ${REACT_API[name]}` : ", and has no counterpart"}`]);
+    }
+  }
+  // Each at the first line that uses it.
+  const sourceLines = src.split("\n");
+  for (const [name, detail] of leftover) flags.push({ kind: "React API", line: sourceLines.findIndex((l) => !/^\s*(import\b|\/\/)/.test(l) && new RegExp(`(^|[^.\\w$])${name}\\b`).test(l)) + 1, detail });
   if (/\bReact\.\w+/.test(src)) flag("React namespace", null, [...new Set(src.match(/\bReact\.\w+/g))].join(", "));
 
   return { code: src, applied, flags };
