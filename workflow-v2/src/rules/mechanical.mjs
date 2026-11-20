@@ -1688,6 +1688,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
         note("React event type -> DOM event");
         return [t.replace(args.length ? `${REACT_EVENTS[bare]} & { currentTarget: ${args[0]} }` : REACT_EVENTS[bare])];
       }
+      if (bare === "SVGProps" && args.length && isReactType(name)) { note("SVGProps -> JSX.SVGAttributes"); return [t.field("name").replace("JSX.SVGAttributes")]; }
       if (/^[A-Za-z]*HTMLAttributes$/.test(bare) && name.startsWith("React.")) { note("React.*HTMLAttributes -> JSX.*HTMLAttributes"); return [t.replace(`JSX.${bare}${args.length ? `<${args.join(", ")}>` : ""}`)]; }
       return [];
     }),

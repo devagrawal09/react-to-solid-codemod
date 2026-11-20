@@ -610,6 +610,13 @@ it("R9 converts FC from a default-and-named react import, and imports Component 
   expect(out).toContain(`export type Slot = { render?: Component };`);
 });
 
+it("R9 turns React's SVGProps into JSX.SVGAttributes", () => {
+  const code = `import { type SVGProps } from 'react'\nexport function Logo({ className, ...props }: SVGProps<SVGSVGElement>) {\n  return <svg className={className} {...props} />\n}\nexport const Path = (props: React.SVGProps<SVGPathElement>) => <path {...props} />\n`;
+  const { code: out, flags } = run(code);
+  expect(out).toBe(`import { omit } from "solid-js";\nimport type { JSX } from "@solidjs/web";\nexport function Logo(props: JSX.SVGAttributes<SVGSVGElement>) {\n  const others = omit(props, "class");\n  return <svg class={props.class} {...others} />\n}\nexport const Path = (props: JSX.SVGAttributes<SVGPathElement>) => <path {...props} />\n`);
+  expect(flags.filter((f) => f.kind === "React API")).toEqual([]);
+});
+
 it("R9 keeps a component type on the component when it takes no props (R31 moves only a value's type)", () => {
   const code = `import React, { type FC, type VFC } from "react";\nconst App: React.FC = () => {\n  return <main />;\n};\nexport const Page: FC<{ title: string }> = () => <h1 />;\nconst Shell: React.FunctionComponent<P> = () => <div />;\nconst Dot: VFC = () => <i />;\nconst Bar: React.VoidFunctionComponent<{ n: number }> = () => <b />;\n`;
   expect(convert(code)).toBe(`import type { Component, VoidComponent } from "solid-js";\nconst App: Component = () => {\n  return <main />;\n};\nexport const Page: Component<{ title: string }> = () => <h1 />;\nconst Shell: Component<P> = () => <div />;\nconst Dot: VoidComponent = () => <i />;\nconst Bar: VoidComponent<{ n: number }> = () => <b />;\n`);
