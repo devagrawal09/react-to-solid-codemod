@@ -20,6 +20,7 @@ npx codemod@alpha run react-to-solid --param apply=true
 | `include` | `src` | Directory whose `.ts`/`.tsx` files are converted (tests and `.d.ts` files are skipped). In a monorepo, point it at one app: `--param include=apps/web/src` |
 | `apply` | `false` | `true` writes the converted files and lints them; otherwise the run is a preview |
 | `agent` | `false` | `true` (with `apply=true`) asks for approval, then hands the flagged spots to a coding agent. Untested |
+| `nextRoutes` | `false` | `true` moves a Next.js App Router at `src/app` to Solid's file routes in `@solidjs/vite-plugin`'s start mode: see [Next.js App Router to file routes](#nextjs-app-router-to-file-routes) |
 
 The run's result holds the summary: the plan (which React libraries have a Solid 2 port), the compiler's decisions, the rules applied, the `package.json`, `tsconfig` and Vite config changes, every flag with its file and line, and the lint counts.
 
@@ -45,11 +46,40 @@ It flags rather than changes: a `catalog:` or `workspace:` range (change it wher
 
 ### Next.js
 
-Next.js has no Solid 2 equivalent; the closest is `@solidjs/vite-plugin`'s start mode (file routes through `fileRoutes()` from `@solidjs/router/fs`) or SolidStart. So a Next.js app is converted component by component, and the Next.js parts are flagged, not rewritten:
+Next.js has no Solid 2 equivalent; the closest is `@solidjs/vite-plugin`'s start mode (file routes through `fileRoutes()` from `@solidjs/router/fs`) or SolidStart. By default a Next.js app is converted component by component, and the Next.js parts are flagged, not rewritten (with `nextRoutes=true`, the App Router moves to start mode; see the next section):
 
 - **Async components** (React Server Components, such as an `async` page) are left as they are, but for JSX attribute names, and flagged `server component`: a Solid component can't be async. Load the data in the route with an async `createMemo` (Solid 2 memos can be async; reads suspend under `<Loading>`) or a server function, and render synchronously.
 - **Each `next/*` import** is flagged once, with what to use: `next/link` → `<a href>` (`@solidjs/router` 2 has no link component and intercepts plain anchors); `next/navigation` → `useNavigate`, `useLocation`, `useSearchParams` and `useParams` from `@solidjs/router`, `redirect` from `@solidjs/web`, and a catch-all route for `notFound`; `next/image` → `<img>`; `next/dynamic` → `lazy` from `solid-js`; `next/headers` and `next/server` → server functions; `next/script` → `<script>` or `useHead`; `Metadata` from `next` → `useHead` from `@solidjs/web`.
 - **`next`, `next-themes`, `nuqs`, `@t3-oss/env-nextjs`, `geist` and `next-intl`** are flagged as dependencies with no Solid 2 port.
+
+### Next.js App Router to file routes
+
+`--param nextRoutes=true` (with or without `apply=true`) also moves the App Router at the package's `src/app` to the setup of solidjs/templates' `solid-v2/fullstack`: `@solidjs/vite-plugin@3`'s SSR start mode, `filesystem-routing@0.5`'s Vite plugin, which reads `src/routes` with SolidStart's file names, and `@solidjs/router@2`'s `fileRoutes()`. It's a param of the same workflow rather than its own step, because the moves happen in the per-file conversion (a route file is converted, then renamed, and its relative imports re-pointed) and the route rules need to know which App Router file they're converting. It's opt-in because it moves files and writes new ones. An `app/` at the package root isn't moved (`mkdir src && git mv app src/` first, and point `@/*` at `./src/*`).
+
+| Next.js | Solid 2 | |
+|---|---|---|
+| `app/page.tsx`, `app/x/page.tsx` | `routes/index.tsx`, `routes/x/index.tsx` | moved |
+| `app/x/layout.tsx` | `routes/x.tsx`, the file paired with the folder, which filesystem-routing nests the folder's routes in; `{children}` is `props.children` | moved |
+| `app/layout.tsx` | `src/Document.tsx`, start mode's document: `<HydrationScript />` and the charset and viewport meta tags go in its `<head>`. Its stylesheet imports and string `title`/`description` move to `src/App.tsx` (the document is server-only and isn't hydrated) | moved; a `<body>` with more than `{children}` is flagged |
+| `(group)` folders, `[id]` | the same names | moved |
+| `[...slug]`, `[[...slug]]` | `[...slug].tsx` in the parent folder (the router's catch-all also matches nothing) | moved; flagged: the param is one string, `"a/b"`, not an array |
+| `loading.tsx`, `error.tsx` | stay where they are, as components; the segment's layout wraps its children in `<Errored fallback={(err, reset) => ...}>` and `<Loading fallback={...}>`, where Next.js put its error boundary and Suspense. With no layout, one is written; the root's go in `src/App.tsx` | wrapped |
+| `app/not-found.tsx` | `routes/[...404].tsx`, with `export const route = { preload: () => httpStatus(404) }`; without one, a 404 page is written | moved; a nested `not-found.tsx` is flagged |
+| `route.ts` | `routes/x.ts`, an API route: each handler is kept as `nextGET` and exported as `GET: APIHandler = (event) => nextGET(event.request)`; `NextResponse.json` is `Response.json`. `src/middleware.ts` serves them (`createAPIHandler` in `start.middleware`) | moved; a handler that takes params is flagged (they're `Record<string, string>`) |
+| an async page or layout: `const` declarations (awaiting `params`, `searchParams`, data), then JSX | a sync component: the declarations move into `query(async (params) => { "use server"; ...; return { names } }, key)`, and the JSX reads `data().name` from `createMemo(() => load({ ...props.params }))`. The data still loads on the server only (during SSR a direct call, on a client navigation a GET to `/_server/data/<id>`), and reads suspend under the nearest `<Loading>` | converted; any other shape stays and is flagged `server component` |
+| `metadata` (string `title`, `description`) | `useHead([{ tag: "title", props: { children } }, ...])` from `@solidjs/web` in the component | converted; anything else, and `generateMetadata`, flagged |
+| `PageProps<"/x/[id]">`, `LayoutProps<...>` | `RouteProps<"/x/:id">` from `@solidjs/router`, `ParentProps` | converted |
+| `<Link href>` (next/link) | `<a href>`, which the router intercepts; `scroll={false}` is `noscroll`, `prefetch` is dropped | converted; an object `href` or `legacyBehavior` is flagged |
+| `<Image>` (next/image) | `<img loading="lazy" decoding="async">`; `priority` is `fetchpriority="high"`; `quality` and `unoptimized` are dropped | converted; `fill`, placeholders, loaders and spreads flagged |
+| `dynamic(() => import("./x"))` (next/dynamic) | `lazy(() => import("./x"))` from `solid-js` | converted; options flagged |
+| `next/font` loaders | an object with empty class names, so the code that reads them still works | flagged: load the font with CSS |
+| `app/favicon.ico` | `public/favicon.ico` | moved |
+| `next/navigation`, `next/headers`, middleware or `proxy.ts`, `template.tsx`, `default.tsx`, parallel (`@slot`) and intercepting (`(.)x`) routes, metadata files (`sitemap.ts`, `opengraph-image.tsx`, ...) | | flagged, left in place |
+| `next.config.*` | | left in place; flagged with the keys it sets (`images`, `redirects`, ...) to port, or that it sets nothing |
+
+It writes `src/App.tsx` (the router over `virtual:file-routes`, rendering the routes in the root layout's `<Errored>`/`<Loading>` when there's a root `error.tsx` or `loading.tsx`, and with no boundary otherwise, as in Next.js), `vite.config.ts` (`solid({ start: { nodeServer: true }, ssr: true, serverFunctions: true, extensions: [".jsx", ".tsx"] })` and `fileRoutes()`, with `resolve.tsconfigPaths` when the tsconfig maps paths like `@/*`), `src/vite-env.d.ts` and the files above, each only when the path is free (a kept one is flagged). `package.json` loses `next` and gains `@solidjs/router`, and in devDependencies `@solidjs/vite-plugin`, `filesystem-routing` and `vite`; `next dev`, `next build` and `next start` (with or without Turbopack) become `vite`, `vite build` and `node dist/server/node.js`, and any other `next` command is flagged. A missing `"type": "module"` is flagged, not added: Vite and Node reparse `vite.config.ts` and the built server as ES modules with a warning, and adding it breaks a CommonJS `.js` config.
+
+On create-next-app 16.4.6 (`--ts --app --src-dir --no-tailwind --no-eslint`, Nov 20) with an `items` layout and `loading.tsx`, an async list page, an `[id]` page that awaits `params` and loads its item, a `useState` counter, `next/link` links and a `route.ts`, `apply=true nextRoutes=true`, `npm install` and `npm run build` build with no hand edits. `node dist/server/node.js` serves `/` with the counter, `/items` streamed behind the segment's fallback, `/items/1` with its item, `/api/items` as JSON and `/nope` as a 404, and the item's query answers `GET /_server/data/<id>` as a client navigation calls it. The flags were the two `next/font` loaders, `next.config.ts`, the missing `"type": "module"` and the counter's initial-value prop. `tsc` finds two errors: `next.config.ts`, which still imports `next`, and a `data().item ? data().item.name : ...` that TypeScript doesn't narrow. Hydration and client-side navigation weren't checked in a browser.
 
 ### React libraries and their Solid 2 ports
 
@@ -135,8 +165,10 @@ On create-vite's React TypeScript template (create-vite 9.3.4, Nov 19), `apply=t
 | branch / commit | `branch`, `commit` | Only with `--param apply=true` and `--managed-git` |
 | Run the React Compiler on each file | `forEachFile` | `babel-plugin-react-compiler@1.0.0` decides what each component-body value becomes; each file's result is a step output |
 | Resolve hook contracts across files | function | The whole-program hook-contract pass, over every file's result |
-| Convert each file to Solid 2 (preview: Preview the conversion of each file) | `forEachFile` | Writes each decision with a `// solid:` note, then runs the rule pass (`src/rules/mechanical.mjs`, R1-R45) on that text; applied rules and flags are step outputs. A preview writes nothing |
+| Plan the Next.js routes | function | Only with `--param nextRoutes=true`: where each App Router file goes (`src/nextjs.mjs`) |
+| Convert each file to Solid 2 (preview: Preview the conversion of each file) | `forEachFile` | Writes each decision with a `// solid:` note, then runs the rule pass (`src/rules/mechanical.mjs`, R1-R53) on that text; applied rules and flags are step outputs. With `nextRoutes`, a route file is renamed where the plan says, its relative imports re-pointed. A preview writes nothing |
 | Move package.json, tsconfig and the Vite config to Solid 2 (preview: Preview the package.json, tsconfig and Vite config changes) | `forEachFile` | `src/manifests.mjs`, as above. A preview writes nothing |
+| Plan start mode's files, Write *file*, Move the favicon to public/ | function, `shell` | Only with `nextRoutes`: `src/App.tsx`, `vite.config.ts` and the rest, each written by a shell step (a `forEachFile` step only changes files that exist) unless the path is taken; the shell steps only run with `apply=true` |
 | Summarize the conversion | function | Decision counts, applied rules, flags |
 | Install the Solid 2 lint, Lint | `shell` | Only with `--param apply=true`: `eslint-plugin-solid` 0.19.0, `configs/v2`, on the converted files; the summary is the last line of the lint step's output |
 | Finish flagged spots | `approval`, `agent` | Only with `--param apply=true --param agent=true` |
@@ -160,8 +192,9 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 | `src/workflow.ts` | The workflow |
 | `src/reactivity/` | The reactivity pass: the root `src/` of this repo with fixes found on t3code, and `enableReanimatedCheck` off |
 | `src/lib/reactivity.mjs` | `src/reactivity/` with Babel and the React Compiler, bundled by `pnpm build`; committed, so the workflow runs without a build step |
-| `src/rules/mechanical.mjs` | The rule pass, R1-R45 (R1-R10 from the root `gate/mechanical.js`, R11-R34 from hand-converted screens, R35-R40 from later runs on apps, R41 effects, R42 render-only class components, R43 zustand stores, R44 ported libraries' imports, R45 `createPortal`), as `transform(src, { parse, Lang, ports })`, so it runs under `@ast-grep/napi` and `codemod/ast-grep` |
+| `src/rules/mechanical.mjs` | The rule pass, R1-R53 (R1-R10 from the root `gate/mechanical.js`, R11-R34 from hand-converted screens, R35-R40 from later runs on apps, R41 effects, R42 render-only class components, R43 zustand stores, R44 ported libraries' imports, R45 `createPortal`, R46-R53 and the route files' rules for `nextRoutes`), as `transform(src, { parse, Lang, ports, next })`, so it runs under `@ast-grep/napi` and `codemod/ast-grep` |
 | `src/manifests.mjs` | The port table, the lockfile's React peers, and the `package.json`, `tsconfig` and Vite config edits |
+| `src/nextjs.mjs` | `nextRoutes`: where each App Router file goes, a moved file's imports, `next.config`'s keys, and the files start mode needs |
 | `src/lint/` | ESLint 9 with `eslint-plugin-solid/configs/v2`; the workflow finds it through `import.meta.dirname` |
 | `workflow.yaml` | A stub: codemod 2.0.0-alpha.4 won't start a registry package without one. `codemod.yaml` runs `src/workflow.ts` |
 | `docs/` | The Nov 16 report on t3code, engine gaps found along the way, and that run's logs |
@@ -169,6 +202,6 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 ## Tests
 
 ```sh
-pnpm test                                       # reactivity (54), rule (145), project file (25) and Solid behavior (12) specs
-CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (26, tagged slow), which run the CLI on copies of tests/fixtures/todo-app
+pnpm test                                       # reactivity (54), rule (163), project file (28), Next.js route (12) and Solid behavior (12) specs
+CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (33, tagged slow), which run the CLI on copies of tests/fixtures/todo-app and on Next.js apps the specs write
 ```

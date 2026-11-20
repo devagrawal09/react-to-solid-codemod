@@ -291,3 +291,70 @@ it("tsconfig flags a path into the source of another workspace package that depe
   const { flags } = migrateTsconfig(code, { dir: "apps/web", reactPackages: ["packages/ui", "packages/ui-kit"] });
   expect(flags).toEqual([{ kind: "build config", detail: expect.stringMatching(/^paths maps "@acme\/ui\/\*" to \.\.\/\.\.\/packages\/ui\/src\/\*, the source of packages\/ui, which depends on React: with "jsxImportSource": "@solidjs\/web" it now compiles as Solid JSX/) }]);
 });
+
+// create-next-app 16.4.6 (TypeScript, App Router, no Tailwind or ESLint), Nov 20
+const createNextApp = `{
+  "name": "next-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "16.4.6",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "typescript": "^5"
+  }
+}
+`;
+
+it("package.json with nextRoutes: next out, the router and start mode's build in, and the scripts run Vite", () => {
+  const { text, changes, flags } = migratePackageJson(createNextApp, null, { next: true });
+  expect(text).toBe(`{
+  "name": "next-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node dist/server/node.js"
+  },
+  "dependencies": {
+    "@solidjs/router": "^2.0.0",
+    "@solidjs/web": "^2.0.3",
+    "solid-js": "^2.0.3"
+  },
+  "devDependencies": {
+    "@solidjs/vite-plugin": "^3.0.1",
+    "@types/node": "^20",
+    "filesystem-routing": "^0.5.0",
+    "typescript": "^5",
+    "vite": "^8.3.8"
+  }
+}
+`);
+  expect(changes).toContain("scripts.dev: next dev -> vite");
+  expect(flags).toEqual([{ kind: "build config", detail: expect.stringMatching(/^package.json has no "type": "module"/) }]);
+});
+
+it("package.json with nextRoutes swaps Turbopack's next commands too, and flags one it can't", () => {
+  const { text, flags } = migratePackageJson(`{\n  "type": "module",\n  "scripts": { "dev": "next dev --turbopack", "lint": "next lint", "ci": "next build && vitest" },\n  "dependencies": { "next": "15.0.0", "react": "19.0.0" }\n}\n`, null, { next: true });
+  expect(text).toContain(`"scripts": { "dev": "vite", "lint": "next lint", "ci": "vite build && vitest" }`);
+  expect(text).toContain(`"dependencies": { "@solidjs/router": "^2.0.0", "@solidjs/vite-plugin": "^3.0.1", "@solidjs/web": "^2.0.3", "filesystem-routing": "^0.5.0", "solid-js": "^2.0.3", "vite": "^8.3.8" }`);
+  expect(flags).toEqual([{ kind: "dependency", detail: `scripts.lint runs "next lint", and next is gone: run Vite instead (vite, vite build, vite preview), or remove it` }]);
+});
+
+it("package.json without nextRoutes keeps next and its scripts, flagged", () => {
+  const { text, flags } = migratePackageJson(createNextApp);
+  expect(text).toContain(`"next": "16.4.6"`);
+  expect(text).toContain(`"dev": "next dev"`);
+  expect(flags).toContainEqual({ kind: "dependency", detail: expect.stringMatching(/^next has no Solid 2 port/) });
+});
