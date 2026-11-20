@@ -23,7 +23,7 @@
 // - onSettled in a component body runs once after mount effects, with the DOM inserted, honors a
 //   returned cleanup on dispose, and its reads don't warn. It maps useEffect(fn, []).
 import { afterEach, expect, it } from "vitest";
-import { createEffect, createRenderEffect, createSignal, flush, onSettled } from "solid-js";
+import { createEffect, createRenderEffect, createSignal, flush, onCleanup, onSettled } from "solid-js";
 import { createComponent, render } from "@solidjs/web";
 
 const { warn, error } = console;
@@ -203,4 +203,39 @@ it("runs onSettled once after mount effects, with the element inserted, honors i
   m.dispose();
   expect(log).toEqual(["effect 0", "settled: connected=true, count=0", "effect 1", "settled cleanup"]);
   expect(m.warnings).toEqual([]);
+});
+
+// R43's zustand bridge, as its flag spells it out, over a store with zustand/vanilla's API
+// (getState, setState that merges, subscribe that returns an unsubscribe). Converted callers read
+// selected state as `x()` and call a selected action directly; this is what makes both true.
+it("R43's zustand bridge: selected state is an accessor that follows the store, an action comes back as it is", () => {
+  const createStore = (init) => {
+    let state;
+    const listeners = new Set();
+    const setState = (partial) => { const prev = state; state = { ...state, ...(typeof partial === "function" ? partial(state) : partial) }; for (const l of listeners) l(state, prev); };
+    const api = { getState: () => state, setState, subscribe: (l) => { listeners.add(l); return () => listeners.delete(l); }, listeners };
+    state = init(setState, api.getState);
+    return api;
+  };
+  const store = createStore((set) => ({ count: 0, inc: () => set((s) => ({ count: s.count + 1 })) }));
+  const useCounter = Object.assign((selector) => { const initial = selector(store.getState()); if (typeof initial === "function") return initial; const [value, setValue] = createSignal(initial, { ownedWrite: true }); onCleanup(store.subscribe((state) => setValue(() => selector(state)))); return value; }, store);
+  let inc;
+  const m = mount(() => {
+    const count = useCounter((s) => s.count);
+    inc = useCounter((s) => s.inc);
+    // A store write while a component runs (an owned scope) reaches every subscribed signal:
+    // without ownedWrite, Solid throws REACTIVE_WRITE_IN_OWNED_SCOPE.
+    inc();
+    const el = document.createElement("p");
+    createRenderEffect(() => count(), (n) => { el.textContent = String(n); });
+    return el;
+  });
+  expect(inc).toBe(store.getState().inc);
+  expect(m.box.textContent).toBe("1");
+  inc();
+  flush();
+  expect(m.box.textContent).toBe("2");
+  expect(m.warnings).toEqual([]);
+  m.dispose();
+  expect(store.listeners.size).toBe(0);
 });

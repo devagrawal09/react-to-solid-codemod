@@ -143,6 +143,27 @@ function patternPath(pattern, id, at = []) {
 const isSelector = (arg) => /Function/.test(arg?.type ?? "") || (arg?.type === "CallExpression" && /Function/.test(arg.arguments?.[0]?.type ?? ""))
   || (arg?.type === "ObjectExpression" && arg.properties.some((p) => p.key?.name === "select" && /Function/.test(p.value?.type ?? "")));
 
+// The key a `(s) => s.key` selector picks, or null.
+const selectedKey = (arg) => (arg?.type === "ArrowFunctionExpression" && arg.params.length === 1 && arg.params[0].type === "Identifier" && arg.body.type === "MemberExpression"
+  && !arg.body.computed && arg.body.object.type === "Identifier" && arg.body.object.name === arg.params[0].name && arg.body.property.type === "Identifier" ? arg.body.property.name : null);
+
+// A module-level `const useX = create(...)` (or `create<T>()(...)`) with `create` from zustand: the
+// keys of its initial state that are functions, its actions. Middleware (`persist(fn, options)`,
+// `devtools(fn)`) is stepped through to the state creator; null when that can't be read.
+function zustandStore(init, imports) {
+  if (init?.type !== "CallExpression") return null;
+  const create = init.callee.type === "CallExpression" ? init.callee.callee : init.callee;
+  const imp = create.type === "Identifier" ? imports[create.name] : null;
+  if (!imp || !((imp.source === "zustand" && imp.imported === "create") || (imp.source === "zustand/traditional" && imp.imported === "createWithEqualityFn"))) return null;
+  let creator = init.arguments[0];
+  while (creator?.type === "CallExpression") creator = creator.arguments[0];
+  let state = /Function/.test(creator?.type ?? "") ? creator.body : null;
+  if (state?.type === "BlockStatement") state = state.body.filter((s) => s.type === "ReturnStatement").pop()?.argument ?? null;
+  while (/^(TSAsExpression|TSSatisfiesExpression)$/.test(state?.type ?? "")) state = state.expression;
+  if (state?.type !== "ObjectExpression") return { actions: null };
+  return { actions: state.properties.filter((p) => !p.computed && (p.type === "ObjectMethod" || (p.type === "ObjectProperty" && /Function/.test(p.value.type)))).map((p) => p.key.name ?? String(p.key.value)) };
+}
+
 // What a hook hands back, for the cross-file contract pass.
 function returnShape(arg) {
   while (/^(TSAsExpression|TSSatisfiesExpression|TSNonNullExpression|ParenthesizedExpression)$/.test(arg?.type ?? "")) arg = arg.expression;
@@ -290,7 +311,7 @@ function analyzeFunction(fnPath, code) {
         };
         if (v.initKind === "hook") {
           const call = decl.init.type === "AwaitExpression" ? decl.init.argument : decl.init;
-          v.hookCall = { callee: calleeName(call.callee), path: patternPath(decl.id, id), selector: isSelector(call.arguments?.[0]), onlyFirst: decl.id.type === "ArrayPattern" && decl.id.elements.length === 1 };
+          v.hookCall = { callee: calleeName(call.callee), path: patternPath(decl.id, id), selector: isSelector(call.arguments?.[0]), selects: selectedKey(call.arguments?.[0]), onlyFirst: decl.id.type === "ArrayPattern" && decl.id.elements.length === 1 };
         }
         values.push(v);
         valueByDeclarator.set(decl, v.name);
@@ -305,7 +326,7 @@ function analyzeFunction(fnPath, code) {
       name: "(return)", loc: posKey(lastReturn.loc), line: lastReturn.loc.start.line, declarationKind: "return",
       initKind: initKind(lastReturn.argument), destructured: false, text: code.slice(lastReturn.start, lastReturn.end).split("\n")[0].slice(0, 120),
       range: { statement: [lastReturn.start, lastReturn.end], init: [lastReturn.argument.start, lastReturn.argument.end] }, uses: [{ kind: "return" }],
-      ...(initKind(lastReturn.argument) === "hook" && lastReturn.argument.type === "CallExpression" ? { hookCall: { callee: calleeName(lastReturn.argument.callee), path: [], selector: isSelector(lastReturn.argument.arguments[0]) } } : {}),
+      ...(initKind(lastReturn.argument) === "hook" && lastReturn.argument.type === "CallExpression" ? { hookCall: { callee: calleeName(lastReturn.argument.callee), path: [], selector: isSelector(lastReturn.argument.arguments[0]), selects: selectedKey(lastReturn.argument.arguments[0]) } } : {}),
     });
   }
 
@@ -627,6 +648,7 @@ const CONDITION_BAIL = /^Unexpected terminal kind `(optional|logical)` for (tern
 
 function compile(code, filename, { prestep, liftIn }) {
   const imports = {};
+  const stores = {};
   const astFunctions = new Map();
   const irByLoc = new Map();
   const events = [];
@@ -636,6 +658,14 @@ function compile(code, filename, { prestep, liftIn }) {
         for (const st of program.node.body) {
           if (st.type !== "ImportDeclaration" || st.importKind === "type") continue;
           for (const sp of st.specifiers) imports[sp.local.name] = { source: st.source.value, imported: sp.type === "ImportSpecifier" ? (sp.imported.name ?? sp.imported.value) : sp.type === "ImportDefaultSpecifier" ? "default" : "*" };
+        }
+        for (const st of program.node.body) {
+          const decl = st.type === "ExportNamedDeclaration" ? st.declaration : st;
+          if (decl?.type !== "VariableDeclaration") continue;
+          for (const d of decl.declarations) {
+            const store = d.id.type === "Identifier" ? zustandStore(d.init, imports) : null;
+            if (store) stores[d.id.name] = store;
+          }
         }
         program.traverse({
           Function(path) {
@@ -680,7 +710,7 @@ function compile(code, filename, { prestep, liftIn }) {
   } catch (e) {
     parseError = String(e.message ?? e).split("\n")[0];
   }
-  return { astFunctions, irByLoc, events, notes, parseError, imports };
+  return { astFunctions, irByLoc, events, notes, parseError, imports, stores };
 }
 
 export function extract(code, filename, { prestep = true } = {}) {
@@ -689,7 +719,7 @@ export function extract(code, filename, { prestep = true } = {}) {
   // Second compile, only for files where a function hit the condition bug, lifting tests only there.
   const liftIn = new Set(run.events.filter((e) => e.kind === "CompileError" && CONDITION_BAIL.test(describeError(e).reason)).map((e) => posKey(e.fnLoc)));
   if (prestep && liftIn.size) run = compile(code, filename, { prestep, liftIn });
-  const { astFunctions, irByLoc, events, notes, parseError, imports } = run;
+  const { astFunctions, irByLoc, events, notes, parseError, imports, stores } = run;
 
   const eventByLoc = new Map();
   for (const e of events) {
@@ -707,5 +737,5 @@ export function extract(code, filename, { prestep = true } = {}) {
     if (notes.has(key)) fn.tryPrestep = notes.get(key);
     functions.push(fn);
   }
-  return { file: filename, parseError, imports, functions, ms: Math.round(performance.now() - started) };
+  return { file: filename, parseError, imports, stores, functions, ms: Math.round(performance.now() - started) };
 }

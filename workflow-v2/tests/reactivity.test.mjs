@@ -182,14 +182,111 @@ describe("async components", () => {
   });
 });
 
-it("Next.js's useRouter isn't the router hook the contract table describes", () => {
+it("Next.js's useRouter isn't TanStack's router hook: the library table, by import source, says its router is stable", () => {
   const contract = (source) => {
     const results = [decide(extract(`import { useRouter } from "${source}";\nfunction C({ id }) { const router = useRouter(); return <p onClick={() => router.push(id)} />; }`, "/repo/apps/web/src/C.tsx"))];
     applyContracts(results);
     return results[0].functions[0].values.find((v) => v.name === "router").contract;
   };
   expect(contract("@tanstack/react-router")).toMatchObject({ kind: "static", builtin: true });
-  expect(contract("next/navigation")).toMatchObject({ kind: "opaque", builtin: false });
+  expect(contract("next/navigation")).toMatchObject({ kind: "static", builtin: false, note: "Next.js's useRouter hands back the same router every render" });
+});
+
+describe("library hooks whose result is stable in React too", () => {
+  const values = (code) => {
+    const results = [decide(extract(code, "/repo/apps/web/src/C.tsx"))];
+    applyContracts(results);
+    return results[0].functions[0].values;
+  };
+
+  it.each([
+    ["react-hook-form's useForm", `import { useForm } from "react-hook-form";`, `const form = useForm();`, "form", "useForm hands back the same form object every render; its methods read form state"],
+    ["Next.js's useRouter", `import { useRouter } from "next/navigation";`, `const form = useRouter();`, "form", "Next.js's useRouter hands back the same router every render"],
+    ["PostHog's usePostHog", `import { usePostHog } from "posthog-js/react";`, `const form = usePostHog();`, "form", "usePostHog hands back the PostHog client, the same every render"],
+    ["Lexical's composer context", `import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";`, `const [form] = useLexicalComposerContext();`, "form", "useLexicalComposerContext hands back a stable value"],
+    ["TanStack Virtual's useVirtualizer", `import { useVirtualizer } from "@tanstack/react-virtual";`, `const form = useVirtualizer({ count: 1 });`, "form", "useVirtualizer hands back the same virtualizer every render; its methods read its state"],
+    ["react-redux's useDispatch", `import { useDispatch } from "react-redux";`, `const form = useDispatch();`, "form", "useDispatch hands back a stable value"],
+  ])("%s is static, with a note that says why", (_name, imp, decl, name, why) => {
+    const code = `${imp}\nfunction C({ id }) { ${decl} useEffect(() => { form.reset(id); }, [form, id]); return <p />; }`;
+    expect(values(code).find((v) => v.name === name)).toMatchObject({ decision: "static", why: expect.stringContaining(why) });
+  });
+
+  it("a value computed by calling a stable form's methods during render stays reactive", () => {
+    const vs = values(`import { useForm } from "react-hook-form";\nfunction C() { const form = useForm(); const name = form.watch("name"); return <p>{name}</p>; }`);
+    expect(vs.find((v) => v.name === "name").decision).not.toBe("static");
+  });
+
+  it("the same hook name from another package, or a hook the table leaves out, stays an unknown hook result", () => {
+    expect(values(`import { useForm } from "my-forms";\nfunction C() { const form = useForm(); return <p onClick={() => form.reset()} />; }`)[0].decision).toBe("hook");
+    // Its value is rebuilt when formState changes.
+    expect(values(`import { useFormContext } from "react-hook-form";\nfunction C() { const form = useFormContext(); return <p onClick={() => form.reset()} />; }`)[0].decision).toBe("hook");
+  });
+
+  it("rewrite notes a stable library hook result as static, which R41 reads", () => {
+    const code = `import { useForm } from "react-hook-form";\nfunction C() {\n  const form = useForm();\n  return <p onClick={() => form.reset()} />;\n}\n`;
+    const results = [decide(extract(code, "/repo/apps/web/src/C.tsx"))];
+    applyContracts(results);
+    expect(rewrite(code, results[0]).code).toContain(`  // solid: form: static (useForm hands back the same form object every render; its methods read form state)\n  const form = useForm();`);
+  });
+});
+
+it("a useCallback value is a plain function, not a store selector's accessor: its reads aren't turned into calls", () => {
+  const code = `import { useCallback } from "react";\nexport function useShare(id) {\n  const share = useCallback(async (opts) => { await post(id, opts); }, [id]);\n  return { share };\n}\n`;
+  const results = [decide(extract(code, "/repo/apps/web/src/useShare.ts"))];
+  applyContracts(results);
+  expect(results[0].functions[0].values.find((v) => v.name === "share")).toMatchObject({ decision: "function", why: "useCallback(fn) becomes fn, a plain function that reads reactive values when called" });
+  expect(rewrite(code, results[0]).code).toContain("return { get share() { return share; } };");
+});
+
+describe("zustand store hooks", () => {
+  const storeFile = "/repo/apps/web/src/store.ts";
+  const store = `import { create } from "zustand";
+    import { persist } from "zustand/middleware";
+    export const useChat = create<ChatState>()(persist((set, get) => ({ threadId: null, open: false, setThreadId: (id) => set({ threadId: id }), toggle() { set({ open: !get().open }); } }), { name: "chat" }));
+    export const useCount = create((set) => { const inc = () => set((s) => ({ n: s.n + 1 })); return { n: 0, inc }; });
+    export const useLoose = create(makeState);`;
+  const settle = (body, imports = "useChat, useCount, useLoose") => {
+    const results = [decide(extract(store, storeFile)), decide(extract(`import { ${imports} } from "./store";\nfunction C() { ${body} }`, "/repo/apps/web/src/C.tsx"))];
+    applyContracts(results);
+    return results[1].functions[0].values;
+  };
+
+  it("extract finds each store and the actions in its initial state, through middleware", () => {
+    expect(extract(store, storeFile).stores).toEqual({ useChat: { actions: ["setThreadId", "toggle"] }, useCount: { actions: [] }, useLoose: { actions: null } });
+  });
+
+  it("an action a selector picks is static: callers call it directly", () => {
+    expect(settle(`const setThreadId = useChat((s) => s.setThreadId); return <p onClick={() => setThreadId(1)} />;`)[0]).toMatchObject({ decision: "static", why: "useChat selects setThreadId, a store action: the same function every render" });
+    expect(settle(`const toggle = useChat((s) => s.toggle); return <p onClick={toggle} />;`)[0].decision).toBe("static");
+  });
+
+  it("selected state stays an accessor, and so does a key the store's initial state doesn't write as a function", () => {
+    expect(settle(`const threadId = useChat((s) => s.threadId); return <p>{threadId}</p>;`)[0].decision).toBe("accessor");
+    expect(settle(`const inc = useCount((s) => s.inc); return <p onClick={inc} />;`)[0].decision).toBe("accessor");
+    expect(settle(`const reset = useLoose((s) => s.reset); return <p onClick={reset} />;`)[0].decision).toBe("accessor");
+    expect(settle(`const open = useChat((s) => s.open && s.threadId); return <p>{open}</p>;`)[0].decision).toBe("accessor");
+  });
+
+  it("the whole store, with no selector, is an unknown hook result that says why", () => {
+    expect(settle(`const chat = useChat(); return <p>{chat.threadId}</p>;`)[0]).toMatchObject({ decision: "hook", why: "hook result (useChat without a selector is the whole store)" });
+  });
+
+  it("a store used in the file that creates it gets the same contracts", () => {
+    const code = `import { create } from "zustand";\nconst useUi = create((set) => ({ tab: "a", setTab: (tab) => set({ tab }) }));\nfunction C() { const tab = useUi((s) => s.tab); const setTab = useUi((s) => s.setTab); return <p onClick={() => setTab("b")}>{tab}</p>; }`;
+    const results = [decide(extract(code, "/repo/apps/web/src/C.tsx"))];
+    applyContracts(results);
+    expect(results[0].functions[0].values.map((v) => [v.name, v.decision])).toEqual([["tab", "accessor"], ["setTab", "static"]]);
+  });
+
+  it.each([["~/"], ["@/"]])("a store imported through the app's %s path alias gets the same contracts, in any app's src", (alias) => {
+    const results = [decide(extract(store, "/apps/nextjs/src/store.ts")), decide(extract(`import { useChat } from "${alias}store";\nfunction C() { const setThreadId = useChat((s) => s.setThreadId); return <p onClick={() => setThreadId(1)} />; }`, "/apps/nextjs/src/app/page/C.tsx"))];
+    applyContracts(results);
+    expect(results[1].functions[0].values[0].decision).toBe("static");
+  });
+
+  it("a create that isn't zustand's isn't a store", () => {
+    expect(extract(`import { create } from "./mine";\nexport const useX = create(() => ({ a: () => 1 }));`, storeFile).stores).toEqual({});
+  });
 });
 
 it("inlining JSX used once leaves no line of indentation behind", () => {

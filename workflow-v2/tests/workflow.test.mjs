@@ -201,15 +201,31 @@ describe.skipIf(!bin)("react-to-solid workflow on one app of a monorepo", { tags
 
 describe.skipIf(!bin)("react-to-solid workflow on an app with React libraries and a class component", { tags: ["slow"] }, () => {
   let run;
+  let app;
   beforeAll(() => {
-    const app = givenApp((dir) => {
+    app = givenApp((dir) => {
       const pkg = JSON.parse(read(dir, "package.json"));
       Object.assign(pkg.dependencies, { "lucide-react": "1.0.0", zustand: "5.0.0", "@dnd-kit/core": "6.0.0", "react-hotkeys-hook": "5.0.0", lodash: "4.0.0" });
       fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify(pkg, null, 2));
       fs.writeFileSync(path.join(dir, "src/components/Boundary.tsx"), `import { Component, type ReactNode } from "react";\n\nexport class Boundary extends Component<{ children: ReactNode }, { failed: boolean }> {\n  state = { failed: false };\n  static getDerivedStateFromError() {\n    return { failed: true };\n  }\n  render() {\n    return this.state.failed ? <p>Failed</p> : this.props.children;\n  }\n}\n`);
+      fs.writeFileSync(path.join(dir, "src/components/Hint.tsx"), `import { Component } from "react";\n\nexport class Hint extends Component<{ text: string; tone?: string }> {\n  static defaultProps = { tone: "muted" };\n  render() {\n    return <small className={this.props.tone}>{this.props.text}</small>;\n  }\n}\n`);
+      fs.writeFileSync(path.join(dir, "src/chat-store.ts"), `import { create } from "zustand";\n\nexport const useChat = create<{ threadId: string | null; setThreadId: (id: string) => void }>()((set) => ({\n  threadId: null,\n  setThreadId: (id) => set({ threadId: id }),\n}));\n`);
+      fs.writeFileSync(path.join(dir, "src/components/Thread.tsx"), `import { useEffect } from "react";\nimport { useChat } from "../chat-store";\n\nexport function Thread({ id }: { id: string }) {\n  const threadId = useChat((s) => s.threadId);\n  const setThreadId = useChat((s) => s.setThreadId);\n  useEffect(() => {\n    document.title = threadId ?? "";\n  }, [threadId]);\n  return <button onClick={() => setThreadId(id)}>{threadId}</button>;\n}\n`);
     });
-    run = migrate(app, []);
+    run = migrate(app);
   }, 120_000);
+
+  it("turns a class with only render() into a function component, its defaultProps into merge", () => {
+    expect(read(app, "src/components/Hint.tsx")).toBe(`import { merge } from "solid-js";\n\nexport function Hint(props: { text: string; tone?: string }) {\n  const merged = merge({ tone: "muted" } as const, props);\n  return <small class={merged.tone}>{merged.text}</small>;\n}\n`);
+  });
+
+  it("reads a zustand store's selected state as an accessor, calls its action directly, and flags the store once with the bridge", () => {
+    const thread = read(app, "src/components/Thread.tsx");
+    expect(thread).toContain("createEffect(() => threadId(), (threadId) => {");
+    expect(thread).toContain("<button onClick={() => setThreadId(props.id)}>{threadId()}</button>");
+    expect(run.output.flags.filter((f) => f.kind === "zustand store")).toEqual([{ file: "src/chat-store.ts", line: 3, kind: "zustand store", detail: expect.stringContaining("export const useChat = Object.assign((selector) =>") }]);
+    expect(run.output.flags.filter((f) => f.kind === "effect dep")).toEqual([]);
+  });
 
   it("maps React libraries to their Solid 2 ports", () => {
     expect(run.output.plan.ported).toContain("lucide-react -> @lucide/solid@1.76.0");

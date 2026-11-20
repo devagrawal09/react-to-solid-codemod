@@ -1,6 +1,10 @@
 import { expect, it } from "vitest";
 import { parse, Lang } from "@ast-grep/napi";
 import { transform } from "../src/rules/mechanical.mjs";
+import { extract } from "../src/reactivity/extract.mjs";
+import { decide } from "../src/reactivity/decide.mjs";
+import { rewrite } from "../src/reactivity/rewrite.mjs";
+import { applyContracts } from "../src/reactivity/contracts.mjs";
 
 const run = (code) => transform(code, { parse, Lang });
 const convert = (code) => run(code).code;
@@ -134,6 +138,32 @@ it("R24 keeps a hook's result as an object instead of destructuring it once", ()
 it("R25 calls a library hook's accessor where the compiler pass said to", () => {
   const code = `function C() {\n  // solid: canEdit: accessor (useAtomValue hands back an accessor: read it as \`canEdit()\`)\n  const canEdit = useAtomValue(canEditAtom);\n  return <button disabled={!canEdit} />;\n}`;
   expect(convert(code)).toContain(`disabled={!canEdit()}`);
+});
+
+it("R25 also calls the accessor when the compiler bailed and the note says it came from the AST", () => {
+  const code = `function C() {\n  // solid: threadId: accessor (useChat hands back an accessor: read it as \`threadId()\` (AST fallback: no compiler output))\n  const threadId = useChat((s) => s.threadId);\n  useEffect(() => { open(threadId); }, [threadId]);\n  return <b>{threadId}</b>;\n}`;
+  const { code: out, flags } = run(code);
+  expect(out).toContain(`createEffect(() => threadId(), (threadId) => { open(threadId); });`);
+  expect(out).toContain(`<b>{threadId()}</b>`);
+  expect(flags.filter((f) => f.kind === "effect dep")).toEqual([]);
+});
+
+it("R43 flags each zustand store once, where it's created, with the bridge its converted callers expect", () => {
+  const { flags } = run(`import { create } from "zustand";\nimport { persist } from "zustand/middleware";\n\nexport const useChat = create<ChatState>()(persist((set) => ({ threadId: null, setThreadId: (id) => set({ threadId: id }) }), { name: "chat" }));\nconst useUi = create((set) => ({ tab: "a" }));\nfunction C() { const local = create(() => ({})); return null; }\n`);
+  const stores = flags.filter((f) => f.kind === "zustand store");
+  expect(stores.map((f) => [f.line, f.detail.split(" ")[0]])).toEqual([[4, "useChat"], [5, "useUi"]]);
+  expect(stores[0].detail).toContain("export const useChat = Object.assign((selector) => { const initial = selector(store.getState()); if (typeof initial === \"function\") return initial; const [value, setValue] = createSignal(initial, { ownedWrite: true }); onCleanup(store.subscribe((state) => setValue(() => selector(state)))); return value; }, store)");
+});
+
+it("R43 leaves a create that isn't zustand's alone", () => {
+  expect(run(`import { create } from "./store";\nexport const useX = create(() => ({}));\n`).flags).toEqual([]);
+});
+
+it("R5 leaves a hook's `return state` as the accessor, which its callers call", () => {
+  expect(flat(`export function useDebounced(value) { const [d, setD] = useState(value); const [n] = useState(0); const doubled = useMemo(() => d * 2, [d]); return d; }\nexport const useDoubled = (value) => { const [d, setD] = useState(value); const doubled = useMemo(() => d * 2, [d]); return doubled; };`))
+    .toContain(`const doubled = createMemo(() => d() * 2); return d; } export const useDoubled = (value) => { const [d, setD] = createSignal(value); const doubled = createMemo(() => d() * 2); return doubled; };`);
+  // A component's (or a nested function's) return still reads the value.
+  expect(flat(`function C() { const [d, setD] = useState(1); const f = () => { return d; }; return <p>{f()}</p>; }`)).toContain(`const f = () => { return d(); };`);
 });
 
 it("R26 reads renamed and function-expression props through props", () => {
@@ -320,6 +350,50 @@ it("R39 doesn't import Solid's Component type or the APIs its note names", () =>
   expect(flags).toContainEqual(expect.objectContaining({ kind: "React API", detail: expect.stringContaining("Component was imported from react") }));
 });
 
+it("R42 turns a class with only render() into a function component reading props", () => {
+  const { code, flags, applied } = run(`import { Component } from "react";\n\ntype Props = { name: string; className?: string };\n\nexport default class Greeting extends Component<Props> {\n  render() {\n    return <p className={this.props.className}>Hi {this.props.name}</p>;\n  }\n}\n`);
+  // R12 renames the className prop, in its type too.
+  expect(code).toBe(`\ntype Props = { name: string; class?: string };\n\nexport default function Greeting(props: Props) {\n  return <p class={props.class}>Hi {props.name}</p>;\n}\n`);
+  expect(flags).toEqual([]);
+  expect(applied["class component -> function component"]).toBe(1);
+});
+
+it("R42 turns static defaultProps into merge, and keeps render's return type", () => {
+  const code = convert(`import * as React from "react";\nexport class Badge extends React.PureComponent<{ tone?: "info" | "warn"; children?: React.ReactNode }> {\n  static defaultProps = { tone: "info" };\n  render(): React.ReactNode { return <span data-tone={this.props.tone}>{this.props.children}</span>; }\n}\n`);
+  expect(code).toBe(`import { merge } from "solid-js";\nimport type { JSX } from "@solidjs/web";\nexport function Badge(props: { tone?: "info" | "warn"; children?: JSX.Element }): JSX.Element {\n  const merged = merge({ tone: "info" } as const, props);\n  return <span data-tone={merged.tone}>{merged.children}</span>;\n}\n`);
+});
+
+it("R42 moves `const { ... } = this.props` into the parameter, where R8 converts it like any destructured props", () => {
+  const code = convert(`import { Component } from "react";\nclass Row extends Component<{ label: string; size?: number }> {\n  render() {\n    const { label, size = 2 } = this.props;\n    return <td colSpan={size}>{label}</td>;\n  }\n}\n`);
+  expect(code).toContain(`function Row(props: { label: string; size?: number }) {\n  const merged = merge({ size: 2 } as const, props);\n  return <td colspan={merged.size}>{merged.label}</td>;\n}`);
+});
+
+it("R42 reads this.props in a nested arrow, which keeps render's this", () => {
+  expect(flat(`import { Component } from "react";\nclass L extends Component<{ items: string[]; onPick: (s: string) => void }> {\n  render() { return <button onClick={() => this.props.onPick(this.props.items[0])} />; }\n}\n`)).toContain(`function L(props: { items: string[]; onPick: (s: string) => void }) { return <button onClick={() => props.onPick(props.items[0])} />; }`);
+});
+
+it.each([
+  ["state", `state = { n: 0 };\n  render() { return <b>{this.state.n}</b>; }`],
+  ["a lifecycle method", `componentDidMount() { ping(); }\n  render() { return <b>{this.props.a}</b>; }`],
+  ["an instance field", `label = "x";\n  render() { return <b>{this.label}</b>; }`],
+  ["a method render calls through this", `format() { return "x"; }\n  render() { return <b>{this.format()}</b>; }`],
+  ["this in a nested function, which isn't the component's", `render() { return <b onClick={function () { log(this.props.a); }} />; }`],
+  ["a value computed above the return, which Solid would read once", `render() { const up = this.props.a.toUpperCase(); return <b>{up}</b>; }`],
+  ["destructured props and defaultProps together", `static defaultProps = { a: "x" };\n  render() { const { a } = this.props; return <b>{a}</b>; }`],
+  ["a static other than defaultProps", `static contextType = Ctx;\n  render() { return <b>{this.props.a}</b>; }`],
+  ["a body that has a name of its own called props", `render() { return <b>{[this.props.a].map((props) => props)}</b>; }`],
+])("R42 leaves a class with %s to R39's flag", (_shape, body) => {
+  const { code, flags } = run(`import { Component } from "react";\nexport class K extends Component<{ a: string }> {\n  ${body}\n}\n`);
+  expect(code).toContain("// solid: class component: K is a class component and Solid has none");
+  expect(code).toContain("export class K extends Component");
+  expect(flags.map((f) => f.kind)).toContain("class component");
+});
+
+it("R42 leaves a class whose defaultProps are assigned after it to R39's flag", () => {
+  const { code } = run(`import { Component } from "react";\nclass K extends Component<{ a?: string }> {\n  render() { return <b>{this.props.a}</b>; }\n}\nK.defaultProps = { a: "x" };\n`);
+  expect(code).toContain("class K extends Component");
+});
+
 it("R39 leaves classes that don't extend React's Component alone", () => {
   const { code, flags } = run(`import { Component } from "./mine";\nclass A extends Component<{}> {}\nclass B extends Error {}\n`);
   expect(code).not.toContain("// solid:");
@@ -453,6 +527,17 @@ it("R41 leaves an effect in an async component alone, flagged", () => {
 it("R41 doesn't flag a dep read in the component body: it moves into compute", () => {
   const { flags } = run(`function C() { const [n, setN] = useState(0); useEffect(() => { ping(); }, [n]); return null; }`);
   expect(flags).toEqual([]);
+});
+
+it("R41 flags only the deps that changed in React: a library hook result stable in React too is noted static and tracked silently", () => {
+  const code = `import { useForm } from "react-hook-form";\nimport { useRouter, usePathname } from "next/navigation";\nimport { useStore } from "./store";\nfunction C({ id }) {\n  const form = useForm();\n  const router = useRouter();\n  const pathname = usePathname();\n  const reset = useStore((s) => s.reset);\n  const count = useStore((s) => s.count);\n  useEffect(() => { form.reset({ id }); router.refresh(); reset(); log(pathname, count); }, [form, router, id, reset, pathname, count]);\n  return <p />;\n}\n`;
+  const store = `import { create } from "zustand";\nexport const useStore = create((set) => ({ count: 0, reset: () => set({ count: 0 }) }));\n`;
+  const results = [decide(extract(code, "/repo/apps/web/src/C.tsx")), decide(extract(store, "/repo/apps/web/src/store.ts"))];
+  applyContracts(results);
+  const { code: out, flags } = run(rewrite(code, results[0]).code);
+  expect(flags.filter((f) => f.kind === "effect dep")).toEqual([{ kind: "effect dep", line: expect.any(Number), detail: expect.stringMatching(/^pathname is a plain value here/) }]);
+  // State selected from the store is tracked as an accessor; its action is called as it is.
+  expect(out).toMatch(/createEffect\(\(\) => \(\{ form, router, id: props\.id, reset, pathname, count: count\(\) \}\), \(\{ id, count \}\) => \{ form\.reset\(\{ id: id \}\); router\.refresh\(\); reset\(\); log\(pathname, count\); \}\);/);
 });
 
 it("R41 flags a dep that is a plain value or a hook result: tracking it never re-runs the effect", () => {

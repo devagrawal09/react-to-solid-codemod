@@ -133,6 +133,10 @@ export function transform(input, { parse, Lang }) {
         }
       }
       if (shadowed) continue;
+      // A hook that returns its signal or memo hands back the accessor, which is what the compiler
+      // pass tells its callers (`x()`).
+      const owner = bodyNode?.parent();
+      if (parent?.kind() === "return_statement" && same(parent.parent(), bodyNode) && /^use[A-Z]/.test(owner?.field("name")?.text() ?? owner?.parent()?.field("name")?.text() ?? "")) continue;
       // deferred if any ancestor below the component body is a function or JSX expression/attribute
       // An effect's deps array becomes its compute function (R41).
       let deferred = false;
@@ -456,6 +460,55 @@ export function transform(input, { parse, Lang }) {
     }),
   ]);
 
+  // R42 a class component that is only render() (and optionally static defaultProps) and reads
+  // nothing of `this` but this.props -> a function component, this.props -> props, defaultProps ->
+  // merge. Its render can only return, after an optional `const { ... } = this.props` (which R8
+  // then converts like any destructured props): a value computed above the return would be read
+  // once in Solid. Anything else (state, lifecycle or error-boundary methods, instance fields,
+  // other uses of `this`) stays a class, flagged by R39.
+  pass((root) =>
+    root.findAll({ rule: { kind: "class_declaration", has: { kind: "class_heritage" } } }).flatMap((cls) => {
+      const heritage = cls.children().find((c) => c.kind() === "class_heritage");
+      const base = heritage.text().match(/^extends\s+((?:React\.)?(?:Pure)?Component)\b/)?.[1];
+      if (!base || !(base.startsWith("React.") || fromReact.has(base))) return [];
+      const name = cls.field("name").text();
+      const members = kids(cls.field("body")).filter((m) => m.kind() !== "comment");
+      const render = members.find((m) => m.kind() === "method_definition" && m.field("name")?.text() === "render");
+      const defaults = members.find((m) => m.kind() === "public_field_definition" && m.field("name")?.text() === "defaultProps" && m.children().some((c) => c.kind() === "static"));
+      if (!render || /^(async|get|\*)\b/.test(render.text()) || kids(render.field("parameters")).length) return [];
+      if (members.some((m) => !same(m, render) && !same(m, defaults)) || (defaults && defaults.field("value")?.kind() !== "object")) return [];
+      // `X.defaultProps = ...` after the class would land on the function and do nothing.
+      if (new RegExp(`\\b${name}\\.(defaultProps|contextType)\\b`).test(src)) return [];
+      const body = render.field("body");
+      const statements = kids(body).filter((s) => s.kind() !== "comment");
+      const first = statements[0];
+      const destructure = statements.length === 2 && first.kind() === "lexical_declaration" && /^const\b/.test(first.text()) && kids(first).length === 1
+        && kids(first)[0].field("name")?.kind() === "object_pattern" && kids(first)[0].field("value")?.text() === "this.props" ? kids(first)[0] : null;
+      if (statements.at(-1)?.kind() !== "return_statement" || statements.length !== (destructure ? 2 : 1) || (destructure && defaults)) return [];
+      const thisReads = body.findAll({ rule: { kind: "this" } });
+      const fnKinds = ["function_expression", "function_declaration", "generator_function", "generator_function_declaration", "method_definition", "class_body"];
+      if (!thisReads.every((t) => t.parent()?.kind() === "member_expression" && t.parent().field("property")?.text() === "props" && !t.ancestors().some((a) => inside(a, body) && fnKinds.includes(a.kind())))) return [];
+      // this.props becomes `props` (or `merged`), so the body can't have a name of its own like it.
+      const holder = defaults ? freeName("merged") : "props";
+      if (/(^|[^.\w$])props\b/.test(body.text())) return [];
+      const typeArg = kids(heritage.find({ rule: { kind: "type_arguments" } }))[0]?.text();
+      const param = `${destructure ? destructure.field("name").text() : "props"}${typeArg ? `: ${typeArg}` : ""}`;
+      const edits = [...thisReads.map((t) => rep(t.parent(), holder)), ...(destructure ? [dropLine(first, src)] : [])];
+      // The body moves out of the class: one level of indentation less.
+      const column = (cls.parent()?.kind() === "export_statement" ? cls.parent() : cls).range().start.column;
+      const shift = render.range().start.column - column;
+      let text = textWith(body, edits).replace(new RegExp(`\n {${shift}}`, "g"), "\n");
+      if (defaults) {
+        const indent = " ".repeat(column + 2);
+        const rest = text.slice(1);
+        // A one-line render body gets a line per statement.
+        text = `{\n${indent}const ${holder} = merge(${defaults.field("value").text()} as const, props);${rest.startsWith("\n") ? rest : `\n${indent}${rest.trimStart().replace(/\s*\}$/, `\n${" ".repeat(column)}}`)}`}`;
+      }
+      note("class component -> function component");
+      return [rep(cls, `function ${name}(${param})${render.field("return_type")?.text() ?? ""} ${text}`)];
+    }),
+  );
+
   // R38 inline style objects on intrinsic elements: Solid sets each key with style.setProperty, so
   // camelCase keys become CSS names, and a number gets the px React added on its own. A value that
   // may be a number at runtime is flagged.
@@ -722,7 +775,8 @@ export function transform(input, { parse, Lang }) {
       const stmt = c.next();
       if (!stmt || stmt.kind() !== "lexical_declaration") continue;
       const scope = stmt.parent();
-      for (const m of c.text().matchAll(/(\w+): accessor \((\w+) hands back an accessor: read it as `\1\(\)`\)/g)) {
+      // A function the compiler bailed on was decided from the AST, which the note says after the read.
+      for (const m of c.text().matchAll(/(\w+): accessor \((\w+) hands back an accessor: read it as `\1\(\)`(?: \(AST fallback: no compiler output\))?\)/g)) {
         if (/^use(State|Reducer|Memo)$/.test(m[2])) continue;
         const reads = callReads(scope, m[1], { exclude: [stmt], skipCallee: true, skipHookArgs: true }, stmt);
         if (!reads) continue;
@@ -1283,6 +1337,16 @@ export function transform(input, { parse, Lang }) {
       next: "Metadata and generateMetadata -> useHead from @solidjs/web",
     }[source] ?? "Next.js has no Solid 2 equivalent";
     flag("Next.js", imp, `${names.join(", ") || "import"} from ${source}: ${guidance}`);
+  }
+  // R43 zustand's React hook has no Solid 2 binding. Each store is flagged once, where it's created,
+  // with the bridge the converted callers were written for: selected state is an accessor (`x()`),
+  // a selected action is called directly (the compiler pass reads both off the store).
+  const zustandCreate = src.match(/^import\s*\{([^}]*)\}\s*from\s*["']zustand["']/m)?.[1].split(",").map((s) => s.trim().split(/\s+as\s+/)).find(([imported]) => imported === "create")?.pop();
+  if (zustandCreate) {
+    for (const decl of root.findAll({ rule: { kind: "variable_declarator", inside: { kind: "lexical_declaration", inside: { any: [{ kind: "program" }, { kind: "export_statement" }] } }, has: { field: "value", kind: "call_expression", regex: `^${zustandCreate}\\b` } } })) {
+      const name = decl.field("name").text();
+      flag("zustand store", decl, `${name} is a zustand React hook, and zustand has no Solid 2 binding (solid-zustand is Solid 1 only). Its callers were converted to read selected state as an accessor, x(), and to call a selected action directly. A bridge makes that true: create the store with createStore from zustand/vanilla, then export const ${name} = Object.assign((selector) => { const initial = selector(store.getState()); if (typeof initial === "function") return initial; const [value, setValue] = createSignal(initial, { ownedWrite: true }); onCleanup(store.subscribe((state) => setValue(() => selector(state)))); return value; }, store). Actions come back as they are (zustand makes them once), and ownedWrite lets a store write made while a component or a computation runs update the signal (Solid throws otherwise)`);
+    }
   }
   for (const c of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^(React\\.)?useRef$" } } }))
     flag("ref", c, "useRef -> DOM ref callback or plain let");

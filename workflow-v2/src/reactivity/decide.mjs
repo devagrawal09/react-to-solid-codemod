@@ -46,7 +46,7 @@ function resolveUseKinds(value, byName, seen = new Set()) {
 function decideHookValue(value, out) {
   const c = value.contract;
   if (!c || c.kind === "opaque") return out("hook", c ? `hook result (${c.why})` : "hook result");
-  if (c.kind === "static") return out("static", c.reactiveCall ? `${c.from} hands back a stable function; calling it reads reactive values` : `${c.from} hands back a stable value`);
+  if (c.kind === "static") return out(c.decision ?? "static", c.note ?? (c.reactiveCall ? `${c.from} hands back a stable function; calling it reads reactive values` : `${c.from} hands back a stable value`));
   if (c.kind === "accessor") {
     return c.destructured
       ? out("getter-read", `destructured from ${c.from}'s getters: keep the object, read \`r.${value.hookCall.path.at(-1)}\``)

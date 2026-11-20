@@ -26,6 +26,10 @@ export const BUILTIN = {
   useRef: S,
   useId: S,
   useEffectEvent: S,
+  // R4 turns useCallback(fn, deps) into fn: callers keep the reference and call it, as with a
+  // function declared in the body (decided `function`). It isn't an accessor: reading it as
+  // `cb()` would call it.
+  useCallback: { ...F, decision: "function", note: "useCallback(fn) becomes fn, a plain function that reads reactive values when called" },
   useDeferredValue: A,
   useSyncExternalStore: A,
   useContext: { kind: "object", props: {} },
@@ -43,12 +47,31 @@ export const BUILTIN = {
   useQueryClient: S,
 };
 
+// Library hooks whose result keeps its identity across renders in React too, by import source
+// (a name alone is ambiguous: Next.js's useRouter isn't TanStack's). Such a value was in effect
+// deps only to satisfy exhaustive-deps, so tracking it as a plain value loses nothing. Checked
+// against each library's source on Nov 19. react-hook-form's useFormContext is left out: its
+// value is rebuilt when formState changes.
+export const LIBRARY = {
+  "react-hook-form": { useForm: { ...F, note: "useForm hands back the same form object every render; its methods read form state" } },
+  "next/navigation": { useRouter: { ...S, note: "Next.js's useRouter hands back the same router every render" } },
+  "posthog-js/react": { usePostHog: { ...S, note: "usePostHog hands back the PostHog client, the same every render" } },
+  "@lexical/react/LexicalComposerContext": { useLexicalComposerContext: tuple(S, S) },
+  "@tanstack/react-virtual": {
+    useVirtualizer: { ...F, note: "useVirtualizer hands back the same virtualizer every render; its methods read its state" },
+    useWindowVirtualizer: { ...F, note: "useWindowVirtualizer hands back the same virtualizer every render; its methods read its state" },
+  },
+  "react-redux": { useDispatch: S, useStore: S },
+};
+
 // call-time values are reactive reads done later, so a caller gets an accessor, not a plain value.
 const STATIC_DECISIONS = new Set(["static", "function", "unused"]);
 
 function resolveImport(fromFile, source, files) {
   let base;
-  if (source.startsWith("~/")) base = path.join(fromFile.slice(0, fromFile.indexOf("/apps/web/src/") + "/apps/web/src/".length), source.slice(2));
+  // `~/` and `@/` are the usual tsconfig paths for the app's src directory (t3code, create-t3-app,
+  // create-next-app).
+  if ((source.startsWith("~/") || source.startsWith("@/")) && fromFile.includes("/src/")) base = path.join(fromFile.slice(0, fromFile.indexOf("/src/") + "/src/".length), source.slice(2));
   else if (source.startsWith(".")) base = path.join(path.dirname(fromFile), source);
   else return null;
   for (const ext of ["", ".ts", ".tsx", "/index.ts", "/index.tsx"]) if (files.has(base + ext)) return base + ext;
@@ -81,7 +104,7 @@ export function buildContracts(results) {
   const hookValueContract = (file, hookCall, stack) => {
     const t = target(file, hookCall.callee);
     if (hookCall.onlyFirst && ["useState", "useReducer"].includes(t?.builtin) && hookCall.path?.[0] === 0) return { ...S, why: "state without a setter" };
-    return at(contractOfCall(file, hookCall.callee, stack, hookCall.selector), hookCall.path);
+    return at(contractOfCall(file, hookCall.callee, stack, hookCall.selector, hookCall.selects), hookCall.path);
   };
 
   // The hook a call in `file` refers to: imported from a local file, defined in the same file, or built in.
@@ -90,19 +113,31 @@ export function buildContracts(results) {
     const imp = files.get(file)?.imports?.[callee];
     if (imp) {
       const resolved = resolveImport(file, imp.source, files);
-      if (resolved && imp.imported !== "default" && imp.imported !== "*") return { key: `${resolved}#${imp.imported}` };
+      if (resolved && imp.imported !== "default" && imp.imported !== "*") return files.get(resolved).stores?.[imp.imported] ? { store: files.get(resolved).stores[imp.imported] } : { key: `${resolved}#${imp.imported}` };
+      const library = Object.entries(LIBRARY).find(([source]) => source === imp.source)?.[1];
+      if (library?.[imp.imported]) return { library: library[imp.imported] };
       // Next.js's useRouter and useParams aren't the router hooks the table describes.
       if (BUILTIN[imp.imported] && !/^next(\/|$)/.test(imp.source)) return { builtin: imp.imported };
       return { external: `${imp.source}:${imp.imported}` };
     }
     if (hooks.has(`${file}#${callee}`)) return { key: `${file}#${callee}` };
+    if (files.get(file)?.stores?.[callee]) return { store: files.get(file).stores[callee] };
     if (BUILTIN[callee]) return { builtin: callee };
     return { external: callee };
   };
 
-  const contractOfCall = (file, callee, stack, selector = false) => {
+  const contractOfCall = (file, callee, stack, selector = false, selects = null) => {
     const t = target(file, callee);
     if (!t) return { kind: "opaque", why: "no callee" };
+    if (t.library) return t.library;
+    // A zustand store hook (zustand has no Solid 2 binding; the store gets a bridge, see R43). An
+    // action it selects (`useStore((s) => s.reset)`) is a function made once with the store: the
+    // same every render, so callers call it directly. Selected state is a reactive slice; the
+    // whole store (no selector) changes on every write.
+    if (t.store) {
+      if (selector && selects && t.store.actions?.includes(selects)) return { ...S, note: `${callee} selects ${selects}, a store action: the same function every render` };
+      return selector ? { ...A, why: "store selector" } : { kind: "opaque", why: `${callee} without a selector is the whole store` };
+    }
     // A router hook with `select` hands back the selected slice, not its usual object.
     if (t.builtin) return selector && BUILTIN[t.builtin].kind === "object" && t.builtin !== "useContext" && t.builtin !== "use" ? { ...A, why: "router selector" } : BUILTIN[t.builtin];
     // A store hook called with a selector (`useStore((s) => s.x)`) reads one reactive slice.
@@ -142,7 +177,7 @@ export function buildContracts(results) {
       c = tuple(...shape.items.map((i) => (i.fn ? F : i.name ? contractOfValue(file, fn, i.name, next) : A)));
     } else {
       const ret = fn.values.find((v) => v.name === "(return)");
-      c = ret?.hookCall ? contractOfCall(file, ret.hookCall.callee, next, ret.hookCall.selector) : ret?.decision === "function" ? F : ret && STATIC_DECISIONS.has(ret.decision) ? S : ret?.decision === "flag" ? { kind: "opaque", why: "return flagged" } : A;
+      c = ret?.hookCall ? contractOfCall(file, ret.hookCall.callee, next, ret.hookCall.selector, ret.hookCall.selects) : ret?.decision === "function" ? F : ret && STATIC_DECISIONS.has(ret.decision) ? S : ret?.decision === "flag" ? { kind: "opaque", why: "return flagged" } : A;
     }
     memo.set(key, c);
     return c;

@@ -179162,6 +179162,20 @@ ${printAliasingSignature(signature)}`
     return null;
   }
   var isSelector = (arg) => /Function/.test(arg?.type ?? "") || arg?.type === "CallExpression" && /Function/.test(arg.arguments?.[0]?.type ?? "") || arg?.type === "ObjectExpression" && arg.properties.some((p2) => p2.key?.name === "select" && /Function/.test(p2.value?.type ?? ""));
+  var selectedKey = (arg) => arg?.type === "ArrowFunctionExpression" && arg.params.length === 1 && arg.params[0].type === "Identifier" && arg.body.type === "MemberExpression" && !arg.body.computed && arg.body.object.type === "Identifier" && arg.body.object.name === arg.params[0].name && arg.body.property.type === "Identifier" ? arg.body.property.name : null;
+  function zustandStore(init, imports) {
+    if (init?.type !== "CallExpression") return null;
+    const create = init.callee.type === "CallExpression" ? init.callee.callee : init.callee;
+    const imp = create.type === "Identifier" ? imports[create.name] : null;
+    if (!imp || !(imp.source === "zustand" && imp.imported === "create" || imp.source === "zustand/traditional" && imp.imported === "createWithEqualityFn")) return null;
+    let creator = init.arguments[0];
+    while (creator?.type === "CallExpression") creator = creator.arguments[0];
+    let state = /Function/.test(creator?.type ?? "") ? creator.body : null;
+    if (state?.type === "BlockStatement") state = state.body.filter((s) => s.type === "ReturnStatement").pop()?.argument ?? null;
+    while (/^(TSAsExpression|TSSatisfiesExpression)$/.test(state?.type ?? "")) state = state.expression;
+    if (state?.type !== "ObjectExpression") return { actions: null };
+    return { actions: state.properties.filter((p2) => !p2.computed && (p2.type === "ObjectMethod" || p2.type === "ObjectProperty" && /Function/.test(p2.value.type))).map((p2) => p2.key.name ?? String(p2.key.value)) };
+  }
   function returnShape(arg) {
     while (/^(TSAsExpression|TSSatisfiesExpression|TSNonNullExpression|ParenthesizedExpression)$/.test(arg?.type ?? "")) arg = arg.expression;
     if (!arg) return { type: "none" };
@@ -179291,7 +179305,7 @@ ${printAliasingSignature(signature)}`
           };
           if (v.initKind === "hook") {
             const call = decl.init.type === "AwaitExpression" ? decl.init.argument : decl.init;
-            v.hookCall = { callee: calleeName(call.callee), path: patternPath(decl.id, id), selector: isSelector(call.arguments?.[0]), onlyFirst: decl.id.type === "ArrayPattern" && decl.id.elements.length === 1 };
+            v.hookCall = { callee: calleeName(call.callee), path: patternPath(decl.id, id), selector: isSelector(call.arguments?.[0]), selects: selectedKey(call.arguments?.[0]), onlyFirst: decl.id.type === "ArrayPattern" && decl.id.elements.length === 1 };
           }
           values.push(v);
           valueByDeclarator.set(decl, v.name);
@@ -179311,7 +179325,7 @@ ${printAliasingSignature(signature)}`
         text: code.slice(lastReturn.start, lastReturn.end).split("\n")[0].slice(0, 120),
         range: { statement: [lastReturn.start, lastReturn.end], init: [lastReturn.argument.start, lastReturn.argument.end] },
         uses: [{ kind: "return" }],
-        ...initKind(lastReturn.argument) === "hook" && lastReturn.argument.type === "CallExpression" ? { hookCall: { callee: calleeName(lastReturn.argument.callee), path: [], selector: isSelector(lastReturn.argument.arguments[0]) } } : {}
+        ...initKind(lastReturn.argument) === "hook" && lastReturn.argument.type === "CallExpression" ? { hookCall: { callee: calleeName(lastReturn.argument.callee), path: [], selector: isSelector(lastReturn.argument.arguments[0]), selects: selectedKey(lastReturn.argument.arguments[0]) } } : {}
       });
     }
     const bindingInfo = (bname) => {
@@ -179618,6 +179632,7 @@ ${printAliasingSignature(signature)}`
   var CONDITION_BAIL = /^Unexpected terminal kind `(optional|logical)` for (ternary|logical) test block/;
   function compile2(code, filename, { prestep, liftIn }) {
     const imports = {};
+    const stores = {};
     const astFunctions = /* @__PURE__ */ new Map();
     const irByLoc = /* @__PURE__ */ new Map();
     const events = [];
@@ -179627,6 +179642,14 @@ ${printAliasingSignature(signature)}`
           for (const st of program.node.body) {
             if (st.type !== "ImportDeclaration" || st.importKind === "type") continue;
             for (const sp of st.specifiers) imports[sp.local.name] = { source: st.source.value, imported: sp.type === "ImportSpecifier" ? sp.imported.name ?? sp.imported.value : sp.type === "ImportDefaultSpecifier" ? "default" : "*" };
+          }
+          for (const st of program.node.body) {
+            const decl = st.type === "ExportNamedDeclaration" ? st.declaration : st;
+            if (decl?.type !== "VariableDeclaration") continue;
+            for (const d of decl.declarations) {
+              const store = d.id.type === "Identifier" ? zustandStore(d.init, imports) : null;
+              if (store) stores[d.id.name] = store;
+            }
           }
           program.traverse({
             Function(path2) {
@@ -179674,14 +179697,14 @@ ${printAliasingSignature(signature)}`
     } catch (e) {
       parseError = String(e.message ?? e).split("\n")[0];
     }
-    return { astFunctions, irByLoc, events, notes, parseError, imports };
+    return { astFunctions, irByLoc, events, notes, parseError, imports, stores };
   }
   function extract(code, filename, { prestep = true } = {}) {
     const started = performance.now();
     let run = compile2(code, filename, { prestep });
     const liftIn = new Set(run.events.filter((e) => e.kind === "CompileError" && CONDITION_BAIL.test(describeError(e).reason)).map((e) => posKey(e.fnLoc)));
     if (prestep && liftIn.size) run = compile2(code, filename, { prestep, liftIn });
-    const { astFunctions, irByLoc, events, notes, parseError, imports } = run;
+    const { astFunctions, irByLoc, events, notes, parseError, imports, stores } = run;
     const eventByLoc = /* @__PURE__ */ new Map();
     for (const e of events) {
       const key = posKey(e.fnLoc);
@@ -179698,7 +179721,7 @@ ${printAliasingSignature(signature)}`
       if (notes.has(key)) fn.tryPrestep = notes.get(key);
       functions.push(fn);
     }
-    return { file: filename, parseError, imports, functions, ms: Math.round(performance.now() - started) };
+    return { file: filename, parseError, imports, stores, functions, ms: Math.round(performance.now() - started) };
   }
 
   // src/reactivity/decide.mjs
@@ -179728,7 +179751,7 @@ ${printAliasingSignature(signature)}`
   function decideHookValue(value2, out) {
     const c = value2.contract;
     if (!c || c.kind === "opaque") return out("hook", c ? `hook result (${c.why})` : "hook result");
-    if (c.kind === "static") return out("static", c.reactiveCall ? `${c.from} hands back a stable function; calling it reads reactive values` : `${c.from} hands back a stable value`);
+    if (c.kind === "static") return out(c.decision ?? "static", c.note ?? (c.reactiveCall ? `${c.from} hands back a stable function; calling it reads reactive values` : `${c.from} hands back a stable value`));
     if (c.kind === "accessor") {
       return c.destructured ? out("getter-read", `destructured from ${c.from}'s getters: keep the object, read \`r.${value2.hookCall.path.at(-1)}\``) : out("accessor", `${c.from} hands back an accessor: read it as \`${value2.name}()\``);
     }
@@ -179877,6 +179900,10 @@ ${printAliasingSignature(signature)}`
     useRef: S,
     useId: S,
     useEffectEvent: S,
+    // R4 turns useCallback(fn, deps) into fn: callers keep the reference and call it, as with a
+    // function declared in the body (decided `function`). It isn't an accessor: reading it as
+    // `cb()` would call it.
+    useCallback: { ...F, decision: "function", note: "useCallback(fn) becomes fn, a plain function that reads reactive values when called" },
     useDeferredValue: A,
     useSyncExternalStore: A,
     useContext: { kind: "object", props: {} },
@@ -179893,10 +179920,21 @@ ${printAliasingSignature(signature)}`
     useSearch: { kind: "object", props: {} },
     useQueryClient: S
   };
+  var LIBRARY = {
+    "react-hook-form": { useForm: { ...F, note: "useForm hands back the same form object every render; its methods read form state" } },
+    "next/navigation": { useRouter: { ...S, note: "Next.js's useRouter hands back the same router every render" } },
+    "posthog-js/react": { usePostHog: { ...S, note: "usePostHog hands back the PostHog client, the same every render" } },
+    "@lexical/react/LexicalComposerContext": { useLexicalComposerContext: tuple(S, S) },
+    "@tanstack/react-virtual": {
+      useVirtualizer: { ...F, note: "useVirtualizer hands back the same virtualizer every render; its methods read its state" },
+      useWindowVirtualizer: { ...F, note: "useWindowVirtualizer hands back the same virtualizer every render; its methods read its state" }
+    },
+    "react-redux": { useDispatch: S, useStore: S }
+  };
   var STATIC_DECISIONS = /* @__PURE__ */ new Set(["static", "function", "unused"]);
   function resolveImport(fromFile, source, files) {
     let base;
-    if (source.startsWith("~/")) base = import_node_path.default.join(fromFile.slice(0, fromFile.indexOf("/apps/web/src/") + "/apps/web/src/".length), source.slice(2));
+    if ((source.startsWith("~/") || source.startsWith("@/")) && fromFile.includes("/src/")) base = import_node_path.default.join(fromFile.slice(0, fromFile.indexOf("/src/") + "/src/".length), source.slice(2));
     else if (source.startsWith(".")) base = import_node_path.default.join(import_node_path.default.dirname(fromFile), source);
     else return null;
     for (const ext of ["", ".ts", ".tsx", "/index.ts", "/index.tsx"]) if (files.has(base + ext)) return base + ext;
@@ -179922,24 +179960,32 @@ ${printAliasingSignature(signature)}`
     const hookValueContract = (file, hookCall, stack) => {
       const t3 = target(file, hookCall.callee);
       if (hookCall.onlyFirst && ["useState", "useReducer"].includes(t3?.builtin) && hookCall.path?.[0] === 0) return { ...S, why: "state without a setter" };
-      return at(contractOfCall(file, hookCall.callee, stack, hookCall.selector), hookCall.path);
+      return at(contractOfCall(file, hookCall.callee, stack, hookCall.selector, hookCall.selects), hookCall.path);
     };
     const target = (file, callee) => {
       if (!callee) return null;
       const imp = files.get(file)?.imports?.[callee];
       if (imp) {
         const resolved = resolveImport(file, imp.source, files);
-        if (resolved && imp.imported !== "default" && imp.imported !== "*") return { key: `${resolved}#${imp.imported}` };
+        if (resolved && imp.imported !== "default" && imp.imported !== "*") return files.get(resolved).stores?.[imp.imported] ? { store: files.get(resolved).stores[imp.imported] } : { key: `${resolved}#${imp.imported}` };
+        const library = Object.entries(LIBRARY).find(([source]) => source === imp.source)?.[1];
+        if (library?.[imp.imported]) return { library: library[imp.imported] };
         if (BUILTIN[imp.imported] && !/^next(\/|$)/.test(imp.source)) return { builtin: imp.imported };
         return { external: `${imp.source}:${imp.imported}` };
       }
       if (hooks.has(`${file}#${callee}`)) return { key: `${file}#${callee}` };
+      if (files.get(file)?.stores?.[callee]) return { store: files.get(file).stores[callee] };
       if (BUILTIN[callee]) return { builtin: callee };
       return { external: callee };
     };
-    const contractOfCall = (file, callee, stack, selector = false) => {
+    const contractOfCall = (file, callee, stack, selector = false, selects = null) => {
       const t3 = target(file, callee);
       if (!t3) return { kind: "opaque", why: "no callee" };
+      if (t3.library) return t3.library;
+      if (t3.store) {
+        if (selector && selects && t3.store.actions?.includes(selects)) return { ...S, note: `${callee} selects ${selects}, a store action: the same function every render` };
+        return selector ? { ...A, why: "store selector" } : { kind: "opaque", why: `${callee} without a selector is the whole store` };
+      }
       if (t3.builtin) return selector && BUILTIN[t3.builtin].kind === "object" && t3.builtin !== "useContext" && t3.builtin !== "use" ? { ...A, why: "router selector" } : BUILTIN[t3.builtin];
       if (selector && (t3.external || !hooks.has(t3.key))) return { ...A, why: "store selector" };
       if (t3.external) return { kind: "opaque", why: `external ${t3.external}` };
@@ -179973,7 +180019,7 @@ ${printAliasingSignature(signature)}`
         c = tuple(...shape.items.map((i) => i.fn ? F : i.name ? contractOfValue(file, fn, i.name, next) : A));
       } else {
         const ret = fn.values.find((v) => v.name === "(return)");
-        c = ret?.hookCall ? contractOfCall(file, ret.hookCall.callee, next, ret.hookCall.selector) : ret?.decision === "function" ? F : ret && STATIC_DECISIONS.has(ret.decision) ? S : ret?.decision === "flag" ? { kind: "opaque", why: "return flagged" } : A;
+        c = ret?.hookCall ? contractOfCall(file, ret.hookCall.callee, next, ret.hookCall.selector, ret.hookCall.selects) : ret?.decision === "function" ? F : ret && STATIC_DECISIONS.has(ret.decision) ? S : ret?.decision === "flag" ? { kind: "opaque", why: "return flagged" } : A;
       }
       memo.set(key, c);
       return c;
