@@ -126,6 +126,20 @@ describe.skipIf(!bin)("react-to-solid workflow on a Vite app with apply=true", {
   });
 });
 
+describe.skipIf(!bin)("react-to-solid workflow on a pnpm app with a port that still peers on Solid 1 helpers", { tags: ["slow"] }, () => {
+  it("names the install command with strict peer dependencies off, and why", () => {
+    const app = givenApp((dir) => {
+      const pkg = JSON.parse(read(dir, "package.json"));
+      pkg.packageManager = "pnpm@12.14.0";
+      pkg.dependencies = { ...pkg.dependencies, "@tanstack/react-router": "^1.120.0" };
+      fs.writeFileSync(path.join(dir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
+    });
+    const run = migrate(app, []);
+    expect(run.output.plan.install).toBe("pnpm install --config.strict-peer-dependencies=false");
+    expect(run.output.plan.installNote).toMatch(/^@tanstack\/solid-router still depends on Solid 1 helper packages, which peer on solid-js 1: pnpm's strict-peer-dependencies \(fatal by default in pnpm 12\) rejects them, so install with --config\.strict-peer-dependencies=false, or allow solid-js 2 for them with a peerDependencyRules\.allowedVersions entry/);
+  }, 120_000);
+});
+
 describe.skipIf(!bin)("react-to-solid workflow on a Next.js app", { tags: ["slow"] }, () => {
   let app;
   let run;

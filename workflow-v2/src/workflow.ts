@@ -67,11 +67,15 @@ export default async function main({ params }: { params: { include?: string; app
     // The root package.json's packageManager field, then the lockfile.
     const managers: Record<string, string> = { "pnpm-lock.yaml": "pnpm", "yarn.lock": "yarn", "bun.lock": "bun", "package-lock.json": "npm" };
     const manager = manifests.outputs.find((m) => m.path === "package.json")?.packageManager?.replace(/@.*$/, "") ?? managers[lockfiles.outputs[0]?.path ?? ""] ?? "npm";
+    // Some ports' dependencies still peer on solid-js 1: pnpm (strict-peer-dependencies, fatal by
+    // default in pnpm 12) won't install them as they are.
+    const solid1 = manager === "pnpm" ? reactish.filter((name) => PORTS[name]?.solid1Peers).map((name) => PORTS[name].to) : [];
     return {
       react: deps.react,
       usesReactCompiler: "babel-plugin-react-compiler" in deps,
       manifest: owner ? `${owner}/package.json` : "package.json",
-      install: `${manager} install`,
+      install: `${manager} install${solid1.length ? " --config.strict-peer-dependencies=false" : ""}`,
+      installNote: solid1.length ? `${solid1.join(", ")} still depends on Solid 1 helper packages, which peer on solid-js 1: pnpm's strict-peer-dependencies (fatal by default in pnpm 12) rejects them, so install with --config.strict-peer-dependencies=false, or allow solid-js 2 for them with a peerDependencyRules.allowedVersions entry ("solid-js": "2") in pnpm-workspace.yaml` : null,
       ported: reactish.filter((name) => PORTS[name]).map((name) => `${name} -> ${PORTS[name].to}${PORTS[name].version ? `@${PORTS[name].version}` : ""}${PORTS[name].note ? ` (${PORTS[name].note})` : ""}`),
       noPort: reactish.filter((name) => !PORTS[name]).map((name) => (NO_PORT[name] ? `${name}: ${NO_PORT[name]}` : name)),
       // Ports that export the React library's names: the rule pass imports them instead (R44).
@@ -219,7 +223,7 @@ export default async function main({ params }: { params: { include?: string; app
   const result = { plan, analyzed: files.length, failures: [...analyzed.failures, ...converted.failures, ...configs.failures], ...report, config: configChanges, ...(nextjs ? { nextjs } : {}) };
 
   if (!apply) {
-    console.log(`Preview: ${changed.length} of ${files.length} files would change, and ${configChanges.length} package.json, tsconfig or Vite config files, with ${report.flags.length} flagged spots to finish by hand. Nothing was written; run again with --param apply=true to convert them, then ${plan.install}.`);
+    console.log(`Preview: ${changed.length} of ${files.length} files would change, and ${configChanges.length} package.json, tsconfig or Vite config files, with ${report.flags.length} flagged spots to finish by hand. Nothing was written; run again with --param apply=true to convert them, then ${plan.install}${plan.installNote ? ` (${plan.installNote})` : ""}.`);
     return { ...result, preview: true, wouldChange: changed };
   }
   await step(commit("Convert React components to Solid 2", { add: [...files, ...Object.values(moves), ...(nextjs?.created ?? []), ...favicon, ...configChanges.map((c) => c.file)] }));
@@ -244,7 +248,7 @@ export default async function main({ params }: { params: { include?: string; app
   }
   // Nothing was installed: the dependency changes only take effect after an install.
   const routed = nextjs ? `, moved ${Object.keys(moves).length} App Router files to Solid's file routes and wrote ${nextjs.created.length} start-mode files` : "";
-  console.log(`Converted ${changed.length} of ${files.length} files and ${configChanges.length} package.json, tsconfig or Vite config files${routed}, with ${report.flags.length} flagged spots to finish by hand. Next: ${plan.install}, then type-check and build.`);
+  console.log(`Converted ${changed.length} of ${files.length} files and ${configChanges.length} package.json, tsconfig or Vite config files${routed}, with ${report.flags.length} flagged spots to finish by hand. Next: ${plan.install}${plan.installNote ? ` (${plan.installNote})` : ""}, then type-check and build.`);
   return { ...result, changed, lint };
 }
 

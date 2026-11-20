@@ -41,7 +41,8 @@ export const PORTS = {
       ...Object.fromEntries(["AnyUseBaseQueryOptions", "AnyUseInfiniteQueryOptions", "AnyUseMutationOptions", "AnyUseQueryOptions", "AnyUseSuspenseInfiniteQueryOptions", "AnyUseSuspenseQueryOptions", "HydrationBoundaryProps", "QueriesOptions", "QueriesResults", "QueryErrorClearResetFunction", "QueryErrorIsResetFunction", "QueryErrorResetBoundaryFunction", "QueryErrorResetBoundaryProps", "QueryErrorResetFunction", "SuspenseQueriesOptions", "SuspenseQueriesResults", "UnusedSkipTokenInfiniteOptions", "UnusedSkipTokenOptions", "UseMutateAsyncFunction", "UsePrefetchInfiniteQueryOptions", "UsePrefetchQueryOptions", "UseSuspenseInfiniteQueryOptions", "UseSuspenseInfiniteQueryResult", "UseSuspenseQueryOptions", "UseSuspenseQueryResult"].map((name) => [name, SOLID_QUERY_TYPE])),
     },
   },
-  "@tanstack/react-router": { to: "@tanstack/solid-router", version: "2.0.0-rc.11", note: "on the rc tag; it still depends on some Solid 1 helper packages, so expect peer warnings" },
+  // solid1Peers: its dependencies peer on solid-js 1, which pnpm's strict peer check rejects.
+  "@tanstack/react-router": { to: "@tanstack/solid-router", version: "2.0.0-rc.11", note: "on the rc tag; it still depends on some Solid 1 helper packages, so expect peer warnings", solid1Peers: true },
   "react-router": { to: "@solidjs/router", version: "2.0.0", note: "a different API: routes, loaders and hooks need rewriting" },
   "react-router-dom": { to: "@solidjs/router", version: "2.0.0", note: "a different API: routes, loaders and hooks need rewriting" },
   // lucide-solid is the Solid 1 package.
