@@ -255,6 +255,38 @@ describe.skipIf(!bin)("react-to-solid workflow on an app with React libraries an
   });
 });
 
+describe.skipIf(!bin)("react-to-solid workflow on an app with tests", { tags: ["slow"] }, () => {
+  let run;
+  let app;
+  const test = `import { act, fireEvent, render, screen } from "@testing-library/react";\nimport { Clock } from "./Clock";\n\nit("ticks", () => {\n  vi.useFakeTimers();\n  const { rerender } = render(<Clock tickMs={1000} />);\n  act(() => {\n    vi.advanceTimersByTime(1000);\n  });\n  fireEvent.click(screen.getByRole("button"));\n  rerender(<Clock tickMs={500} />);\n});\n`;
+  beforeAll(() => {
+    app = givenApp((dir) => {
+      const pkg = JSON.parse(read(dir, "package.json"));
+      pkg.devDependencies = { ...pkg.devDependencies, "@testing-library/jest-dom": "^8.0.0", "@testing-library/react": "^16.3.3", "@vitejs/plugin-react": "^6.1.2", vite: "^8.3.6", vitest: "^5.1.1" };
+      fs.writeFileSync(path.join(dir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
+      fs.writeFileSync(path.join(dir, "vitest.config.ts"), `import react from "@vitejs/plugin-react";\nimport { defineConfig } from "vitest/config";\n\nexport default defineConfig({\n  plugins: [react()],\n  test: { environment: "node" },\n});\n`);
+      fs.writeFileSync(path.join(dir, "src/components/Clock.test.tsx"), test);
+      fs.writeFileSync(path.join(dir, "jest.config.js"), "export default { testEnvironment: \"jsdom\" };\n");
+    });
+    run = migrate(app);
+  }, 120_000);
+
+  it("converts a test file: render takes a function, act and fireEvent flush, and rerender sets a signal", () => {
+    expect(read(app, "src/components/Clock.test.tsx")).toBe(`import { createSignal, flush } from "solid-js";\nimport type { ComponentProps } from "@solidjs/web";\nimport { fireEvent, render, screen } from "@solidjs/testing-library";\nimport { Clock } from "./Clock";\n\nit("ticks", () => {\n  vi.useFakeTimers();\n  const [tickMs, setTickMs] = createSignal<ComponentProps<typeof Clock>["tickMs"]>(1000);\n  render(() => <Clock tickMs={tickMs()} />);\n  vi.advanceTimersByTime(1000);\n  flush();\n  fireEvent.click(screen.getByRole("button"));\n  flush();\n  setTickMs(500);\n  flush();\n});\n`);
+    expect(run.output.flags.filter((f) => f.file === "src/components/Clock.test.tsx")).toEqual([]);
+  });
+
+  it("moves vitest.config to Solid's plugin, flags its node environment, and takes jest-dom back to 7", () => {
+    expect(read(app, "vitest.config.ts")).toContain(`import solid from "@solidjs/vite-plugin";`);
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "vitest.config.ts", kind: "build config", detail: expect.stringMatching(/^test\.environment is "node"/) }));
+    expect(JSON.parse(read(app, "package.json")).devDependencies).toMatchObject({ "@solidjs/testing-library": "1.0.0-rc.2", "@testing-library/jest-dom": "^7.0.1" });
+  });
+
+  it("flags a Jest config: Solid's test setup is Vitest", () => {
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "jest.config.js", kind: "build config", detail: expect.stringMatching(/^jest\.config\.js runs the tests on Jest/) }));
+  });
+});
+
 describe.skipIf(!bin)("react-to-solid workflow on a project without React", { tags: ["slow"] }, () => {
   it("fails before changing any file", () => {
     const app = givenApp((dir) => fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "not-react" })));

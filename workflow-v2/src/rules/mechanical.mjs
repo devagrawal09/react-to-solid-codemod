@@ -1453,6 +1453,181 @@ export function transform(input, { parse, Lang, ports = {} }) {
     return edits;
   });
 
+  // R46 tests: @testing-library/react's API -> @solidjs/testing-library's (R44 moves the import),
+  // when the project moves to the port. Solid 2 applies writes on flush(), and RTL ran act()
+  // around render, fireEvent and act's own callback: act(fn) becomes fn's body and flush(), and
+  // each fireEvent statement gets a flush() after it. render takes a function; a rerender with new
+  // literal props becomes a signal per prop that changes; renderHook takes its props as an array
+  // and hands back the hook's value itself, with cleanup for unmount.
+  const testing = ports["@testing-library/react"] ? Object.fromEntries([...src.matchAll(/^import\s+\{([^}]*)\}\s*from\s*["']@testing-library\/react["']/gm)]
+    .flatMap((m) => m[1].split(",").map((s) => s.trim().replace(/^type\s+/, "").split(/\s+as\s+/)).filter(([name]) => name).map(([name, local]) => [name, local ?? name]))) : {};
+  const RERENDER = "@solidjs/testing-library's render has no rerender: a component runs once and reads its props where they're used. Put each prop that changes in a signal, render(() => <X a={a()} />), then call setA(...) and flush() where rerender was";
+  // React 19 exports act from react too; R10 drops that import.
+  const acts = [testing.act, fromReact.has("act") ? "act" : null].filter(Boolean);
+  if (acts.length) {
+    pass((root) =>
+      root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: `^(${acts.join("|")})$` } } }).flatMap((call) => {
+        const awaited = call.parent()?.kind() === "await_expression";
+        const statement = awaited ? call.parent().parent() : call.parent();
+        const [cb, ...more] = kids(call.field("arguments")).filter((a) => a.kind() !== "comment");
+        const body = cb?.field("body");
+        const returns = body?.kind() === "statement_block" && body.findAll({ rule: { kind: "return_statement" } }).some((r) => same(r.ancestors().find((a) => FN_KINDS.has(a.kind())), cb));
+        if (statement?.kind() !== "expression_statement" || !["arrow_function", "function_expression"].includes(cb?.kind()) || more.length || returns || (/^async\b/.test(cb.text()) && !awaited)) {
+          flag("act", call, "@solidjs/testing-library has no act: Solid 2 applies writes on flush() (from solid-js). Run the callback's body, then call flush(), or await a findBy query");
+          return [];
+        }
+        const indent = " ".repeat(statement.range().start.column);
+        let inner;
+        if (body.kind() !== "statement_block") inner = `${awaited ? "await " : ""}${unparen(body).text()};`;
+        // A declaration in the callback keeps its block, so its name stays scoped.
+        else if (kids(body).some((s) => /^(lexical_declaration|variable_declaration|function_declaration|class_declaration)$/.test(s.kind()))) inner = body.text();
+        else {
+          // One level of indentation less.
+          const shift = Math.max(0, (kids(body)[0]?.range().start.column ?? 0) - statement.range().start.column);
+          inner = body.text().slice(1, -1).trim().split("\n").map((line) => line.replace(new RegExp(`^ {0,${shift}}`), "")).join("\n");
+        }
+        note("act(fn) -> body + flush()");
+        return [rep(statement, inner ? `${inner}\n${indent}flush();` : "flush();")];
+      }),
+    );
+    if (testing.act && !new RegExp(`\\b${testing.act}\\b`).test(src.replace(/^import\b[^;]*?\bfrom\s*["'][^"'\n]*["'];?[ \t]*$/gm, ""))) {
+      src = src.replace(/^import\s+\{([^}]*)\}\s*(from\s*["']@testing-library\/react["'];?)[ \t]*\n/m, (m, list, from) => {
+        const rest = list.split(",").map((s) => s.trim()).filter((s) => s && s.split(/\s+as\s+/).pop() !== testing.act);
+        return rest.length ? `import { ${rest.join(", ")} } ${from}\n` : "";
+      });
+    }
+  }
+  if (testing.fireEvent) {
+    pass((root) =>
+      root.findAll({ rule: { kind: "expression_statement", has: { kind: "call_expression", has: { field: "function", regex: `^${testing.fireEvent}(\\.\\w+)?$` } } } }).flatMap((statement) => {
+        if (/^flush\(\)/.test(statement.next()?.text() ?? "")) return [];
+        note("fireEvent -> fireEvent + flush()");
+        const end = statement.range().end.index;
+        return [{ start: end, end, text: `\n${" ".repeat(statement.range().start.column)}flush();` }];
+      }),
+    );
+  }
+  if (testing.render) {
+    // const { rerender } = render(<X a={1} />); rerender(<X a={2} />) -> a signal per prop that
+    // changes, set before a flush() where rerender was. Only literal values: a function would be
+    // read as an updater. Any other shape is flagged by the next pass.
+    pass((root) => {
+      const edits = [];
+      for (const call of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: `^${testing.render}$` } } })) {
+        const decl = call.parent();
+        const pattern = decl?.kind() === "variable_declarator" ? decl.field("name") : null;
+        const prop = pattern?.kind() === "object_pattern" ? kids(pattern).find((p) => (p.kind() === "pair_pattern" ? p.field("key") : p).text() === "rerender") : null;
+        const statement = decl?.parent();
+        const scope = statement?.parent();
+        if (!prop || !scope || kids(statement).length !== 1) continue;
+        const rerenders = readsOf(scope, prop.kind() === "pair_pattern" ? prop.field("value").text() : "rerender", { exclude: [pattern] }).map((id) => id.parent());
+        if (!rerenders.length || !rerenders.every((c) => c?.kind() === "call_expression" && c.parent()?.kind() === "expression_statement")) continue;
+        const elements = [call, ...rerenders].map((c) => unparen(kids(c.field("arguments"))[0]));
+        const opens = elements.map((el) => (el?.kind() === "jsx_element" ? el.child(0) : el));
+        const bodies = elements.map((el) => (el?.kind() === "jsx_element" ? el.children().slice(1, -1).map((c) => c.text()).join("") : ""));
+        if (!opens.every((o) => ["jsx_opening_element", "jsx_self_closing_element"].includes(o?.kind()) && o.field("name").text() === opens[0].field("name").text()) || bodies.some((b) => b !== bodies[0])) continue;
+        if (opens.some((o) => kids(o).some((a) => a.kind() === "jsx_expression" || (a.kind() === "jsx_attribute" && !/^[A-Za-z_$][\w$]*$/.test(attrName(a)))))) continue;
+        // Each element's props: the value's text, and whether it's a literal.
+        const values = opens.map((o) => new Map(kids(o).filter((a) => a.kind() === "jsx_attribute").map((a) => {
+          const v = attrValue(a);
+          return [attrName(a), { text: v ? v.text() : "true", literal: !v || ["string", "template_string", "number", "true", "false", "null", "undefined"].includes(v.kind()) || (v.kind() === "unary_expression" && v.field("argument")?.kind() === "number") }];
+        })));
+        const missing = { text: "undefined", literal: true };
+        const changing = [...new Set(values.flatMap((m) => [...m.keys()]))].filter((n) => values.some((m) => (m.get(n) ?? missing).text !== (values[0].get(n) ?? missing).text));
+        if (!changing.length || !changing.every((n) => values.every((m) => (m.get(n) ?? missing).literal))) continue;
+        const tag = opens[0].field("name").text();
+        const indent = " ".repeat(statement.range().start.column);
+        // Named after the prop, apart from the file's own names (a prop name in JSX isn't one).
+        const taken = new Set(root.findAll({ rule: { any: [{ kind: "identifier" }, { kind: "shorthand_property_identifier" }, { kind: "shorthand_property_identifier_pattern" }] } }).map((id) => id.text()));
+        const signals = new Map(changing.map((n) => {
+          let name = n;
+          for (let i = 2; taken.has(name) || taken.has(`set${ucfirst(name)}`); i++) name = `${n}${i}`;
+          taken.add(name).add(`set${ucfirst(name)}`);
+          return [n, [name, `set${ucfirst(name)}`]];
+        }));
+        const declarations = changing.map((n) => `const [${signals.get(n).join(", ")}] = createSignal<ComponentProps<${/^[a-z]/.test(tag) ? JSON.stringify(tag) : `typeof ${tag}`}>[${JSON.stringify(n)}]>(${(values[0].get(n) ?? missing).text});\n${indent}`).join("");
+        for (const n of changing) {
+          const attr = kids(opens[0]).find((a) => a.kind() === "jsx_attribute" && attrName(a) === n);
+          const end = opens[0].field("name").range().end.index;
+          edits.push(attr ? rep(attr, `${n}={${signals.get(n)[0]}()}`) : { start: end, end, text: ` ${n}={${signals.get(n)[0]}()}` });
+        }
+        const others = kids(pattern).filter((p) => !same(p, prop));
+        if (others.length) edits.push({ start: statement.range().start.index, end: statement.range().start.index, text: declarations }, rep(pattern, `{ ${others.map((p) => p.text()).join(", ")} }`));
+        else edits.push({ start: statement.range().start.index, end: call.range().start.index, text: declarations });
+        rerenders.forEach((c, i) => {
+          const sets = changing.filter((n) => (values[i + 1].get(n) ?? missing).text !== (values[i].get(n) ?? missing).text).map((n) => `${signals.get(n)[1]}(${(values[i + 1].get(n) ?? missing).text});`);
+          edits.push(rep(c.parent(), [...sets, "flush();"].join(`\n${" ".repeat(c.parent().range().start.column)}`)));
+        });
+        note("rerender -> signal props + flush()");
+      }
+      return edits;
+    });
+    // render(<X />) -> render(() => <X />). Options only React reads are flagged, and so is what
+    // the result has no counterpart for.
+    pass((root) =>
+      root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: `^${testing.render}$` } } }).flatMap((call) => {
+        const [ui, options] = kids(call.field("arguments")).filter((a) => a.kind() !== "comment");
+        const reactOnly = options?.kind() === "object" ? kids(options).map((p) => (p.kind() === "pair" ? p.field("key") : p).text()).filter((k) => /^(legacyRoot|onCaughtError|onRecoverableError|onUncaughtError|reactStrictMode|formState)$/.test(k)) : [];
+        if (reactOnly.length) flag("render", call, `${reactOnly.join(", ")}: React-only render options with no counterpart in @solidjs/testing-library; remove them (an error boundary in the test is <Errored>)`);
+        const decl = call.parent()?.kind() === "variable_declarator" ? call.parent() : null;
+        const name = decl?.field("name");
+        const used = name?.kind() === "object_pattern" ? kids(name).map((p) => (p.kind() === "pair_pattern" ? p.field("key") : p).text())
+          : name?.kind() === "identifier" && decl.parent()?.parent() ? readsOf(decl.parent().parent(), name.text()).map((id) => (id.parent()?.kind() === "member_expression" ? id.parent().field("property")?.text() : null)) : [];
+        if (used.includes("rerender")) flag("rerender", call, RERENDER);
+        if (used.includes("asFragment")) flag("render", call, "asFragment() returns the container's innerHTML, a string, not a DocumentFragment: update the snapshots it's compared with");
+        if (!ui || FN_KINDS.has(ui.kind())) return [];
+        if (ui.kind() === "identifier") flag("render", call, `${ui.text()} is an element made before render() runs, outside its root: pass a function that makes it, render(() => <X />), and have callers pass one too`);
+        note("render(ui) -> render(() => ui)");
+        return [rep(ui, `() => ${ui.text()}`)];
+      }),
+    );
+  }
+  // renderHook(fn, { initialProps: p }) -> renderHook(fn, { initialProps: [p] }) (the hook's
+  // arguments); result.current -> result, unmount -> cleanup.
+  if (testing.renderHook) {
+    pass((root) =>
+      root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: `^${testing.renderHook}$` } } }).flatMap((call) => {
+        const edits = [];
+        const [, options] = kids(call.field("arguments")).filter((a) => a.kind() !== "comment");
+        if (options && options.kind() !== "object") flag("renderHook", call, `Solid's renderHook takes initialProps as an array of the hook's arguments: check what ${options.text()} passes`);
+        for (const p of options?.kind() === "object" ? kids(options) : []) {
+          if (p.kind() === "shorthand_property_identifier" && p.text() === "initialProps") edits.push(rep(p, "initialProps: [initialProps]"));
+          else if (p.kind() === "pair" && p.field("key")?.text() === "initialProps" && p.field("value")?.kind() !== "array") edits.push(rep(p.field("value"), `[${p.field("value").text()}]`));
+        }
+        const decl = call.parent()?.kind() === "variable_declarator" ? call.parent() : null;
+        const name = decl?.field("name");
+        const scope = decl?.parent()?.parent();
+        // `result.current` reads, and the result's other members: destructured, or read off the result.
+        let current = [];
+        const members = [];
+        if (name?.kind() === "object_pattern" && scope) {
+          for (const p of kids(name)) {
+            const key = (p.kind() === "pair_pattern" ? p.field("key") : p).text();
+            if (key === "result") current = readsOf(scope, p.kind() === "pair_pattern" ? p.field("value").text() : key, { exclude: [name] }).map((id) => id.parent()).filter((m) => m?.kind() === "member_expression" && m.field("property")?.text() === "current");
+            else members.push([key, p]);
+          }
+        } else if (name?.kind() === "identifier" && scope) {
+          for (const m of readsOf(scope, name.text()).map((id) => id.parent()).filter((m) => m?.kind() === "member_expression")) {
+            if (m.field("property")?.text() === "result" && m.parent()?.kind() === "member_expression" && m.parent().field("property")?.text() === "current") current.push(m.parent());
+            else members.push([m.field("property")?.text(), m]);
+          }
+        }
+        // Solid's renderHook returns the value the hook returned, so `result` is it. Read whole (not
+        // a field), it depends on whether the hook now returns an accessor.
+        for (const m of current) {
+          edits.push(rep(m, m.field("object").text()));
+          if (!(m.parent()?.kind() === "member_expression" && same(m.parent().field("object"), m))) flag("renderHook", m, `${m.text()} was the hook's value; it's ${m.field("object").text()} now. If the hook now returns an accessor, call it: ${m.field("object").text()}()`);
+        }
+        for (const [key, node] of members) {
+          if (key === "unmount") edits.push(node.kind() === "shorthand_property_identifier_pattern" ? rep(node, "cleanup: unmount") : rep(node.kind() === "pair_pattern" ? node.field("key") : node.field("property"), "cleanup"));
+          if (key === "rerender") flag("rerender", node, "Solid's renderHook has no rerender: the hook runs once. Pass it signals (initialProps: [a]) and set them, then flush()");
+        }
+        note("renderHook -> Solid's renderHook");
+        return edits;
+      }),
+    );
+  }
+
   // Flags for the judgment bucket
   const root = parse(Lang.Tsx, src).root();
   for (const c of root.findAll({ rule: { kind: "comment", regex: "^// solid: class component: " } }))
@@ -1494,8 +1669,9 @@ export function transform(input, { parse, Lang, ports = {} }) {
   for (const c of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^(React\\.)?(createContext)$" } } }))
     if (/\(\s*(undefined)?\s*\)$/.test(c.text())) flag("context default", c, "Solid 2: undefined default means 'no provider' and throws; use null for optional");
   for (const c of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^use[A-Z]\\w*$" } } }))
-    // React's own hooks left over are flagged once, as React APIs (R10).
-    if (!/^use(Context|State|Memo|Callback|Effect|LayoutEffect|Ref)$/.test(c.field("function").text()) && !fromReact.has(c.field("function").text())) flag("custom hook call", c, `${c.field("function").text()}() returns values in React; decide value vs accessor`);
+    // React's own hooks left over are flagged once, as React APIs (R10). A hook under test in
+    // renderHook is read through its result (R46).
+    if (!/^use(Context|State|Memo|Callback|Effect|LayoutEffect|Ref)$/.test(c.field("function").text()) && !fromReact.has(c.field("function").text()) && !c.ancestors().some((a) => a.kind() === "call_expression" && a.field("function")?.text() === testing.renderHook)) flag("custom hook call", c, `${c.field("function").text()}() returns values in React; decide value vs accessor`);
 
   // R44 a library whose Solid 2 port exports its names (`lacks` lists the ones it doesn't) is
   // imported from the port, so the code matches the package.json the run writes (or, for a catalog

@@ -7,6 +7,9 @@
 export const SOLID = "2.0.3";
 // @solidjs/vite-plugin 3 needs Vite 8 or 9.
 const VITE = "8.3.8";
+// @solidjs/vite-plugin 3.0.1 takes @testing-library/jest-dom up to 7 (an optional peer): npm won't
+// install 8 next to it.
+const JEST_DOM = "7.0.1";
 
 // What the React package's types are called, when the port doesn't export them.
 const SOLID_QUERY_TYPE = "not exported by @tanstack/solid-query: use the closest one it has (UseQueryOptions, UseQueryResult, UseInfiniteQueryOptions, UseMutationOptions, UseMutationResult)";
@@ -57,7 +60,7 @@ export const PORTS = {
   "@testing-library/react": {
     to: "@solidjs/testing-library",
     version: "1.0.0-rc.2",
-    note: "tests aren't converted: render takes a function, render(() => <App />), and there is no rerender with new props",
+    note: "R46 converts the tests: render takes a function, render(() => <App />), and act and rerender become flush() and signals",
     lacks: {
       act: "@solidjs/testing-library has no act: Solid 2 applies writes on flush() (from solid-js); call it, or await a findBy query",
       ...Object.fromEntries(["RenderResult", "RenderOptions", "BaseRenderOptions", "ClientRenderOptions", "HydrateOptions", "RenderHookResult", "RenderHookOptions", "BaseRenderHookOptions", "ClientRenderHookOptions", "HydrateHookOptions"].map((name) => [name, SOLID_TESTING_TYPE])),
@@ -86,6 +89,7 @@ export const NO_PORT = {
   "@dnd-kit/utilities": "no verified Solid 2 port",
   "@dnd-kit/modifiers": "no verified Solid 2 port",
   "@dnd-kit/react": "no verified Solid 2 port",
+  "@testing-library/react-hooks": "renderHook is in @solidjs/testing-library, which replaces @testing-library/react: import it from there, with initialProps as an array of the hook's arguments and the hook's value as result (not result.current)",
   // Next.js and the libraries made for it.
   next: "Next.js has no Solid 2 equivalent: the closest is @solidjs/vite-plugin's start mode, with file routes through fileRoutes() from @solidjs/router/fs, or SolidStart",
   "next-themes": "made for Next.js: keep the theme in a signal and set it on <html>",
@@ -269,6 +273,12 @@ export function migratePackageJson(text, peers = null) {
         changed = true;
       }
     }
+    const jestDom = kept.find(([name]) => name === "@testing-library/jest-dom");
+    if (jestDom && ["@vitejs/plugin-react", "@vitejs/plugin-react-swc"].some((name) => present.has(name)) && Number(JSON.parse(jestDom[1]).match(/^[\^~>=v\s]*(\d+)\./)?.[1]) > 7) {
+      changes.push(`@testing-library/jest-dom ${JSON.parse(jestDom[1])} -> ^${JEST_DOM}: @solidjs/vite-plugin takes jest-dom up to 7, and npm won't install 8 next to it`);
+      jestDom[1] = JSON.stringify(`^${JEST_DOM}`);
+      changed = true;
+    }
     if (!changed) continue;
     for (const entry of added) {
       const at = kept.findIndex(([name]) => name > entry[0]);
@@ -347,13 +357,22 @@ export function migrateTsconfig(text, { dir = "", reactPackages = [] } = {}) {
   return { text: out, changes, flags, jsx: !!jsx };
 }
 
-// vite.config: `import react from "@vitejs/plugin-react"` and `plugins: [react()]` become Solid's
-// plugin. Options that only mean something to React (the React Compiler's babel setup, the JSX
-// runtime, Fast Refresh) are dropped; any other shape is flagged.
-export function migrateViteConfig(text, { parse, Lang }) {
+// vite.config and vitest.config: `import react from "@vitejs/plugin-react"` and `plugins: [react()]`
+// become Solid's plugin. Options that only mean something to React (the React Compiler's babel
+// setup, the JSX runtime, Fast Refresh) are dropped; any other shape is flagged. In test mode the
+// plugin sets up Solid's tests itself (the browser and development conditions, solid-js inlined,
+// jest-dom's matchers), so the test block only needs a DOM environment.
+export function migrateViteConfig(text, { parse, Lang, vitest = false }) {
   const root = parse(Lang.Tsx, text).root();
   const imports = root.findAll({ rule: { kind: "import_statement", has: { field: "source", regex: "^['\"]@vitejs/plugin-react(-swc)?['\"]$" } } });
-  if (!imports.length) return { text, changes: [], flags: [] };
+  const tests = [];
+  // A node environment is the plugin's sign of server tests: it resolves Solid's server build.
+  for (const environment of root.findAll({ rule: { kind: "pair", has: { field: "key", regex: "^['\"]?environment['\"]?$" }, inside: { kind: "pair", has: { field: "key", regex: "^['\"]?test['\"]?$" }, stopBy: "end" } } })) {
+    const value = environment.field("value")?.text().replace(/^["'`]|["'`]$/g, "");
+    if (value === "node" || value === "edge-runtime") tests.push({ kind: "build config", detail: `test.environment is "${value}", which @solidjs/vite-plugin takes for server tests: it resolves Solid's server build, where render() throws. Use "jsdom" (or "happy-dom") for component tests, and set "${value}" per file (// @vitest-environment ${value}) where a test needs it` });
+  }
+  if (vitest && !imports.length && !/@solidjs\/vite-plugin|\bmergeConfig\b/.test(text)) tests.push({ kind: "build config", detail: "this Vitest config doesn't load @solidjs/vite-plugin, which compiles Solid's JSX in tests: add solid() from it to plugins, or mergeConfig this config with vite.config" });
+  if (!imports.length) return { text, changes: [], flags: tests };
   const name = imports.length === 1 ? imports[0].text().match(/^import\s+([\w$]+)\s+from\s/)?.[1] : null;
   const calls = name ? root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: `^${name.replace(/\$/g, "\\$")}$` } } }) : [];
   const call = calls.length === 1 ? calls[0] : null;
@@ -374,8 +393,8 @@ export function migrateViteConfig(text, { parse, Lang }) {
     // String indexes come from the nodes' text: codemod/ast-grep reports byte offsets.
     : [imports[0], call].some((node) => text.indexOf(node.text()) !== text.lastIndexOf(node.text())) ? "the plugin's import or call appears more than once"
     : null;
-  if (problem) return { text, changes: [], flags: [{ kind: "build config", detail: `${problem}. By hand: import solid from "@solidjs/vite-plugin" and put solid() in plugins` }] };
+  if (problem) return { text, changes: [], flags: [{ kind: "build config", detail: `${problem}. By hand: import solid from "@solidjs/vite-plugin" and put solid() in plugins` }, ...tests] };
   const out = [[imports[0], imports[0].text().replace(/^import\s+[\w$]+/, "import solid").replace(/@vitejs\/plugin-react(-swc)?/, "@solidjs/vite-plugin")], [call, "solid()"]]
     .reduce((t, [node, to]) => t.replace(node.text(), () => to), text);
-  return { text: out, changes: [`${name}() -> solid() from @solidjs/vite-plugin${keys.length ? `, dropping the React-only ${keys.join(", ")} option${keys.length > 1 ? "s" : ""}` : ""}`], flags: [] };
+  return { text: out, changes: [`${name}() -> solid() from @solidjs/vite-plugin${keys.length ? `, dropping the React-only ${keys.join(", ")} option${keys.length > 1 ? "s" : ""}` : ""}`], flags: tests };
 }
