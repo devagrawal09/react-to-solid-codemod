@@ -111,7 +111,8 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
         const it = list[i];
         let j = i + 1;
         const nested = [];
-        while (it.end > it.start && j < list.length && list[j].start >= it.start && list[j].end <= it.end) nested.push(list[j++]);
+        // an insertion where an edit ends goes after it, not inside it
+        while (it.end > it.start && j < list.length && list[j].start >= it.start && list[j].end <= it.end && list[j].start < it.end) nested.push(list[j++]);
         if (it.start < at) { i = j; continue; }
         out += text.slice(ix(at) - ix(base), ix(it.start) - ix(base));
         out += it.text != null ? it.text : it.wrap(go(it.start, it.end, nested));
@@ -156,11 +157,35 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
   // Rewrite reads of `name` inside `scope` to `replacement(text)`; report body-level reads.
   function rewriteReads(scope, declNode, name, toRead, bodyNode, label) {
     const edits = [];
+    // member tags on the name (`<activeTeam.logo>`) -> the component made for each
+    const tags = new Map();
     const real = new Set(readsOf(scope, name, { exclude: [declNode] }).map((id) => id.range().start.index));
     for (const id of scope.findAll({ rule: { any: [{ kind: "identifier", regex: `^${name}$` }, { kind: "shorthand_property_identifier", regex: `^${name}$` }] } })) {
       if (!real.has(id.range().start.index)) continue;
       const parent = id.parent();
       if (parent?.kind() === "jsx_opening_element" || parent?.kind() === "jsx_closing_element") continue;
+      // A tag name can't hold a call (`<activeTeam().logo>` doesn't parse): as with a prop used as a
+      // tag (R8), the tag becomes a component made with dynamic(), declared after the name is.
+      let tag = id;
+      while (tag.parent()?.kind() === "member_expression" && same(tag.parent().field("object"), tag)) tag = tag.parent();
+      if (tag !== id && same(tag.parent()?.field("name"), tag) && !/^[\w$.]+$/.test(toRead)) {
+        const local = tags.get(tag.text()) ?? freeName(tag.text().split(".").map(ucfirst).join(""), [...tags.values()]);
+        if (/^import\b[^;]*\bdynamic\b[^;]*from\s*["'](?!@solidjs\/web["'])/m.test(src) || /\b(const|let|var|function|class)\s+dynamic\b/.test(src)) {
+          if (!tags.has(tag.text())) flag("accessor in tag name", tag, `<${tag.text()}> reads the ${label} ${name}: write const ${local} = dynamic(() => ${toRead}${tag.text().slice(name.length)}) with dynamic from @solidjs/web (this file has a dynamic of its own)`);
+          tags.set(tag.text(), local);
+          continue;
+        }
+        if (!tags.has(tag.text())) {
+          const statement = declNode?.kind() === "variable_declarator" ? declNode.parent() : declNode;
+          const at = statement ?? bodyNode.child(0);
+          const indent = " ".repeat(statement?.range().start.column ?? kids(bodyNode)[0]?.range().start.column ?? 2);
+          edits.push({ start: at.range().end.index, end: at.range().end.index, text: `\n${indent}const ${local} = dynamic(() => ${toRead}${tag.text().slice(name.length)});` });
+          note("member tag on an accessor -> dynamic()");
+        }
+        tags.set(tag.text(), local);
+        edits.push(tag.replace(local));
+        continue;
+      }
       // shadowed by a nested function parameter?
       let shadowed = false;
       for (let a = id.parent(); a && a.range().start.index >= scope.range().start.index; a = a.parent()) {
@@ -980,7 +1005,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
           if (dispatch) lines.push(`const ${dispatch.text()} = (action: Parameters<typeof ${reducer.text()}>[1]) => ${setter}((previous) => ${reducer.text()}(previous, action));`);
           note("useReducer -> createSignal + dispatch");
           edits.push(rep(statement, lines.join(`\n${indent}`)));
-          edits.push(...rewriteReads(body, statement, state.text(), `${state.text()}()`, body, "state").map((e) => ({ start: e.startPos, end: e.endPos, text: e.insertedText })));
+          edits.push(...rewriteReads(body, statement, state.text(), `${state.text()}()`, body, "state"));
         } else {
           const nameNode = decl.field("name");
           if (nameNode.kind() !== "identifier") {

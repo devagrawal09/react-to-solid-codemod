@@ -670,6 +670,22 @@ it("R8 flags a prop used as a JSX tag in a file with a dynamic of its own", () =
   expect(flags.filter((f) => f.kind === "prop as tag")).toEqual([{ kind: "prop as tag", line: 3, detail: "<Icon> renders the icon prop: write const Icon = dynamic(() => props.icon) with dynamic from @solidjs/web (this file has a dynamic of its own)" }]);
 });
 
+it("R5 makes a member tag on state (<activeTeam.logo>) a component with dynamic(), since a call can't be a tag name", () => {
+  const code = `import { useState, useMemo } from "react";\nexport function TeamSwitcher(props: { teams: Team[] }) {\n  const [activeTeam, setActiveTeam] = useState(props.teams[0]);\n  const first = useMemo(() => props.teams[0], [props.teams]);\n  return (\n    <button onClick={() => setActiveTeam(props.teams[1])}>\n      <activeTeam.logo className="size-4" />\n      <activeTeam.logo.Badge>{activeTeam.name}</activeTeam.logo.Badge>\n      <first.logo />\n    </button>\n  );\n}\n`;
+  const { code: out, flags } = run(code);
+  expect(out).toBe(`import { createSignal, createMemo } from "solid-js";\nimport { dynamic } from "@solidjs/web";\nexport function TeamSwitcher(props: { teams: Team[] }) {\n  const [activeTeam, setActiveTeam] = createSignal(props.teams[0]);\n  const ActiveTeamLogo = dynamic(() => activeTeam().logo);\n  const ActiveTeamLogoBadge = dynamic(() => activeTeam().logo.Badge);\n  const first = createMemo(() => props.teams[0]);\n  const FirstLogo = dynamic(() => first().logo);\n  return (\n    <button onClick={() => setActiveTeam(props.teams[1])}>\n      <ActiveTeamLogo class="size-4" />\n      <ActiveTeamLogoBadge>{activeTeam().name}</ActiveTeamLogoBadge>\n      <FirstLogo />\n    </button>\n  );\n}\n`);
+  expect(flags.filter((f) => f.kind === "render-dependent read")).toEqual([]);
+  // without semicolons (shadcn-admin's team-switcher), the declaration goes after the statement
+  expect(convert(`import * as React from "react"\nexport function T({ teams }: P) {\n  const [activeTeam, setActiveTeam] = React.useState(teams[0])\n  return <activeTeam.logo onClick={() => setActiveTeam(teams[1])} />\n}\n`)).toContain(`  const [activeTeam, setActiveTeam] = createSignal(props.teams[0])\n  const ActiveTeamLogo = dynamic(() => activeTeam().logo);\n  return <ActiveTeamLogo onClick={() => setActiveTeam(props.teams[1])} />\n`);
+});
+
+it("R5 leaves a member tag on state as it is, flagged, in a file with a dynamic of its own", () => {
+  const code = `import dynamic from "next/dynamic";\nimport { useState } from "react";\nexport function Teams(props: { teams: Team[] }) {\n  const [team, setTeam] = useState(props.teams[0]);\n  return <team.logo onClick={() => setTeam(props.teams[1])} />;\n}\n`;
+  const { code: out, flags } = run(code);
+  expect(out).toContain(`return <team.logo onClick={() => setTeam(props.teams[1])} />;`);
+  expect(flags.filter((f) => f.kind === "accessor in tag name")).toEqual([{ kind: "accessor in tag name", line: 5, detail: "<team.logo> reads the state team: write const TeamLogo = dynamic(() => team().logo) with dynamic from @solidjs/web (this file has a dynamic of its own)" }]);
+});
+
 it("R8 makes a default that reads another prop a getter over props", () => {
   const code = `export function Toolbar({ isMarkdown, limit = 10, showRefresh = !isMarkdown, rows = limit }: P) {\n  return <p>{showRefresh}{rows}</p>;\n}\n`;
   expect(convert(code)).toContain(`const merged = merge({ limit: 10 as const, get showRefresh() { return !props.isMarkdown; }, get rows() { return (props.limit ?? 10); } }, props);`);
