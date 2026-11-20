@@ -879,21 +879,33 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       const first = statements[0];
       const destructure = statements.length === 2 && first.kind() === "lexical_declaration" && /^const\b/.test(first.text()) && kids(first).length === 1
         && kids(first)[0].field("name")?.kind() === "object_pattern" && kids(first)[0].field("value")?.text() === "this.props" ? kids(first)[0] : null;
-      if (statements.at(-1)?.kind() !== "return_statement" || statements.length !== (destructure ? 2 : 1) || (destructure && defaults)) return [];
+      if (statements.at(-1)?.kind() !== "return_statement" || statements.length !== (destructure ? 2 : 1)) return [];
       const thisReads = body.findAll({ rule: { kind: "this" } });
+      // With both, defaultProps become the destructured names' defaults, which R8 turns into merge;
+      // a default not destructured isn't read. Not when a name has a default of its own, a rest
+      // would miss a default, or the return reads this.props too.
+      let pattern = destructure?.field("name").text();
+      if (destructure && defaults) {
+        const values = new Map(kids(defaults.field("value")).map((p) => [p.kind() === "pair" ? p.field("key").text().replace(/^(["'])(.*)\1$/, "$2") : null, p.field("value")]));
+        const elements = kids(destructure.field("name"));
+        const key = (e) => (e.kind() === "pair_pattern" ? e.field("key").text().replace(/^(["'])(.*)\1$/, "$2") : e.text());
+        if (values.has(null) || thisReads.length > 1 || elements.some((e) => e.kind() === "object_assignment_pattern" || (e.kind() === "pair_pattern" && e.field("value")?.kind() !== "identifier"))) return [];
+        if (elements.some((e) => e.kind() === "rest_pattern") && [...values.keys()].some((k) => !elements.some((e) => key(e) === k))) return [];
+        pattern = textWith(destructure.field("name"), elements.filter((e) => e.kind() !== "rest_pattern" && values.has(key(e))).map((e) => ({ start: e.range().end.index, end: e.range().end.index, text: ` = ${values.get(key(e)).text()}` })));
+      }
       const fnKinds = ["function_expression", "function_declaration", "generator_function", "generator_function_declaration", "method_definition", "class_body"];
       if (!thisReads.every((t) => t.parent()?.kind() === "member_expression" && t.parent().field("property")?.text() === "props" && !t.ancestors().some((a) => inside(a, body) && fnKinds.includes(a.kind())))) return [];
       // this.props becomes `props` (or `merged`), so the body can't have a name of its own like it.
       const holder = defaults ? freeName("merged") : "props";
       if (/(^|[^.\w$])props\b/.test(body.text())) return [];
       const typeArg = kids(heritage.find({ rule: { kind: "type_arguments" } }))[0]?.text();
-      const param = `${destructure ? destructure.field("name").text() : "props"}${typeArg ? `: ${typeArg}` : ""}`;
+      const param = `${pattern ?? "props"}${typeArg ? `: ${typeArg}` : ""}`;
       const edits = [...thisReads.map((t) => rep(t.parent(), holder)), ...(destructure ? [dropLine(first, src)] : [])];
       // The body moves out of the class: one level of indentation less.
       const column = (cls.parent()?.kind() === "export_statement" ? cls.parent() : cls).range().start.column;
       const shift = render.range().start.column - column;
       let text = textWith(body, edits).replace(new RegExp(`\n {${shift}}`, "g"), "\n");
-      if (defaults) {
+      if (defaults && !destructure) {
         const indent = " ".repeat(column + 2);
         const rest = text.slice(1);
         // A one-line render body gets a line per statement.
@@ -2085,8 +2097,8 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
   ];
   const webNames = [...(renders ? ["render"] : []), ...["Portal", ...(next ? ["HydrationScript"] : [])].filter((n) => used(new RegExp(`<${n}\\b`))), ...["dynamic", ...(next ? ["useHead", "httpStatus"] : [])].filter((n) => used(new RegExp(`\\b${n}\\(`)))].filter((n) => !have.has(n)).filter(free((n) => new RegExp(/^[A-Z]/.test(n) ? `<${n}\\b` : `\\b${n}\\(`)));
   const webTypes = [...new Set([...["JSX", "ComponentProps"].filter((n) => used(new RegExp(`\\b${n}\\b`))), ...introduced["@solidjs/web"]])].filter((n) => !have.has(n)).filter(free((n) => new RegExp(`\\b${n}\\b`)));
-  // `extends Component<P, S>` is React's class (R39), not Solid's Component type.
-  const solidTypes = [...new Set([...["Component", "Setter"].filter((n) => new RegExp(`\\b${n}<`).test(code.replace(/\bextends\s+Component</g, ""))), ...introduced["solid-js"]])].filter((n) => !have.has(n)).filter(free((n) => new RegExp(`\\b${n}\\b`)));
+  // `extends Component<P, S>` is React's class (R39), not Solid's Component type, and so is React.Component.
+  const solidTypes = [...new Set([...["Component", "Setter"].filter((n) => new RegExp(`(^|[^.\\w$])${n}<`).test(code.replace(/\bextends\s+Component</g, ""))), ...introduced["solid-js"]])].filter((n) => !have.has(n)).filter(free((n) => new RegExp(`\\b${n}\\b`)));
   let removedReact = false;
   src = src.replace(/^import\s+(type\s+)?(\*\s+as\s+React|React(,\s*\{[^}]*\})?|\{[^}]*\})\s+from\s+["']react["'];?[ \t]*\n/gm, () => { removedReact = true; return ""; });
   src = src.replace(/^import\s+\{\s*flushSync\s*\}\s+from\s+["']react-dom["'];?[ \t]*\n/gm, "");
@@ -2099,6 +2111,16 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
     const existing = new RegExp(`^import\\s+${type ? "type\\s+" : ""}\\{([^}]*)\\}\\s*from\\s*["']${module.replace("/", "\\/")}["']`, "m");
     if (existing.test(src)) src = src.replace(existing, (m, list) => m.replace(`{${list}}`, () => `{ ${[...list.split(",").map((s) => s.trim()).filter(Boolean), ...names].join(", ")} }`));
     else lines.push(`import ${type ? "type " : ""}{ ${names.join(", ")} } from "${module}";`);
+  }
+  // A class R39 left still extends React's Component or PureComponent, so that import stays (React's
+  // Component as ReactComponent when the file now uses Solid's Component type).
+  const bases = [...new Set([...code.matchAll(/\bextends\s+((?:React\.)?(?:Pure)?Component)\b/g)].map((m) => m[1]))].filter((b) => b.startsWith("React.") || fromReact.has(b));
+  if (removedReact && bases.length) {
+    const clash = solidTypes.includes("Component") || have.has("Component");
+    const named = bases.filter((b) => !b.startsWith("React.")).map((b) => (b === "Component" && clash ? "Component as ReactComponent" : b));
+    if (clash) src = src.replace(/\bextends\s+Component\b/g, "extends ReactComponent");
+    if (bases.some((b) => b.startsWith("React."))) lines.push(`import * as React from "react";`);
+    if (named.length) lines.push(`import { ${named.join(", ")} } from "react";`);
   }
   if (lines.length) src = src.replace(/^(["']use client["'];\n\n?)?/, (m) => `${m}${lines.join("\n")}\n`);
   // The Next.js imports removed above can leave the file starting with a blank line.

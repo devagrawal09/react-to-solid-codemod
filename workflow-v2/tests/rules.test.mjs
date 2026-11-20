@@ -355,10 +355,21 @@ it("R39 maps a class component's lifecycle methods in its note, indented with th
   expect(flags.map((f) => f.kind)).toContain("class component");
 });
 
-it("R39 doesn't import Solid's Component type or the APIs its note names", () => {
-  const { code, flags } = run(`import { Component } from "react";\nexport class Plain extends Component<{ a: string }> {\n  componentDidMount() {}\n  render() { return <b>{this.props.a}</b>; }\n}\n`);
+it("R39 doesn't import Solid's Component type or the APIs its note names, and keeps the import the class extends", () => {
+  const { code, flags } = run(`import { Component, useState } from "react";\nexport class Plain extends Component<{ a: string }> {\n  componentDidMount() {}\n  render() { return <b>{this.props.a}</b>; }\n}\n`);
   expect(code).not.toContain(`from "solid-js"`);
-  expect(flags).toContainEqual(expect.objectContaining({ kind: "React API", detail: expect.stringContaining("Component was imported from react") }));
+  expect(code).toMatch(/^import \{ Component \} from "react";\n/);
+  expect(flags.filter((f) => f.kind === "React API")).toEqual([]);
+});
+
+it("R39 keeps React's Component for a class it leaves, under another name when the file uses Solid's Component type", () => {
+  const code = `import React, { Component, PureComponent } from "react";\nexport const Note: React.FC<{ t: string }> = (props) => <p>{props.t}</p>;\nexport class Clock extends Component<{}, { t: number }> {\n  state = { t: 0 };\n  render() { return <b>{this.state.t}</b>; }\n}\nexport class Tick extends PureComponent<{}, { t: number }> {\n  state = { t: 0 };\n  render() { return <b>{this.state.t}</b>; }\n}\n`;
+  const out = convert(code);
+  expect(out).toMatch(/^import type \{ Component \} from "solid-js";\nimport \{ Component as ReactComponent, PureComponent \} from "react";\n/);
+  expect(out).toContain(`export const Note: Component<{ t: string }> = (props) => <p>{props.t}</p>;`);
+  expect(out).toContain(`export class Clock extends ReactComponent<{}, { t: number }> {`);
+  expect(out).toContain(`export class Tick extends PureComponent<{}, { t: number }> {`);
+  expect(convert(`import * as React from "react";\nclass C extends React.Component<{}, { n: number }> {\n  state = { n: 0 };\n  render() { return <b />; }\n}\n`)).toMatch(/^import \* as React from "react";\n/);
 });
 
 it("R42 turns a class with only render() into a function component reading props", () => {
@@ -379,6 +390,13 @@ it("R42 moves `const { ... } = this.props` into the parameter, where R8 converts
   expect(code).toContain(`function Row(props: { label: string; size?: number }) {\n  const merged = merge({ size: 2 as const }, props);\n  return <td colspan={merged.size}>{merged.label}</td>;\n}`);
 });
 
+it("R42 gives destructured props their defaultProps as defaults, which R8 turns into merge", () => {
+  const code = `import { Component } from 'react'\n\ntype GreetingProps = { name: string; punctuation?: string; tone?: string }\n\nexport class Greeting extends Component<GreetingProps> {\n  static defaultProps = { punctuation: '!', tone: 'plain' }\n\n  render() {\n    const { name, punctuation: mark } = this.props\n    return (\n      <p>\n        Hello, {name}\n        {mark}\n      </p>\n    )\n  }\n}\n`;
+  const { code: out, flags } = run(code);
+  expect(out).toBe(`import { merge } from "solid-js";\n\ntype GreetingProps = { name: string; punctuation?: string; tone?: string }\n\nexport function Greeting(props: GreetingProps) {\n  const merged = merge({ punctuation: '!' as const }, props);\n  return (\n    <p>\n      Hello, {merged.name}\n      {merged.punctuation}\n    </p>\n  )\n}\n`);
+  expect(flags).toEqual([]);
+});
+
 it("R42 reads this.props in a nested arrow, which keeps render's this", () => {
   expect(flat(`import { Component } from "react";\nclass L extends Component<{ items: string[]; onPick: (s: string) => void }> {\n  render() { return <button onClick={() => this.props.onPick(this.props.items[0])} />; }\n}\n`)).toContain(`function L(props: { items: string[]; onPick: (s: string) => void }) { return <button onClick={() => props.onPick(props.items[0])} />; }`);
 });
@@ -390,7 +408,9 @@ it.each([
   ["a method render calls through this", `format() { return "x"; }\n  render() { return <b>{this.format()}</b>; }`],
   ["this in a nested function, which isn't the component's", `render() { return <b onClick={function () { log(this.props.a); }} />; }`],
   ["a value computed above the return, which Solid would read once", `render() { const up = this.props.a.toUpperCase(); return <b>{up}</b>; }`],
-  ["destructured props and defaultProps together", `static defaultProps = { a: "x" };\n  render() { const { a } = this.props; return <b>{a}</b>; }`],
+  ["destructured props with a default of their own and defaultProps", `static defaultProps = { a: "x" };\n  render() { const { a = "y" } = this.props; return <b>{a}</b>; }`],
+  ["destructured props with a rest and defaultProps it doesn't destructure", `static defaultProps = { b: "x" };\n  render() { const { a, ...rest } = this.props; return <b {...rest}>{a}</b>; }`],
+  ["destructured props and this.props read in the return, and defaultProps", `static defaultProps = { a: "x" };\n  render() { const { a } = this.props; return <b title={this.props.b}>{a}</b>; }`],
   ["a static other than defaultProps", `static contextType = Ctx;\n  render() { return <b>{this.props.a}</b>; }`],
   ["a body that has a name of its own called props", `render() { return <b>{[this.props.a].map((props) => props)}</b>; }`],
 ])("R42 leaves a class with %s to R39's flag", (_shape, body) => {
