@@ -172,3 +172,15 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 pnpm test                                       # reactivity (54), rule (145), project file (25) and Solid behavior (12) specs
 CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (26, tagged slow), which run the CLI on copies of tests/fixtures/todo-app
 ```
+
+### Release corpus
+
+```sh
+pnpm test:corpus               # every corpus app against tests/corpus/baseline.json
+pnpm corpus:update-baseline    # the same, then rewrites the baseline
+pnpm test:release              # pnpm test, then the corpus
+```
+
+`pnpm test:corpus` runs the workflow with `apply=true` on the apps in `tests/corpus/corpus.json`, each pinned to a commit: create-vite 9.3.4's `react-ts` template with `tests/corpus/create-vite-overlay/` on top (lucide-react, `useQuery`, `useMemo`, effects with deps, class components, and a lockfile), bulletproof-react's Vite app, shadcn-admin, react-admin-dashboard, shlink-web-client and t3code's `apps/web` (why each is there is in its `notes`). For each app it records the files analyzed and changed, workflow failures, flags by kind, lint problems by rule, converted files that don't parse (TypeScript's parser, and `await` outside an async function), and, after installing the converted app with `--ignore-scripts`, its TypeScript 7 type errors: in all files, in converted files, and the codemod's own (in converted files whose React source imports no React-only library, one without a port that keeps its names, less that file's errors in the React app, which is type-checked once per commit and should have none). It fails on a file that doesn't parse, on more failures or more of the codemod's own type errors than `tests/corpus/baseline.json` has, and on any change in files changed, flags or lint, printing what moved. When the change is intended, run `pnpm corpus:update-baseline` and commit the baseline with the change, listing each moved count in the commit message.
+
+It isn't part of `pnpm test`: it needs the network the first time and takes about 25 minutes on a cold cache and 15 on a warm one (t3code is most of it: 8 minutes of workflow on 2 CPUs and 5 of chunked type-checks), with a peak of about 2.5 GB. Clones, installs (reused while package.json files and the lockfile don't change), the pinned TypeScript and Codemod CLI, and per-file results live in `~/.cache/react-to-solid-corpus` (`REACT_TO_SOLID_CORPUS_CACHE`). Each install, workflow run and type-check runs in a `systemd-run` scope capped at 3,000 MB, and each type-check waits for 4,000 MB to be available; t3code is type-checked in chunks of 50 files. `REACT_TO_SOLID_CORPUS_ONLY=shadcn-admin` runs one app, `REACT_TO_SOLID_CORPUS_WORKFLOW=<dir>/src/workflow.ts` runs another version's workflow against the same baseline, and `REACT_TO_SOLID_CORPUS_PRIVATE_REPO` with `REACT_TO_SOLID_CORPUS_PRIVATE_INCLUDE` adds a local repository, with its baseline kept in the cache. The header of `tests/corpus.test.mjs` has the details.

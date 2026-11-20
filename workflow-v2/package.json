@@ -5,7 +5,10 @@
   "scripts": {
     "build": "node build/build.mjs",
     "test": "vitest run",
-    "test:slow": "vitest run --tags-filter=slow"
+    "test:slow": "vitest run --tags-filter=slow",
+    "test:corpus": "node --test tests/corpus.test.mjs",
+    "corpus:update-baseline": "node tests/corpus.test.mjs --update-baseline",
+    "test:release": "pnpm test && pnpm test:corpus"
   },
   "devDependencies": {
     "@ast-grep/napi": "^0.40.0",
@@ -21,6 +24,7 @@
     "path-browserify": "1.0.1",
     "rolldown": "1.3.3",
     "solid-js": "2.0.3",
+    "typescript": "6.0.3",
     "vitest": "^4.1.12"
   }
 }
