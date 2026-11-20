@@ -13,9 +13,9 @@
 // 5. Verify: eslint-plugin-solid's Solid 2 config on the migrated files.
 // 6. Optionally hand the flagged spots to an agent, after an approval.
 //
-// With --param nextRoutes=true, a Next.js App Router at src/app also moves to Solid's file routes
-// (src/nextjs.mjs): route files go to src/routes, the root layout becomes src/Document.tsx, and
-// start mode's files (src/App.tsx, vite.config.ts, ...) are written.
+// With --param nextRoutes=true, a Next.js App Router (src/app, or app/ at the package root) also
+// moves to Solid's file routes (src/nextjs.mjs): route files go to src/routes, the root layout
+// becomes src/Document.tsx, and start mode's files (src/App.tsx, vite.config.ts, ...) are written.
 import { step, forEachFile, shell, agent, approval, branch, commit } from "codemod/workflow";
 import { parse } from "codemod/ast-grep";
 import { applyContracts, decide, extract, rewrite } from "./lib/reactivity.mjs";
@@ -29,8 +29,17 @@ export default async function main({ params }: { params: { include?: string; app
   // --param values arrive as JSON when they parse as JSON, so true is a boolean.
   const apply = params.apply === true || params.apply === "true";
   const nextRoutes = params.nextRoutes === true || params.nextRoutes === "true";
-  const root = (params.include ?? "src").replace(/\/$/, "");
-  const sources = { include: [`${root}/**/*.tsx`, `${root}/**/*.ts`], exclude: ["**/*.test.*", "**/*.spec.*", "**/*.d.ts"] };
+  // nextRoutes without include: a Next.js app with app/ at its root (create-next-app without
+  // --src-dir) is converted from the root, where its components/ and lib/ are too.
+  const rootApp = nextRoutes && params.include === undefined
+    ? (await step("Find the App Router", forEachFile(["app/layout.tsx", "app/layout.jsx", "app/layout.ts", "app/layout.js", "src/app/layout.tsx", "src/app/layout.jsx"], (file) => file.path))).outputs
+    : [];
+  const fallback = rootApp.some((f) => f.startsWith("app/")) && !rootApp.some((f) => f.startsWith("src/")) ? "." : "src";
+  // "" is the target's root (include=.).
+  const root = (params.include ?? fallback).replace(/\/$/, "").replace(/^\.$/, "");
+  const at = root ? `${root}/` : "";
+  // From the root, the config files (next.config.ts, ...) and build output aren't app code.
+  const sources = { include: [`${at}**/*.tsx`, `${at}**/*.ts`], exclude: ["**/*.test.*", "**/*.spec.*", "**/*.d.ts", ...(root ? [] : ["*.config.*", "**/node_modules/**", ".next/**", "dist/**"])] };
 
   const manifests = await step("Read package.json files", forEachFile("**/package.json", (file) => {
     const pkg = JSON.parse(file.text);
@@ -84,16 +93,19 @@ export default async function main({ params }: { params: { include?: string; app
     applyContracts(results);
     return Object.fromEntries(files.map((file, i) => [file, results[i]]));
   });
-  // nextRoutes: where each App Router file goes. It needs the App Router at the package's src/app,
-  // since start mode and filesystem-routing look for src/App.tsx and src/routes.
+  // nextRoutes: where each App Router file goes. The App Router is the package's src/app (converted
+  // from src/) or its app/ (converted from the package root); either way the routes go to src/routes
+  // and start mode's files to src/, where start mode and filesystem-routing look by default.
   const owner = plan.manifest.replace(/\/?package\.json$/, "");
   const routing = !nextRoutes ? null : await step("Plan the Next.js routes", () => {
-    const src = owner ? `${owner}/src` : "src";
-    const fail = (detail: string) => ({ routes: null, flags: [{ file: root, line: 0, kind: "Next.js route", detail }] });
-    if (root !== src) return fail(`nextRoutes moves the App Router at ${src}/app to start mode's ${src}/routes, and ${root} isn't the package's src/: run it with include=${src}`);
-    if (!files.some((f) => f.startsWith(`${root}/app/`))) return fail(`no App Router at ${root}/app: for an app/ at the package root, move it first (mkdir src && git mv app src/, and point tsconfig's @/* at ./src/*)`);
-    const routes = planNextRoutes(files, root);
-    const middleware = files.filter((f) => /^(middleware|proxy)\.ts$/.test(f.slice(root.length + 1)));
+    const pkg = owner ? `${owner}/` : "";
+    const src = `${pkg}src`;
+    const fail = (detail: string) => ({ routes: null, flags: [{ file: root || ".", line: 0, kind: "Next.js route", detail }] });
+    if (root !== src && root !== owner) return fail(`nextRoutes moves the App Router at ${src}/app or ${pkg}app, and converts from ${src} or the package's root; ${root || "."} is neither: run it with include=${src} or include=${owner || "."}`);
+    const app = `${root ? `${root}/` : ""}app`;
+    if (!files.some((f) => f.startsWith(`${app}/`))) return fail(`no App Router at ${app}`);
+    const routes = planNextRoutes(files, { app, src });
+    const middleware = files.filter((f) => [`${pkg}middleware.ts`, `${pkg}proxy.ts`, `${src}/middleware.ts`, `${src}/proxy.ts`].includes(f));
     return { routes, flags: [...routes.flags, ...middleware.map((file) => ({ file, line: 0, kind: "Next.js route", detail: "Next.js middleware: port it to a start-mode middleware, (event, next) => Response, listed in start.middleware in vite.config.ts" }))] };
   });
   const routes = routing?.routes ?? null;
@@ -156,7 +168,7 @@ export default async function main({ params }: { params: { include?: string; app
   const created = !routes ? [] : (await step("Plan start mode's files", () => {
     const document = converted.outputs.find((o) => o.document)?.document ?? null;
     const api = Object.values(routes.entries).some((e) => e.kind === "route");
-    const middleware = files.includes(`${routes.root}/middleware.ts`) ? `${routes.root}/start-middleware.ts` : `${routes.root}/middleware.ts`;
+    const middleware = files.includes(`${routes.src}/middleware.ts`) ? `${routes.src}/start-middleware.ts` : `${routes.src}/middleware.ts`;
     const tsconfigPaths = configs.outputs.some((o) => o.paths);
     const hasVite = configs.outputs.some((o) => o.vite && !o.shared);
     return nextAppFiles(routes, { document, api, tsconfigPaths, middleware }).filter((f) => !(hasVite && /(^|\/)vite\.config\.ts$/.test(f.path)));
@@ -187,7 +199,7 @@ export default async function main({ params }: { params: { include?: string; app
       flags: [...o.flags, ...(o.shared ? o.changes.map((change) => ({ kind: "shared config", detail: `shared with the workspace, so not changed: ${change}` })) : [])].map((f) => ({ line: 0, ...f })),
     }));
     if (configs.outputs.some((o) => o.file.includes("tsconfig") && !o.shared) && !configs.outputs.some((o) => o.jsx)) {
-      projectFlags.push({ file: owner || ".", applied: {}, flags: [{ line: 0, kind: "build config", detail: `no tsconfig on the way to ${root} sets jsx: set "jsx": "preserve" and "jsxImportSource": "@solidjs/web" in the one that covers it` }] });
+      projectFlags.push({ file: owner || ".", applied: {}, flags: [{ line: 0, kind: "build config", detail: `no tsconfig on the way to ${root || "."} sets jsx: set "jsx": "preserve" and "jsxImportSource": "@solidjs/web" in the one that covers it` }] });
     }
     return summarize(files, decided, [...fileFlags, ...routeFlags, ...projectFlags]);
   });
@@ -206,7 +218,7 @@ export default async function main({ params }: { params: { include?: string; app
   // Paths are relative to the target, so the command runs there (cwd "."), not in the CLI's
   // directory. summarize.mjs prints its summary as the last line of stdout.
   // Moved route files are linted where they now are, with the components nextRoutes wrote.
-  const lintFiles = [...files.map((f) => moves[f] ?? f), ...(nextjs?.created ?? []).filter((f) => /\.tsx?$/.test(f) && !f.endsWith(".d.ts") && f.startsWith(`${root}/`))];
+  const lintFiles = [...files.map((f) => moves[f] ?? f), ...(nextjs?.created ?? []).filter((f) => /\.tsx?$/.test(f) && !f.endsWith(".d.ts") && routes !== null && f.startsWith(`${routes.src}/`))];
   const linted = await step("Lint with eslint-plugin-solid (Solid 2 config)", shell({ cwd: "." })`${lintDir}/node_modules/.bin/eslint -c ${lintDir}/eslint.config.mjs -f json ${lintFiles} | node ${lintDir}/summarize.mjs`);
   let lint = {};
   try {

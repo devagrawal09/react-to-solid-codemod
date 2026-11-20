@@ -17,10 +17,10 @@ npx codemod@alpha run react-to-solid --param apply=true
 
 | Param | Default | What it does |
 |---|---|---|
-| `include` | `src` | Directory whose `.ts`/`.tsx` files are converted (tests and `.d.ts` files are skipped). In a monorepo, point it at one app: `--param include=apps/web/src` |
+| `include` | `src` | Directory whose `.ts`/`.tsx` files are converted (tests and `.d.ts` files are skipped); `.` is the package root. In a monorepo, point it at one app: `--param include=apps/web/src`. With `nextRoutes` and no `include`, a Next.js app with `app/` at its root is converted from the root |
 | `apply` | `false` | `true` writes the converted files and lints them; otherwise the run is a preview |
 | `agent` | `false` | `true` (with `apply=true`) asks for approval, then hands the flagged spots to a coding agent. Untested |
-| `nextRoutes` | `false` | `true` moves a Next.js App Router at `src/app` to Solid's file routes in `@solidjs/vite-plugin`'s start mode: see [Next.js App Router to file routes](#nextjs-app-router-to-file-routes) |
+| `nextRoutes` | `false` | `true` moves a Next.js App Router (`src/app`, or `app/` at the package root) to Solid's file routes in `@solidjs/vite-plugin`'s start mode: see [Next.js App Router to file routes](#nextjs-app-router-to-file-routes) |
 
 The run's result holds the summary: the plan (which React libraries have a Solid 2 port), the compiler's decisions, the rules applied, the `package.json`, `tsconfig` and Vite config changes, every flag with its file and line, and the lint counts.
 
@@ -54,7 +54,7 @@ Next.js has no Solid 2 equivalent; the closest is `@solidjs/vite-plugin`'s start
 
 ### Next.js App Router to file routes
 
-`--param nextRoutes=true` (with or without `apply=true`) also moves the App Router at the package's `src/app` to the setup of solidjs/templates' `solid-v2/fullstack`: `@solidjs/vite-plugin@3`'s SSR start mode, `filesystem-routing@0.5`'s Vite plugin, which reads `src/routes` with SolidStart's file names, and `@solidjs/router@2`'s `fileRoutes()`. It's a param of the same workflow rather than its own step, because the moves happen in the per-file conversion (a route file is converted, then renamed, and its relative imports re-pointed) and the route rules need to know which App Router file they're converting. It's opt-in because it moves files and writes new ones. An `app/` at the package root isn't moved (`mkdir src && git mv app src/` first, and point `@/*` at `./src/*`).
+`--param nextRoutes=true` (with or without `apply=true`) also moves the App Router (the package's `src/app`, or its `app/`) to the setup of solidjs/templates' `solid-v2/fullstack`: `@solidjs/vite-plugin@3`'s SSR start mode, `filesystem-routing@0.5`'s Vite plugin, which reads `src/routes` with SolidStart's file names, and `@solidjs/router@2`'s `fileRoutes()`. It's a param of the same workflow rather than its own step, because the moves happen in the per-file conversion (a route file is converted, then renamed, and its relative imports re-pointed) and the route rules need to know which App Router file they're converting. It's opt-in because it moves files and writes new ones. For an `app/` at the package root (create-next-app without `--src-dir`), the run finds it by itself when `include` isn't given and converts from the package root (`include=.`; `*.config.*`, `.next/` and `dist/` aren't converted): the route files move into `src/routes` and the root layout to `src/Document.tsx`, start mode's files go in `src/`, and everything else (`components/`, `lib/`, `app/`'s colocated files and `loading.tsx`) stays where it is. A moved file's relative imports are re-pointed; `@/` imports are left as they are, since `vite.config.ts` sets `resolve.tsconfigPaths` and Vite 8 then resolves tsconfig's `@/*` (`./*` here) itself, with no `resolve.alias` or `vite-tsconfig-paths`. The compiler pass's cross-file hook contracts only follow `@/` into a `src/` directory, so in such an app they don't follow `@/` imports.
 
 | Next.js | Solid 2 | |
 |---|---|---|
@@ -79,7 +79,7 @@ Next.js has no Solid 2 equivalent; the closest is `@solidjs/vite-plugin`'s start
 
 It writes `src/App.tsx` (the router over `virtual:file-routes`, rendering the routes in the root layout's `<Errored>`/`<Loading>` when there's a root `error.tsx` or `loading.tsx`, and with no boundary otherwise, as in Next.js), `vite.config.ts` (`solid({ start: { nodeServer: true }, ssr: true, serverFunctions: true, extensions: [".jsx", ".tsx"] })` and `fileRoutes()`, with `resolve.tsconfigPaths` when the tsconfig maps paths like `@/*`), `src/vite-env.d.ts` and the files above, each only when the path is free (a kept one is flagged). `package.json` loses `next` and gains `@solidjs/router`, and in devDependencies `@solidjs/vite-plugin`, `filesystem-routing` and `vite`; `next dev`, `next build` and `next start` (with or without Turbopack) become `vite`, `vite build` and `node dist/server/node.js`, and any other `next` command is flagged. A missing `"type": "module"` is flagged, not added: Vite and Node reparse `vite.config.ts` and the built server as ES modules with a warning, and adding it breaks a CommonJS `.js` config.
 
-On create-next-app 16.4.6 (`--ts --app --src-dir --no-tailwind --no-eslint`, Nov 20) with an `items` layout and `loading.tsx`, an async list page, an `[id]` page that awaits `params` and loads its item, a `useState` counter, `next/link` links and a `route.ts`, `apply=true nextRoutes=true`, `npm install` and `npm run build` build with no hand edits. `node dist/server/node.js` serves `/` with the counter, `/items` streamed behind the segment's fallback, `/items/1` with its item, `/api/items` as JSON and `/nope` as a 404, and the item's query answers `GET /_server/data/<id>` as a client navigation calls it. The flags were the two `next/font` loaders, `next.config.ts`, the missing `"type": "module"` and the counter's initial-value prop. `tsc` finds two errors: `next.config.ts`, which still imports `next`, and a `data().item ? data().item.name : ...` that TypeScript doesn't narrow. Hydration and client-side navigation weren't checked in a browser.
+On create-next-app 16.4.6 (`--ts --app --no-tailwind --no-eslint`, with `--src-dir` and without it, Nov 20) with an `items` layout and `loading.tsx`, an async list page, an `[id]` page that awaits `params` and loads its item, a `useState` counter, `next/link` links and a `route.ts`, `apply=true nextRoutes=true`, `npm install` and `npm run build` build with no hand edits, in both layouts. `node dist/server/node.js` serves `/` with the counter, `/items` streamed behind the segment's fallback, `/items/1` with its item, `/api/items` as JSON and `/nope` as a 404, and the item's query answers `GET /_server/data/<id>` as a client navigation calls it. The flags were the two `next/font` loaders, `next.config.ts`, the missing `"type": "module"` and the counter's initial-value prop. `tsc` finds two errors: `next.config.ts`, which still imports `next`, and a `data().item ? data().item.name : ...` that TypeScript doesn't narrow. Hydration and client-side navigation weren't checked in a browser.
 
 ### React libraries and their Solid 2 ports
 
@@ -159,6 +159,7 @@ On create-vite's React TypeScript template (create-vite 9.3.4, Nov 19), `apply=t
 
 | Step | Task | What it does |
 |---|---|---|
+| Find the App Router | `forEachFile` | Only with `nextRoutes` and no `include`: whether the App Router is `app/` at the root (then the run converts from the root) or `src/app` |
 | Read package.json files | `forEachFile` | Collects dependencies from every package.json |
 | Read the lockfile | `forEachFile` | Which packages peer on React, and the install command |
 | Check React libraries for Solid ports | function | Fails if nothing on the way to the converted directory depends on `react`; lists React libraries with and without a Solid 2 port, and which package.json owns the directory |
@@ -202,6 +203,6 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 ## Tests
 
 ```sh
-pnpm test                                       # reactivity (54), rule (163), project file (28), Next.js route (12) and Solid behavior (12) specs
-CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (33, tagged slow), which run the CLI on copies of tests/fixtures/todo-app and on Next.js apps the specs write
+pnpm test                                       # reactivity (54), rule (163), project file (28), Next.js route (15) and Solid behavior (12) specs
+CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (36, tagged slow), which run the CLI on copies of tests/fixtures/todo-app and on Next.js apps the specs write
 ```

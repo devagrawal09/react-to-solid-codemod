@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { parse, Lang } from "@ast-grep/napi";
 import { moveImports, nextAppFiles, nextConfigKeys, planNextRoutes } from "../src/nextjs.mjs";
 
-const plan = (files) => planNextRoutes(files.map((f) => `src/app/${f}`), "src");
+const plan = (files) => planNextRoutes(files.map((f) => `src/app/${f}`), { app: "src/app", src: "src" });
 const to = (p) => Object.fromEntries(Object.entries(p.entries).map(([file, e]) => [file.slice("src/app/".length), [e.kind, e.to, e.pattern]]));
 
 it("maps the App Router's pages, layouts, route handlers and root not-found to Solid's file routes", () => {
@@ -135,7 +135,7 @@ it("writes start mode's vite.config.ts, with the API middleware and tsconfig pat
 });
 
 it("puts start mode's files in the package that owns src/", () => {
-  const files = nextAppFiles(planNextRoutes(["apps/web/src/app/page.tsx", "apps/web/src/app/api/x/route.ts"], "apps/web/src"), { api: true, middleware: "apps/web/src/middleware.ts" });
+  const files = nextAppFiles(planNextRoutes(["apps/web/src/app/page.tsx", "apps/web/src/app/api/x/route.ts"], { app: "apps/web/src/app", src: "apps/web/src" }), { api: true, middleware: "apps/web/src/middleware.ts" });
   expect(files.map((f) => f.path)).toEqual(["apps/web/src/App.tsx", "apps/web/src/routes/[...404].tsx", "apps/web/src/middleware.ts", "apps/web/src/vite-env.d.ts", "apps/web/vite.config.ts"]);
   expect(files.at(-1).text).toContain(`start: { middleware: "./src/middleware.ts", nodeServer: true }`);
 });
@@ -163,4 +163,33 @@ export default function IdLayout(props: ParentProps) {
 `);
   expect(nextAppFiles(plan(["items/page.tsx", "items/error.tsx"])).find((f) => f.path === "src/routes/items.tsx").text).toContain(`    >\n      {props.children}\n    </Errored>\n  );`);
   expect(nextAppFiles(plan(["items/page.tsx", "items/loading.tsx"])).find((f) => f.path === "src/routes/items.tsx").text).toContain(`  return <Loading fallback={<SegmentLoading />}>{props.children}</Loading>;`);
+});
+
+// create-next-app without --src-dir: app/, components/ and lib/ at the package root.
+it("moves an App Router at the package root into src/, leaving the rest of the app where it is", () => {
+  const p = planNextRoutes(["app/layout.tsx", "app/page.tsx", "app/items/layout.tsx", "app/items/loading.tsx", "app/items/[id]/page.tsx", "app/api/items/route.ts", "app/items/ItemCard.tsx", "components/Counter.tsx", "lib/items.ts"], { app: "app", src: "src" });
+  expect(Object.fromEntries(Object.entries(p.entries).map(([file, e]) => [file, e.to]))).toEqual({
+    "app/layout.tsx": "src/Document.tsx",
+    "app/page.tsx": "src/routes/index.tsx",
+    "app/items/layout.tsx": "src/routes/items.tsx",
+    "app/items/[id]/page.tsx": "src/routes/items/[id]/index.tsx",
+    "app/api/items/route.ts": "src/routes/api/items.ts",
+  });
+  expect(p.entries["app/items/layout.tsx"].wrap).toEqual({ loading: "../../app/items/loading" });
+  expect(p.flags).toEqual([]);
+});
+
+it("re-points a root App Router file's relative imports from src/, and leaves @/ ones (vite.config resolves tsconfig's paths)", () => {
+  const text = `import "./globals.css";\nimport Card from "./items/ItemCard";\nimport { getItem } from "../lib/items";\nimport Counter from "@/components/Counter";\n`;
+  expect(moveImports(text, "app/layout.tsx", "src/Document.tsx")).toBe(`import "../app/globals.css";\nimport Card from "../app/items/ItemCard";\nimport { getItem } from "../lib/items";\nimport Counter from "@/components/Counter";\n`);
+  expect(moveImports(`import { getItem } from "../../../lib/items";\n`, "app/items/[id]/page.tsx", "src/routes/items/[id]/index.tsx")).toBe(`import { getItem } from "../../../../lib/items";\n`);
+});
+
+it("writes start mode's files in src/ for an App Router at the package root, and vite.config.ts at the root", () => {
+  const p = planNextRoutes(["app/layout.tsx", "app/page.tsx", "app/loading.tsx", "app/api/x/route.ts"], { app: "app", src: "src" });
+  const files = nextAppFiles(p, { document: { css: ["../app/globals.css"], head: [] }, api: true, tsconfigPaths: true });
+  expect(files.map((f) => f.path)).toEqual(["src/App.tsx", "src/routes/[...404].tsx", "src/middleware.ts", "src/vite-env.d.ts", "vite.config.ts"]);
+  expect(files[0].text).toContain(`import "../app/globals.css";\nimport RootLoading from "../app/loading";`);
+  expect(files.at(-1).text).toContain(`start: { middleware: "./src/middleware.ts", nodeServer: true }`);
+  expect(files.at(-1).text).toContain("resolve: { tsconfigPaths: true },");
 });

@@ -33,8 +33,10 @@ function specifier(from, to) {
 
 const dirOf = (path) => path.slice(0, Math.max(path.lastIndexOf("/"), 0));
 
-// Where each App Router file under `<root>/app` goes. `files` are the converted .ts/.tsx files and
-// `root` the converted directory, which must be the package's src/ (start mode's default).
+// Where each App Router file under `app` goes. `files` are the converted .ts/.tsx files, `app` the
+// App Router's directory (the package's src/app, or app/ at its root) and `src` the package's src/,
+// where start mode looks for App.tsx and Document.tsx and filesystem-routing for routes/. With
+// app/ at the root, only the route files move into src/; the rest of the app stays where it is.
 //   entries: { [file]: { kind, to, pattern, key, wrap? } } for the files that move: a page to
 //            routes/<dir>/index.tsx (a catch-all page to routes/<parent>/[...x].tsx: a pattern can't
 //            go on after its catch-all), a layout to routes/<dir>.tsx (the file paired with the
@@ -44,9 +46,8 @@ const dirOf = (path) => path.slice(0, Math.max(path.lastIndexOf("/"), 0));
 //            plain components now) and are rendered by the layout around the segment: its own
 //            layout's (entries[layout].wrap), a generated one (`layouts`), or src/App.tsx for the root.
 //   flags: what has no counterpart, with the file.
-export function planNextRoutes(files, root) {
-  const app = `${root}/app`;
-  const routes = `${root}/routes`;
+export function planNextRoutes(files, { app, src }) {
+  const routes = `${src}/routes`;
   const entries = {};
   const segments = {};
   const flags = [];
@@ -77,7 +78,7 @@ export function planNextRoutes(files, root) {
     if (name === "page") {
       entries[file] = { kind: "page", to: catchAll ? at(`${solid.join("/")}${ext}`) : at(`${solid.length ? `${solid.join("/")}/` : ""}index${ext}`), pattern, key: file };
       if (catchAll) flag(file, `${parts.at(-1)}: params.${solid.at(-1).slice(4, -1)} is the rest of the path as one string ("a/b") in Solid's router, where Next.js gave an array (["a", "b"])`);
-    } else if (name === "layout") entries[file] = dir ? { kind: "layout", to: at(`${solid.join("/")}${ext}`), pattern, key: file } : { kind: "document", to: `${root}/Document${ext}`, pattern, key: file };
+    } else if (name === "layout") entries[file] = dir ? { kind: "layout", to: at(`${solid.join("/")}${ext}`), pattern, key: file } : { kind: "document", to: `${src}/Document${ext}`, pattern, key: file };
     else if (name === "route") entries[file] = { kind: "route", to: at(`${solid.length ? solid.join("/") : "index"}${ext}`), pattern, key: file };
     else if (name === "not-found" && !dir) entries[file] = { kind: "not-found", to: at(`[...404]${ext}`), pattern, key: file };
     else if (name === "loading" || name === "error") segments[dir] = { ...segments[dir], [name]: file };
@@ -104,7 +105,7 @@ export function planNextRoutes(files, root) {
     else if (taken.has(to.replace(/\.tsx$/, ""))) flag(loading ?? error, `the segment's layout would be ${to}, which another file takes: wrap its pages in <Loading> or <Errored> by hand`);
     else layouts.push({ path: to, ...wrap });
   }
-  return { app, routes, root, entries, top: { loading: segments[""]?.loading ?? null, error: segments[""]?.error ?? null }, layouts, flags };
+  return { app, routes, src, entries, top: { loading: segments[""]?.loading ?? null, error: segments[""]?.error ?? null }, layouts, flags };
 }
 
 // A moved file's relative imports, re-pointed from where it was (`from`) to where it is (`to`). An
@@ -138,7 +139,7 @@ export function nextConfigKeys(text, { parse, Lang }) {
 // head), `api` whether there are route handlers, `tsconfigPaths` whether the tsconfig maps paths
 // (create-next-app's @/*), which Vite resolves only when asked.
 export function nextAppFiles(plan, { document = null, api = false, tsconfigPaths = false, middleware = "src/middleware.ts" } = {}) {
-  const src = plan.root;
+  const src = plan.src;
   const owner = dirOf(src);
   const local = (path) => specifier(src, path.replace(/\.tsx?$/, ""));
   const files = [];
