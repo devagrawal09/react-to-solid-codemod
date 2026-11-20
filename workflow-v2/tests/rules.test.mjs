@@ -610,10 +610,10 @@ it("R9 converts FC from a default-and-named react import, and imports Component 
   expect(out).toContain(`export type Slot = { render?: Component };`);
 });
 
-it("R9 turns React's SVGProps into JSX.SVGAttributes", () => {
+it("R9 turns React's SVGProps into <svg>'s JSX.SvgSVGAttributes, or JSX.SVGAttributes for other elements", () => {
   const code = `import { type SVGProps } from 'react'\nexport function Logo({ className, ...props }: SVGProps<SVGSVGElement>) {\n  return <svg className={className} {...props} />\n}\nexport const Path = (props: React.SVGProps<SVGPathElement>) => <path {...props} />\n`;
   const { code: out, flags } = run(code);
-  expect(out).toBe(`import { omit } from "solid-js";\nimport type { JSX } from "@solidjs/web";\nexport function Logo(props: JSX.SVGAttributes<SVGSVGElement>) {\n  const others = omit(props, "class");\n  return <svg class={props.class} {...others} />\n}\nexport const Path = (props: JSX.SVGAttributes<SVGPathElement>) => <path {...props} />\n`);
+  expect(out).toBe(`import { omit } from "solid-js";\nimport type { JSX } from "@solidjs/web";\nexport function Logo(props: JSX.SvgSVGAttributes<SVGSVGElement>) {\n  const others = omit(props, "class");\n  return <svg class={props.class} {...others} />\n}\nexport const Path = (props: JSX.SVGAttributes<SVGPathElement>) => <path {...props} />\n`);
   expect(flags.filter((f) => f.kind === "React API")).toEqual([]);
 });
 
