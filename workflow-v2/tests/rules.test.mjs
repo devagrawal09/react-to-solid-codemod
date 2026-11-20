@@ -590,6 +590,11 @@ it("R9 converts FC from a default-and-named react import, and imports Component 
   expect(out).toContain(`export type Slot = { render?: Component };`);
 });
 
+it("R9 keeps a component type on the component when it takes no props (R31 moves only a value's type)", () => {
+  const code = `import React, { type FC, type VFC } from "react";\nconst App: React.FC = () => {\n  return <main />;\n};\nexport const Page: FC<{ title: string }> = () => <h1 />;\nconst Shell: React.FunctionComponent<P> = () => <div />;\nconst Dot: VFC = () => <i />;\nconst Bar: React.VoidFunctionComponent<{ n: number }> = () => <b />;\n`;
+  expect(convert(code)).toBe(`import type { Component, VoidComponent } from "solid-js";\nconst App: Component = () => {\n  return <main />;\n};\nexport const Page: Component<{ title: string }> = () => <h1 />;\nconst Shell: Component<P> = () => <div />;\nconst Dot: VoidComponent = () => <i />;\nconst Bar: VoidComponent<{ n: number }> = () => <b />;\n`);
+});
+
 it("R9 converts PropsWithChildren to ParentProps and ElementType to ValidComponent, with their imports", () => {
   const code = `import type * as React from "react";\nexport function Box(props: React.PropsWithChildren<{ as?: React.ElementType }>) { return <div>{props.children}</div>; }\n`;
   const out = convert(code);

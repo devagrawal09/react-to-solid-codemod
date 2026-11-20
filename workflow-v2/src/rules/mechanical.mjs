@@ -1588,7 +1588,8 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       const ann = d.field("type");
       const type = kids(ann)[0];
       const v = d.field("value");
-      if (!type || !v || /^(Accessor|Memo)\b|=>/.test(type.text())) return [];
+      // A component's type (const App: React.FC = () => ...) is the function's, not its return's.
+      if (!type || !v || /^(Accessor|Memo)\b|=>/.test(type.text()) || /^(React\.)?(FC|VFC|FunctionComponent|VoidFunctionComponent|ComponentType|Component|VoidComponent|ParentComponent)\b/.test(type.text())) return [];
       if (v.kind() === "arrow_function" && !v.field("return_type") && v.field("parameters") && !kids(v.field("parameters")).length) {
         note("typed accessor -> return type");
         return [rep(ann, ""), { start: v.field("parameters").range().end.index, end: v.field("parameters").range().end.index, text: `: ${type.text()}` }];
@@ -1665,6 +1666,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       if (bare === "CSSProperties" && (isReactType(name) || name === "CSSProperties")) { note("CSSProperties -> JSX.CSSProperties"); return [t.replace("JSX.CSSProperties")]; }
       // Only the name is replaced, so edits inside the type arguments still apply.
       if (/^(ComponentType|FC|FunctionComponent)$/.test(bare) && isReactType(name)) { note("ComponentType -> Component"); introduced["solid-js"].add("Component"); return [(t.kind() === "generic_type" ? t.field("name") : t).replace("Component")]; }
+      if (/^(VFC|VoidFunctionComponent)$/.test(bare) && isReactType(name)) { note("VFC -> VoidComponent"); introduced["solid-js"].add("VoidComponent"); return [(t.kind() === "generic_type" ? t.field("name") : t).replace("VoidComponent")]; }
       if (bare === "PropsWithChildren" && isReactType(name)) { note("PropsWithChildren -> ParentProps"); introduced["solid-js"].add("ParentProps"); return [(t.kind() === "generic_type" ? t.field("name") : t).replace("ParentProps")]; }
       // React's ElementType is a tag name or a component; so is @solidjs/web's ValidComponent.
       if (bare === "ElementType" && !args.length && isReactType(name)) { note("ElementType -> ValidComponent"); introduced["@solidjs/web"].add("ValidComponent"); return [t.replace("ValidComponent")]; }
