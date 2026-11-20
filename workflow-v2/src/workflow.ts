@@ -24,7 +24,8 @@ export default async function main({ params }: { params: { include?: string; app
   // --param values arrive as JSON when they parse as JSON, so true is a boolean.
   const apply = params.apply === true || params.apply === "true";
   const root = (params.include ?? "src").replace(/\/$/, "");
-  const sources = { include: [`${root}/**/*.tsx`, `${root}/**/*.ts`], exclude: ["**/*.test.*", "**/*.spec.*", "**/*.d.ts"] };
+  // Test files too: the rule pass converts @testing-library/react's API to @solidjs/testing-library's.
+  const sources = { include: [`${root}/**/*.tsx`, `${root}/**/*.ts`], exclude: ["**/*.d.ts"] };
 
   const manifests = await step("Read package.json files", forEachFile("**/package.json", (file) => {
     const pkg = JSON.parse(file.text);
@@ -99,7 +100,13 @@ export default async function main({ params }: { params: { include?: string; app
   // The other workspace packages that depend on React, which this run doesn't convert.
   const reactPackages = manifests.outputs.map((m) => ({ dir: m.path.replace(/\/?package\.json$/, ""), react: "react" in m.deps })).filter((m) => m.react && !(m.dir === "" || root === m.dir || root.startsWith(`${m.dir}/`))).map((m) => m.dir);
   const configs = await step(apply ? "Move package.json, tsconfig and the Vite config to Solid 2" : "Preview the package.json, tsconfig and Vite config changes", forEachFile({
-    include: ["**/package.json", "**/tsconfig*.json", "**/vite.config.ts", "**/vite.config.js", "**/vite.config.mts", "**/vite.config.mjs", "**/next.config.ts", "**/next.config.js", "**/next.config.mjs", "**/next.config.cjs"],
+    include: [
+      "**/package.json", "**/tsconfig*.json",
+      "**/vite.config.ts", "**/vite.config.js", "**/vite.config.mts", "**/vite.config.mjs",
+      "**/vitest.config.ts", "**/vitest.config.js", "**/vitest.config.mts", "**/vitest.config.mjs",
+      "**/next.config.ts", "**/next.config.js", "**/next.config.mjs", "**/next.config.cjs",
+      "**/jest.config.ts", "**/jest.config.js", "**/jest.config.mjs", "**/jest.config.cjs",
+    ],
     exclude: ["**/node_modules/**"],
   }, (file) => {
     const dir = file.path.replace(/\/?[^/]+$/, "");
@@ -111,9 +118,13 @@ export default async function main({ params }: { params: { include?: string; app
       if (dir !== owner) return undefined;
       return { file: file.path, shared: false, changes: [], flags: [{ kind: "build config", detail: `${name} configures Next.js, which has no Solid 2 equivalent: move what it sets (rewrites, redirects, headers, images, env) to @solidjs/vite-plugin's start mode or SolidStart and vite.config, then delete it` }], jsx: false };
     }
+    if (name.startsWith("jest.config")) {
+      if (dir !== owner) return undefined;
+      return { file: file.path, shared: false, changes: [], flags: [{ kind: "build config", detail: `${name} runs the tests on Jest, and Solid's test setup is Vitest with @solidjs/vite-plugin, which compiles Solid's JSX and resolves Solid's browser build: move the tests to Vitest (the converted tests import @solidjs/testing-library), or give Jest babel-preset-solid and the "browser" and "development" export conditions` }], jsx: false };
+    }
     if (name === "package.json") edit = migratePackageJson(file.text, peers);
     else if (name.startsWith("tsconfig")) edit = migrateTsconfig(file.text, { dir, reactPackages });
-    else if (dir === owner) edit = migrateViteConfig(file.text, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" } });
+    else if (dir === owner) edit = migrateViteConfig(file.text, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" }, vitest: name.startsWith("vitest.config") });
     else return undefined;
     if (apply && !shared && edit.text !== file.text) file.write(edit.text);
     return { file: file.path, shared, changes: edit.changes, flags: edit.flags, jsx: !shared && "jsx" in edit && edit.jsx };

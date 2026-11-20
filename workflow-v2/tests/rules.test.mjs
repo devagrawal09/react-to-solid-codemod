@@ -740,3 +740,99 @@ it("R8 leaves a nested function's parameter of the same name alone", () => {
   const code = `function C({ value }: P) {\n  const f = (value = 2) => value;\n  return <p>{f()}{value}</p>;\n}\n`;
   expect(convert(code)).toContain(`const f = (value = 2) => value;\n  return <p>{f()}{props.value}</p>;`);
 });
+
+const tested = (code) => ported(code, ["@testing-library/react"]);
+
+it("R46 renders a function of the element, and leaves a function as it is", () => {
+  const code = `import { render } from "@testing-library/react";\nrender(<App />);\nrender(() => <App />);\nrender(makeApp(), { wrapper: Providers });\n`;
+  const { code: out, flags } = tested(code);
+  expect(out).toBe(`import { render } from "@solidjs/testing-library";\nrender(() => <App />);\nrender(() => <App />);\nrender(() => makeApp(), { wrapper: Providers });\n`);
+  expect(flags).toEqual([]);
+});
+
+it("R46 flags an element made before render runs, React-only render options and asFragment", () => {
+  const code = `import { render } from "@testing-library/react";\nexport const renderWith = (ui: JSX.Element) => render(ui, { reactStrictMode: true });\nconst { asFragment } = render(<App />);\n`;
+  const { code: out, flags } = tested(code);
+  expect(out).toContain(`render(() => ui, { reactStrictMode: true })`);
+  expect(flags.map((f) => [f.kind, f.line, f.detail.slice(0, 40)])).toEqual([
+    ["render", 2, "reactStrictMode: React-only render optio"],
+    ["render", 2, "ui is an element made before render() ru"],
+    ["render", 3, "asFragment() returns the container's inn"],
+  ]);
+});
+
+it("R46 runs act's callback body, one level less indented, then flush(), and drops act from the import", () => {
+  const code = `import { act, render } from "@testing-library/react";\nit("x", () => {\n  act(() => {\n    button.click();\n    if (open) {\n      close();\n    }\n  });\n  act(() => vi.advanceTimersByTime(100));\n});\n`;
+  const { code: out, flags } = tested(code);
+  expect(out).toBe(`import { flush } from "solid-js";\nimport { render } from "@solidjs/testing-library";\nit("x", () => {\n  button.click();\n  if (open) {\n    close();\n  }\n  flush();\n  vi.advanceTimersByTime(100);\n  flush();\n});\n`);
+  expect(flags).toEqual([]);
+});
+
+it("R46 keeps an awaited act's awaits, and awaits what an awaited act's callback returns", () => {
+  const code = `import { act } from "@testing-library/react";\nit("x", async () => {\n  await act(async () => {\n    await user.click(button);\n  });\n  await act(() => promise);\n});\n`;
+  expect(tested(code).code).toBe(`import { flush } from "solid-js";\nit("x", async () => {\n  await user.click(button);\n  flush();\n  await promise;\n  flush();\n});\n`);
+});
+
+it("R46 keeps act's callback a block when it declares a name", () => {
+  const code = `import { act } from "@testing-library/react";\nit("x", () => {\n  act(() => {\n    const next = 2;\n    set(next);\n  });\n});\n`;
+  expect(tested(code).code).toContain(`  {\n    const next = 2;\n    set(next);\n  }\n  flush();\n`);
+});
+
+it("R46 flags an act it can't inline, and keeps its import", () => {
+  const code = `import { act } from "@testing-library/react";\nit("x", () => {\n  const p = act(async () => load());\n});\n`;
+  const { code: out, flags } = tested(code);
+  expect(out).toContain(`import { act } from "@solidjs/testing-library";`);
+  expect(flags.map((f) => [f.kind, f.line])).toEqual([["act", 3], ["ported library", 1]]);
+});
+
+it("R46 converts React 19's act from react, and doesn't flag it as a React API", () => {
+  const code = `import { act } from "react";\nit("x", () => {\n  act(() => {\n    store.set(1);\n  });\n});\n`;
+  const { code: out, flags } = run(code);
+  expect(out).toBe(`import { flush } from "solid-js";\nit("x", () => {\n  store.set(1);\n  flush();\n});\n`);
+  expect(flags).toEqual([]);
+});
+
+it("R46 flushes after each fireEvent statement, once", () => {
+  const code = `import { fireEvent } from "@testing-library/react";\nit("x", () => {\n  fireEvent.click(button);\n  fireEvent(input, new Event("input"));\n  fireEvent.keyDown(input, { key: "Enter" });\n  flush();\n});\n`;
+  expect(tested(code).code).toBe(`import { flush } from "solid-js";\nimport { fireEvent } from "@solidjs/testing-library";\nit("x", () => {\n  fireEvent.click(button);\n  flush();\n  fireEvent(input, new Event("input"));\n  flush();\n  fireEvent.keyDown(input, { key: "Enter" });\n  flush();\n});\n`);
+});
+
+it("R46 turns a rerender with new literal props into a signal per prop that changes, set before a flush()", () => {
+  const code = `import { render, screen } from "@testing-library/react";\nit("x", () => {\n  const { rerender, container } = render(<Badge label="new" count={1} tone="info" />);\n  rerender(<Badge label="new" count={2} tone="info" />);\n  rerender(<Badge label="old" count={2} tone="info" />);\n});\n`;
+  const { code: out, flags } = tested(code);
+  expect(out).toBe(`import { createSignal, flush } from "solid-js";\nimport type { ComponentProps } from "@solidjs/web";\nimport { render, screen } from "@solidjs/testing-library";\nit("x", () => {\n  const [label, setLabel] = createSignal<ComponentProps<typeof Badge>["label"]>("new");\n  const [count, setCount] = createSignal<ComponentProps<typeof Badge>["count"]>(1);\n  const { container } = render(() => <Badge label={label()} count={count()} tone="info" />);\n  setCount(2);\n  flush();\n  setLabel("old");\n  flush();\n});\n`);
+  expect(flags).toEqual([]);
+});
+
+it("R46 drops the destructuring when rerender was all it took, names the signal apart from the file's names, and adds a prop the first render didn't pass", () => {
+  const code = `import { render } from "@testing-library/react";\nconst open = true;\nit("x", () => {\n  const { rerender } = render(<details />);\n  rerender(<details open />);\n});\n`;
+  expect(tested(code).code).toContain(`  const [open2, setOpen2] = createSignal<ComponentProps<"details">["open"]>(undefined);\n  render(() => <details open={open2()} />);\n  setOpen2(true);\n  flush();\n`);
+});
+
+it("R46 flags a rerender that passes a value that isn't a literal, or that isn't destructured", () => {
+  const code = `import { render } from "@testing-library/react";\nit("x", () => {\n  const { rerender } = render(<Field onSave={first} />);\n  rerender(<Field onSave={second} />);\n  const view = render(<Field />);\n  view.rerender(<Field disabled />);\n});\n`;
+  const { code: out, flags } = tested(code);
+  expect(out).toContain(`const { rerender } = render(() => <Field onSave={first} />);\n  rerender(<Field onSave={second} />);`);
+  expect(flags.map((f) => [f.kind, f.line])).toEqual([["rerender", 3], ["rerender", 5]]);
+});
+
+it("R46 passes renderHook's initialProps as the hook's arguments and reads the hook's value as result", () => {
+  const code = `import { renderHook } from "@testing-library/react";\nit("x", () => {\n  const { result, unmount } = renderHook((start: number) => useCounter(start), { initialProps: 10 });\n  result.current.increment();\n  expect(result.current.count).toBe(11);\n  unmount();\n  const hook = renderHook(useToggle, { initialProps });\n  expect(hook.result.current.on).toBe(false);\n  hook.unmount();\n});\n`;
+  const { code: out, flags } = tested(code);
+  expect(out).toBe(`import { renderHook } from "@solidjs/testing-library";\nit("x", () => {\n  const { result, cleanup: unmount } = renderHook((start: number) => useCounter(start), { initialProps: [10] });\n  result.increment();\n  expect(result.count).toBe(11);\n  unmount();\n  const hook = renderHook(useToggle, { initialProps: [initialProps] });\n  expect(hook.result.on).toBe(false);\n  hook.cleanup();\n});\n`);
+  expect(flags).toEqual([]);
+});
+
+it("R46 flags a hook's whole value read off result, renderHook's rerender, and options it can't read", () => {
+  const code = `import { renderHook } from "@testing-library/react";\nit("x", () => {\n  const { result, rerender } = renderHook(() => useValue());\n  expect(result.current).toBe(1);\n  renderHook(() => useValue(), options);\n});\n`;
+  const { code: out, flags } = tested(code);
+  expect(out).toContain(`expect(result).toBe(1);`);
+  expect(flags.map((f) => [f.kind, f.line])).toEqual([["renderHook", 4], ["rerender", 3], ["renderHook", 5]]);
+});
+
+it("R46 converts a component defined in a test like any other, and leaves the tests alone when the project keeps @testing-library/react", () => {
+  const code = `import { useState } from "react";\nimport { render } from "@testing-library/react";\nfunction Toggle() {\n  const [on, setOn] = useState(false);\n  return <button className="t" onClick={() => setOn(!on)}>{String(on)}</button>;\n}\nrender(<Toggle />);\n`;
+  expect(tested(code).code).toContain(`  const [on, setOn] = createSignal(false);\n  return <button class="t" onClick={() => setOn(!on())}>{String(on())}</button>;\n}\nrender(() => <Toggle />);`);
+  expect(run(code).code).toContain(`import { render } from "@testing-library/react";`);
+  expect(run(code).code).toContain(`render(<Toggle />);`);
+});

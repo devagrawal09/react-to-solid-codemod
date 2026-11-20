@@ -61,7 +61,7 @@ it("package.json bumps Vite below 8 when it adds Solid's plugin, and says so", (
 it("package.json installs each verified port in the React package's place: a prerelease exactly, a release with ^", () => {
   const { text, changes } = migratePackageJson(`{\n  "dependencies": {\n    "@tanstack/react-query": "^5.0.0",\n    "lucide-react": "^0.500.0",\n    "react": "^19.0.0",\n    "react-router": "^7.0.0",\n    "react-router-dom": "^7.0.0"\n  },\n  "devDependencies": {\n    "@testing-library/react": "^16.0.0"\n  }\n}\n`);
   expect(text).toBe(`{\n  "dependencies": {\n    "@lucide/solid": "^1.76.0",\n    "@solidjs/router": "^2.0.0",\n    "@solidjs/web": "^2.0.3",\n    "@tanstack/solid-query": "6.0.0-rc.6",\n    "solid-js": "^2.0.3"\n  },\n  "devDependencies": {\n    "@solidjs/testing-library": "1.0.0-rc.2"\n  }\n}\n`);
-  expect(changes).toContainEqual(expect.stringContaining("@testing-library/react -> @solidjs/testing-library@1.0.0-rc.2 (tests aren't converted: render takes a function"));
+  expect(changes).toContainEqual(expect.stringContaining("@testing-library/react -> @solidjs/testing-library@1.0.0-rc.2 (R46 converts the tests: render takes a function"));
 });
 
 it("package.json leaves libraries without a Solid 2 port, React lint plugins and ports it can't install, and flags them", () => {
@@ -290,4 +290,37 @@ it("tsconfig flags a path into the source of another workspace package that depe
   const code = `{\n  "compilerOptions": {\n    "baseUrl": ".",\n    "jsx": "preserve",\n    "paths": {\n      "@acme/ui/*": ["../../packages/ui/src/*"],\n      "@acme/db": ["../../packages/db/src/index.ts"],\n      "~/*": ["./src/*"]\n    }\n  }\n}\n`;
   const { flags } = migrateTsconfig(code, { dir: "apps/web", reactPackages: ["packages/ui", "packages/ui-kit"] });
   expect(flags).toEqual([{ kind: "build config", detail: expect.stringMatching(/^paths maps "@acme\/ui\/\*" to \.\.\/\.\.\/packages\/ui\/src\/\*, the source of packages\/ui, which depends on React: with "jsxImportSource": "@solidjs\/web" it now compiles as Solid JSX/) }]);
+});
+
+it("package.json takes jest-dom 8 back to 7 next to Solid's Vite plugin, which npm won't install with 8", () => {
+  const code = `{\n  "devDependencies": {\n    "@testing-library/jest-dom": "^8.0.0",\n    "@testing-library/react": "^16.3.3",\n    "@vitejs/plugin-react": "^6.1.2",\n    "vite": "^8.3.6"\n  }\n}\n`;
+  const { text, changes } = migratePackageJson(code);
+  expect(text).toBe(`{\n  "devDependencies": {\n    "@solidjs/testing-library": "1.0.0-rc.2",\n    "@solidjs/vite-plugin": "^3.0.1",\n    "@testing-library/jest-dom": "^7.0.1",\n    "vite": "^8.3.6"\n  }\n}\n`);
+  expect(changes).toContain("@testing-library/jest-dom ^8.0.0 -> ^7.0.1: @solidjs/vite-plugin takes jest-dom up to 7, and npm won't install 8 next to it");
+  expect(migratePackageJson(`{\n  "devDependencies": {\n    "@testing-library/jest-dom": "^8.0.0"\n  }\n}\n`).text).toContain(`"@testing-library/jest-dom": "^8.0.0"`);
+});
+
+it("package.json flags @testing-library/react-hooks, whose renderHook is in @solidjs/testing-library", () => {
+  const { flags } = migratePackageJson(`{\n  "devDependencies": {\n    "@testing-library/react-hooks": "^8.0.1"\n  }\n}\n`);
+  expect(flags).toEqual([{ kind: "dependency", detail: expect.stringMatching(/^@testing-library\/react-hooks has no Solid 2 port: renderHook is in @solidjs\/testing-library/) }]);
+});
+
+it("vitest.config swaps the React plugin and keeps a DOM test environment as it is", () => {
+  const code = `import react from "@vitejs/plugin-react";\nimport { defineConfig } from "vitest/config";\nexport default defineConfig({\n  plugins: [react()],\n  test: { environment: "jsdom", setupFiles: ["./vitest.setup.ts"] },\n});\n`;
+  const { text, flags } = migrateViteConfig(code, { parse, Lang, vitest: true });
+  expect(text).toBe(code.replace(`import react from "@vitejs/plugin-react"`, `import solid from "@solidjs/vite-plugin"`).replace("react()", "solid()"));
+  expect(flags).toEqual([]);
+});
+
+it("a Vite or Vitest config flags a node test environment, which Solid's plugin takes for server tests", () => {
+  const code = `import react from "@vitejs/plugin-react";\nexport default { plugins: [react()], test: { environment: "node" } };\n`;
+  expect(viteConfig(code).flags).toEqual([{ kind: "build config", detail: expect.stringMatching(/^test\.environment is "node", which @solidjs\/vite-plugin takes for server tests/) }]);
+});
+
+it("vitest.config flags a config that doesn't load Solid's plugin, unless it merges vite.config", () => {
+  const alone = `import { defineConfig } from "vitest/config";\nexport default defineConfig({ test: { environment: "jsdom" } });\n`;
+  expect(migrateViteConfig(alone, { parse, Lang, vitest: true }).flags).toEqual([{ kind: "build config", detail: expect.stringMatching(/^this Vitest config doesn't load @solidjs\/vite-plugin/) }]);
+  const merged = `import { defineConfig, mergeConfig } from "vitest/config";\nimport viteConfig from "./vite.config";\nexport default mergeConfig(viteConfig, defineConfig({ test: { environment: "jsdom" } }));\n`;
+  expect(migrateViteConfig(merged, { parse, Lang, vitest: true }).flags).toEqual([]);
+  expect(viteConfig(alone).flags).toEqual([]);
 });
