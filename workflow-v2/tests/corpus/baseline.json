@@ -1,0 +1,341 @@
+{
+  "create-vite-react-ts": {
+    "commit": "7f57558efdf599156565bffde136346e204421dc",
+    "analyzed": 5,
+    "changed": 5,
+    "failures": 0,
+    "flags": {
+      "class component": 2,
+      "custom hook call": 1,
+      "React API": 1,
+      "render-dependent read": 2
+    },
+    "lint": {
+      "problems": 9,
+      "parseErrors": 0,
+      "byRule": {
+        "solid/self-closing-comp": 9
+      }
+    },
+    "parseFailures": 0,
+    "typeErrors": {
+      "react": 0,
+      "total": 7,
+      "convertedFiles": 7,
+      "own": 7,
+      "ownFiles": 5,
+      "ownByCode": {
+        "TS2339": 3,
+        "TS2304": 2,
+        "TS2322": 2
+      }
+    },
+    "resolved": {
+      "solid-js": "2.0.3",
+      "@solidjs/web": "2.0.3",
+      "@tanstack/solid-query": "6.0.0-rc.6",
+      "@lucide/solid": "1.77.0",
+      "typescript": "7.0.2"
+    }
+  },
+  "bulletproof-react": {
+    "commit": "9506629ed003a561c6627735480cce4994244bb4",
+    "analyzed": 115,
+    "changed": 74,
+    "failures": 0,
+    "flags": {
+      "accessor in tag name": 2,
+      "complex props pattern": 1,
+      "custom hook call": 82,
+      "dependency": 16,
+      "expression-bodied component": 38,
+      "list key": 4,
+      "React namespace": 12,
+      "render-dependent read": 19,
+      "zustand store": 1
+    },
+    "lint": {
+      "problems": 40,
+      "parseErrors": 0,
+      "byRule": {
+        "solid/no-destructure": 16,
+        "solid/no-innerhtml": 1,
+        "solid/prefer-for": 1,
+        "solid/prefer-structured-class": 1,
+        "solid/reactivity": 20,
+        "solid/self-closing-comp": 1
+      }
+    },
+    "parseFailures": 0,
+    "typeErrors": {
+      "react": 0,
+      "total": 301,
+      "convertedFiles": 269,
+      "own": 60,
+      "ownFiles": 41,
+      "ownByCode": {
+        "TS2322": 30,
+        "TS2339": 15,
+        "TS2686": 8,
+        "TS2353": 7
+      }
+    },
+    "resolved": {
+      "solid-js": "2.0.3",
+      "@solidjs/web": "2.0.3",
+      "@solidjs/router": "2.0.1",
+      "@tanstack/solid-query": "6.0.0-rc.6",
+      "@lucide/solid": "1.77.0",
+      "typescript": "5.4.5"
+    }
+  },
+  "shadcn-admin": {
+    "commit": "e16c87f213a5ba5e45964e9b67c792105ec74d26",
+    "analyzed": 209,
+    "changed": 164,
+    "failures": 0,
+    "flags": {
+      "accessor in tag name": 6,
+      "custom hook call": 87,
+      "dependency": 35,
+      "destructured hook result": 1,
+      "early return": 1,
+      "effect dep": 2,
+      "list key": 4,
+      "React API": 31,
+      "React namespace": 5,
+      "render-dependent read": 37,
+      "style number": 1,
+      "zustand store": 1
+    },
+    "lint": {
+      "problems": 97,
+      "parseErrors": 1,
+      "byRule": {
+        "eslint": 3,
+        "parse-error": 1,
+        "react-hooks/incompatible-library": 3,
+        "react-refresh/only-export-components": 11,
+        "solid/components-return-once": 6,
+        "solid/jsx-no-undef": 1,
+        "solid/no-destructure": 28,
+        "solid/prefer-for": 3,
+        "solid/prefer-structured-class": 3,
+        "solid/reactivity": 37,
+        "solid/self-closing-comp": 1
+      }
+    },
+    "parseFailures": 2,
+    "typeErrors": {
+      "react": 0,
+      "total": 2,
+      "convertedFiles": 2,
+      "own": 2,
+      "ownFiles": 73,
+      "ownByCode": {
+        "TS1003": 1,
+        "TS1382": 1
+      }
+    },
+    "resolved": {
+      "solid-js": "2.0.3",
+      "@solidjs/web": "2.0.3",
+      "@tanstack/solid-query": "6.0.0-rc.6",
+      "@lucide/solid": "1.76.0",
+      "typescript": "6.0.3"
+    }
+  },
+  "react-admin-dashboard": {
+    "commit": "20957b8435cb31bc05ba62a73f908837c48567ab",
+    "analyzed": 37,
+    "changed": 26,
+    "failures": 0,
+    "flags": {
+      "custom hook call": 38,
+      "dependency": 5,
+      "early return": 3,
+      "effect dep": 5,
+      "expression-bodied component": 1,
+      "list key": 2,
+      "React API": 1,
+      "React namespace": 1,
+      "render-dependent read": 25,
+      "style number": 8,
+      "zustand store": 2
+    },
+    "lint": {
+      "problems": 62,
+      "parseErrors": 0,
+      "byRule": {
+        "solid/components-return-once": 4,
+        "solid/jsx-no-undef": 1,
+        "solid/no-destructure": 1,
+        "solid/prefer-for": 1,
+        "solid/reactivity": 7,
+        "solid/self-closing-comp": 1,
+        "solid/style-prop": 47
+      }
+    },
+    "parseFailures": 0,
+    "typeErrors": {
+      "react": 0,
+      "total": 179,
+      "convertedFiles": 174,
+      "own": 0,
+      "ownFiles": 0,
+      "ownByCode": {}
+    },
+    "resolved": {
+      "solid-js": "2.0.3",
+      "@solidjs/web": "2.0.3",
+      "@solidjs/router": "2.0.1",
+      "typescript": "6.0.3"
+    }
+  },
+  "shlink-web-client": {
+    "commit": "1f5acdfe6867c7e9b248b5846028aec6a3405e10",
+    "analyzed": 58,
+    "changed": 38,
+    "failures": 0,
+    "flags": {
+      "class component": 1,
+      "controlled input": 1,
+      "custom hook call": 58,
+      "dependency": 7,
+      "effect dep": 2,
+      "expression-bodied component": 8,
+      "React API": 2,
+      "render-dependent read": 11
+    },
+    "lint": {
+      "problems": 14,
+      "parseErrors": 0,
+      "byRule": {
+        "solid/components-return-once": 1,
+        "solid/no-destructure": 8,
+        "solid/reactivity": 5
+      }
+    },
+    "parseFailures": 0,
+    "typeErrors": {
+      "react": 0,
+      "total": 70,
+      "convertedFiles": 54,
+      "own": 5,
+      "ownFiles": 6,
+      "ownByCode": {
+        "TS2339": 2,
+        "TS2304": 2,
+        "TS2488": 1
+      }
+    },
+    "resolved": {
+      "solid-js": "2.0.3",
+      "@solidjs/web": "2.0.3",
+      "@solidjs/router": "2.0.1",
+      "typescript": "7.0.2"
+    }
+  },
+  "t3code": {
+    "commit": "95cb068c10a6cf0b33eed0a0cab3b298763fe852",
+    "analyzed": 1383,
+    "changed": 886,
+    "failures": 0,
+    "flags": {
+      "accessor in tag name": 2,
+      "build config": 1,
+      "class component": 1,
+      "complex props pattern": 3,
+      "context default": 2,
+      "controlled input": 6,
+      "custom hook call": 3133,
+      "dependency": 22,
+      "early return": 62,
+      "effect": 27,
+      "effect dep": 107,
+      "expression-bodied component": 8,
+      "list key": 29,
+      "ported library": 1,
+      "React API": 183,
+      "React namespace": 10,
+      "reassigned let": 1,
+      "render handler": 178,
+      "render-dependent read": 2565,
+      "style number": 114,
+      "zustand store": 30
+    },
+    "lint": {
+      "problems": 3510,
+      "parseErrors": 0,
+      "byRule": {
+        "eslint": 1,
+        "solid/components-return-once": 287,
+        "solid/event-handlers": 7,
+        "solid/jsx-no-undef": 1,
+        "solid/no-boolean-enumerated-attribute": 28,
+        "solid/no-destructure": 12,
+        "solid/no-innerhtml": 5,
+        "solid/no-unused-signal": 1,
+        "solid/no-write-in-pure-computation": 266,
+        "solid/prefer-for": 43,
+        "solid/prefer-structured-class": 25,
+        "solid/reactivity": 2829,
+        "solid/style-prop": 5
+      }
+    },
+    "parseFailures": 0,
+    "typeErrors": {
+      "react": 71,
+      "total": 12803,
+      "convertedFiles": 11357,
+      "own": 3957,
+      "ownFiles": 554,
+      "ownByCode": {
+        "TS2322": 2354,
+        "TS2531": 348,
+        "TS2339": 277,
+        "TS2345": 180,
+        "TS2349": 129,
+        "TS2532": 117,
+        "TS2304": 110,
+        "TS2533": 73,
+        "TS7006": 58,
+        "TS2721": 53,
+        "TS2552": 47,
+        "TS18047": 43,
+        "TS18048": 30,
+        "TS2722": 21,
+        "TS2488": 20,
+        "TS18049": 16,
+        "TS2769": 16,
+        "TS2538": 8,
+        "TS2561": 7,
+        "TS2786": 7,
+        "TS7053": 6,
+        "TS2375": 6,
+        "TS2367": 4,
+        "TS2554": 3,
+        "TS7031": 3,
+        "TS2537": 3,
+        "TS2719": 3,
+        "TS4112": 2,
+        "TS2774": 2,
+        "TS2344": 2,
+        "TS2686": 2,
+        "TS2698": 1,
+        "TS2503": 1,
+        "TS2571": 1,
+        "TS2315": 1,
+        "TS2693": 1,
+        "TS2352": 1,
+        "TS2464": 1,
+        "TS2741": 1
+      }
+    },
+    "resolved": {
+      "solid-js": "2.0.3",
+      "@solidjs/web": "2.0.3",
+      "@lucide/solid": "1.76.0"
+    }
+  }
+}

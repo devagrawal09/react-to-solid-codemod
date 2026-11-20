@@ -1,0 +1,59 @@
+[
+  {
+    "name": "create-vite-react-ts",
+    "createVite": "9.3.4",
+    "overlay": "tests/corpus/create-vite-overlay",
+    "commit": "7f57558efdf599156565bffde136346e204421dc",
+    "license": "MIT",
+    "include": "src",
+    "tsconfig": "tsconfig.app.json",
+    "notes": "What a new user starts from: create-vite 9.3.4's react-ts template (npm integrity sha512-L02vtfSVndf0I65g0axXCjrFbhyjmN5K7szeaLRd0mMx0duW2BpzNvps5q4zHHCWexOrWrPgAx17hRz88I3bHw==), with create-vite-overlay/ on top: Repos.tsx (lucide-react icons, one passed as a prop and rendered as a tag, useQuery, useMemo, a tags = [] default), Clock.tsx (useEffect with deps, with a cleanup, and on mount), Legacy.tsx (a render-only class with defaultProps, and a class with state and componentDidMount), main.tsx under a QueryClientProvider, and a package-lock.json that pins every version. commit is the hash of that tree, committed with a fixed author and date."
+  },
+  {
+    "name": "bulletproof-react",
+    "url": "https://github.com/alan2207/bulletproof-react",
+    "commit": "9506629ed003a561c6627735480cce4994244bb4",
+    "license": "MIT (LICENSE)",
+    "subdirectory": "apps/react-vite",
+    "include": "src",
+    "compilerOptions": { "baseUrl": null },
+    "notes": "The Vite + React Router app, and the form library: a widely copied reference architecture (React Router 7, TanStack Query, zustand for notifications, react-hook-form with zod, react-query-auth, Radix UI). 115 source files, yarn 1 lockfile. Its tsconfig sets baseUrl \".\", which TypeScript 7 rejects (TS5102) before checking anything; without it, paths resolve from the tsconfig's directory, which is the same place."
+  },
+  {
+    "name": "shadcn-admin",
+    "url": "https://github.com/satnaing/shadcn-admin",
+    "commit": "e16c87f213a5ba5e45964e9b67c792105ec74d26",
+    "license": "MIT (LICENSE)",
+    "include": "src",
+    "tsconfig": "tsconfig.app.json",
+    "notes": "The context-heavy one: nine createContext providers (theme, font, direction, layout, search, and a provider per table feature), plus TanStack Router (with its committed routeTree.gen.ts), TanStack Query, zustand (auth store), react-hook-form, TanStack Table and shadcn/ui on Radix. 209 source files, pnpm lockfile."
+  },
+  {
+    "name": "react-admin-dashboard",
+    "url": "https://github.com/larry-xue/react-admin-dashboard",
+    "commit": "20957b8435cb31bc05ba62a73f908837c48567ab",
+    "license": "MIT (LICENSE)",
+    "include": "src",
+    "tsconfig": "tsconfig.app.json",
+    "notes": "The zustand app on a component library with no Solid port: React 19, Vite 8, TypeScript 6, React Router 7, zustand stores for auth and settings, Ant Design 6 (its Form is the form library). 37 source files, npm lockfile."
+  },
+  {
+    "name": "shlink-web-client",
+    "url": "https://github.com/shlinkio/shlink-web-client",
+    "commit": "1f5acdfe6867c7e9b248b5846028aec6a3405e10",
+    "license": "MIT (LICENSE)",
+    "include": "src",
+    "notes": "Redux: an actively maintained product (the Shlink URL shortener's web UI) on Redux Toolkit and react-redux, React Router, a dependency-injection container, and its own React component library (@shlinkio/shlink-web-component, no port). 58 source files, npm lockfile; the tsconfig covers its tests too."
+  },
+  {
+    "name": "t3code",
+    "url": "https://github.com/pingdotgg/t3code",
+    "commit": "95cb068c10a6cf0b33eed0a0cab3b298763fe852",
+    "license": "MIT (LICENSE)",
+    "include": "apps/web/src",
+    "tsconfig": "apps/web/tsconfig.json",
+    "chunk": 50,
+    "workflowCpus": 2,
+    "notes": "The large app the pass was developed on, and the one named in the release reports: apps/web of a pnpm monorepo (TanStack Router, TanStack Query, zustand, Effect atoms, @base-ui/react, lucide-react). At this commit apps/web/src has 1,383 source files, so it is far bigger than the other entries and dominates the run time. Earlier measured at this commit, with a full dev setup: React 0 type errors, 0.1.3's conversion 17,396. Here the React app has 71: installed with --ignore-scripts and not built, it lacks TanStack Router's generated route tree (not committed) and the NodeJS types in apps/web; they are subtracted per file. The workflow runs on 2 CPUs (with 6 workers it outgrew 3 GB and stalled); the type-check runs in chunks of 50 files."
+  }
+]
