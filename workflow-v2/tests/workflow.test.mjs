@@ -160,6 +160,157 @@ describe.skipIf(!bin)("react-to-solid workflow on a Next.js app", { tags: ["slow
   });
 });
 
+// A create-next-app 16.4.6 app (TypeScript) with a dynamic page that loads data, a segment
+// loading.tsx, a route handler and a client component: in src/ (--src-dir), or with app/,
+// components/ and lib/ at the root and @/* pointing at ./*.
+function givenNextApp({ src = true } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "r2s-next-"));
+  const files = {
+    "package.json": `{\n  "name": "next-app",\n  "private": true,\n  "scripts": {\n    "dev": "next dev",\n    "build": "next build",\n    "start": "next start"\n  },\n  "dependencies": {\n    "next": "16.4.6",\n    "react": "19.3.0",\n    "react-dom": "19.3.0"\n  },\n  "devDependencies": {\n    "@types/react": "^19",\n    "typescript": "^5"\n  }\n}\n`,
+    "tsconfig.json": `{\n  "compilerOptions": {\n    "jsx": "react-jsx",\n    "paths": {\n      "@/*": ["${src ? "./src/*" : "./*"}"]\n    }\n  }\n}\n`,
+    "next.config.ts": `import type { NextConfig } from "next";\n\nconst nextConfig: NextConfig = {\n  images: { remotePatterns: [] },\n};\n\nexport default nextConfig;\n`,
+    "src/app/globals.css": "body { margin: 0; }\n",
+    "src/app/favicon.ico": "icon",
+    "src/app/layout.tsx": `import type { Metadata } from "next";\nimport "./globals.css";\n\nexport const metadata: Metadata = { title: "Shop" };\n\nexport default function RootLayout({ children }: LayoutProps<"/">) {\n  return (\n    <html lang="en">\n      <body>{children}</body>\n    </html>\n  );\n}\n`,
+    "src/app/page.tsx": `import Link from "next/link";\nimport Counter from "@/components/Counter";\nimport styles from "./page.module.css";\n\nexport default function Home() {\n  return (\n    <main className={styles.main}>\n      <Link href="/items/1">First item</Link>\n      <Counter />\n    </main>\n  );\n}\n`,
+    "src/app/page.module.css": ".main { padding: 1rem; }\n",
+    "src/app/items/loading.tsx": `export default function Loading() {\n  return <p>Loading…</p>;\n}\n`,
+    "src/app/items/[id]/page.tsx": `import { getItem } from "@/lib/items";\n\nexport default async function ItemPage({ params }: PageProps<"/items/[id]">) {\n  const { id } = await params;\n  const item = await getItem(id);\n  return <h1>{item.name}</h1>;\n}\n`,
+    "src/app/api/items/route.ts": `import { NextResponse } from "next/server";\nimport { getItems } from "@/lib/items";\n\nexport async function GET() {\n  return NextResponse.json(await getItems());\n}\n`,
+    "src/lib/items.ts": `export async function getItems() {\n  return [{ id: "1", name: "Mug" }];\n}\n\nexport async function getItem(id: string) {\n  return (await getItems()).find((item) => item.id === id) ?? { id, name: "None" };\n}\n`,
+    "src/components/Counter.tsx": `"use client";\n\nimport { useState } from "react";\n\nexport default function Counter() {\n  const [count, setCount] = useState(0);\n  return <button onClick={() => setCount(count + 1)}>{count}</button>;\n}\n`,
+  };
+  for (const [name, text] of Object.entries(files)) {
+    const file = src || !name.startsWith("src/") ? name : name.slice("src/".length);
+    fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+    fs.writeFileSync(path.join(dir, file), text);
+  }
+  const git = (...args) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+  git("init", "-q");
+  git("add", "-A");
+  git("-c", "user.email=spec@example.com", "-c", "user.name=spec", "commit", "-qm", "fixture");
+  return dir;
+}
+
+describe.skipIf(!bin)("react-to-solid workflow with nextRoutes on a Next.js app", { tags: ["slow"] }, () => {
+  let app;
+  let run;
+  const exists = (file) => fs.existsSync(path.join(app, file));
+  beforeAll(() => {
+    app = givenNextApp();
+    run = migrate(app, ["apply=true", "nextRoutes=true"]);
+  }, 120_000);
+
+  it("moves the App Router's route files to src/routes and the root layout to src/Document.tsx", () => {
+    expect(run.output.nextjs.moved).toEqual({
+      "src/app/api/items/route.ts": "src/routes/api/items.ts",
+      "src/app/items/[id]/page.tsx": "src/routes/items/[id]/index.tsx",
+      "src/app/layout.tsx": "src/Document.tsx",
+      "src/app/page.tsx": "src/routes/index.tsx",
+    });
+    for (const [from, to] of Object.entries(run.output.nextjs.moved)) {
+      expect(exists(from)).toBe(false);
+      expect(exists(to)).toBe(true);
+    }
+    expect(read(app, "src/routes/index.tsx")).toContain(`import styles from "../app/page.module.css";`);
+    expect(read(app, "src/routes/index.tsx")).toContain(`<a href="/items/1">First item</a>`);
+    expect(read(app, "src/Document.tsx")).toContain("<HydrationScript />");
+    expect(exists("src/app/items/loading.tsx")).toBe(true);
+  });
+
+  it("loads the async page's data in a server function, read through an async memo", () => {
+    const page = read(app, "src/routes/items/[id]/index.tsx");
+    expect(page).toContain(`const loadItemPage = query(async (params: RouteProps<"/items/:id">["params"]) => {\n  "use server";`);
+    expect(page).toContain(`const data = createMemo(() => loadItemPage({ ...props.params }));\n  return <h1>{data().item.name}</h1>;`);
+    expect(run.output.flags.filter((f) => f.kind === "server component")).toEqual([]);
+  });
+
+  it("writes start mode's files: App.tsx, vite.config.ts, the segment's layout, a 404 route and the API middleware", () => {
+    expect(run.output.nextjs.created).toEqual(["src/App.tsx", "src/routes/[...404].tsx", "src/routes/items.tsx", "src/middleware.ts", "src/vite-env.d.ts", "vite.config.ts"]);
+    expect(read(app, "src/App.tsx")).toContain(`import "./app/globals.css";`);
+    expect(read(app, "src/App.tsx")).toContain(`useHead([{ tag: "title", props: { children: "Shop" } }]);`);
+    expect(read(app, "src/routes/items.tsx")).toContain(`return <Loading fallback={<SegmentLoading />}>{props.children}</Loading>;`);
+    expect(read(app, "vite.config.ts")).toContain("resolve: { tsconfigPaths: true },");
+    expect(read(app, "src/routes/api/items.ts")).toContain("export const GET: APIHandler = (event) => nextGET();");
+    expect(read(app, "public/favicon.ico")).toBe("icon");
+    expect(exists("src/app/favicon.ico")).toBe(false);
+  });
+
+  it("moves package.json to start mode, and flags what next.config.ts sets", () => {
+    const pkg = JSON.parse(read(app, "package.json"));
+    expect(pkg.scripts).toEqual({ dev: "vite", build: "vite build", start: "node dist/server/node.js" });
+    expect(pkg.dependencies).toEqual({ "@solidjs/router": "^2.0.0", "@solidjs/web": "^2.0.3", "solid-js": "^2.0.3" });
+    expect(Object.keys(pkg.devDependencies)).toEqual(["@solidjs/vite-plugin", "filesystem-routing", "typescript", "vite"]);
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "next.config.ts", detail: expect.stringMatching(/^next.config.ts sets images, which Next.js applied/) }));
+  });
+
+  it("lints the moved and written files where they are", () => {
+    expect(run.output.lint).toMatchObject({ parseErrors: 0 });
+    // the 7 converted files, and App.tsx, the 404 route, the segment layout and the middleware
+    expect(run.output.lint.files).toBe(11);
+    expect(run.output.failures).toEqual([]);
+  });
+});
+
+describe.skipIf(!bin)("react-to-solid workflow with nextRoutes on a Next.js app without src/", { tags: ["slow"] }, () => {
+  let app;
+  let run;
+  const exists = (file) => fs.existsSync(path.join(app, file));
+  beforeAll(() => {
+    app = givenNextApp({ src: false });
+    run = migrate(app, ["apply=true", "nextRoutes=true"]);
+  }, 120_000);
+
+  it("converts from the root, moving only the route files into src/", () => {
+    expect(run.output.nextjs.moved).toEqual({
+      "app/api/items/route.ts": "src/routes/api/items.ts",
+      "app/items/[id]/page.tsx": "src/routes/items/[id]/index.tsx",
+      "app/layout.tsx": "src/Document.tsx",
+      "app/page.tsx": "src/routes/index.tsx",
+    });
+    expect(exists("app/layout.tsx")).toBe(false);
+    expect(read(app, "components/Counter.tsx")).toContain("createSignal(0)");
+    expect(read(app, "lib/items.ts")).toContain("export async function getItems()");
+    expect(read(app, "app/items/loading.tsx")).toContain("Loading…");
+    expect(read(app, "next.config.ts")).toContain("images: { remotePatterns: [] }");
+  });
+
+  it("re-points the moved files' relative imports and keeps the @/ ones, which vite.config.ts resolves", () => {
+    expect(read(app, "src/routes/index.tsx")).toContain(`import styles from "../../app/page.module.css";`);
+    expect(read(app, "src/routes/index.tsx")).toContain(`import Counter from "@/components/Counter";`);
+    expect(read(app, "src/routes/items/[id]/index.tsx")).toContain(`import { getItem } from "@/lib/items";`);
+    expect(read(app, "src/App.tsx")).toContain(`import "../app/globals.css";`);
+    expect(read(app, "src/routes/items.tsx")).toContain(`import SegmentLoading from "../../app/items/loading";`);
+    expect(read(app, "vite.config.ts")).toContain("resolve: { tsconfigPaths: true },");
+  });
+
+  it("writes start mode's files in src/, and moves the favicon to public/", () => {
+    expect(run.output.nextjs.created).toEqual(["src/App.tsx", "src/routes/[...404].tsx", "src/routes/items.tsx", "src/middleware.ts", "src/vite-env.d.ts", "vite.config.ts"]);
+    expect(read(app, "public/favicon.ico")).toBe("icon");
+    expect(run.output.lint).toMatchObject({ files: 11, parseErrors: 0 });
+    expect(run.output.failures).toEqual([]);
+  });
+});
+
+describe.skipIf(!bin)("react-to-solid workflow with nextRoutes, as a preview or without an App Router", { tags: ["slow"] }, () => {
+  it("previews the moves and the files it would write, and writes nothing", () => {
+    const app = givenNextApp();
+    const run = migrate(app, ["nextRoutes=true"]);
+    expect(run.output.preview).toBe(true);
+    expect(run.output.nextjs.moved["src/app/page.tsx"]).toBe("src/routes/index.tsx");
+    expect(run.output.nextjs.created).toContain("vite.config.ts");
+    expect(fs.existsSync(path.join(app, "src/routes"))).toBe(false);
+    expect(fs.existsSync(path.join(app, "vite.config.ts"))).toBe(false);
+  });
+
+  it("moves nothing when the App Router isn't at src/app, and says why", () => {
+    const app = givenApp((dir) => fs.mkdirSync(path.join(dir, "app")));
+    const run = migrate(app, ["apply=true", "nextRoutes=true"]);
+    expect(run.output.nextjs).toBeUndefined();
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "src", kind: "Next.js route", detail: expect.stringMatching(/^no App Router at src\/app$/) }));
+  });
+});
+
 describe.skipIf(!bin)("react-to-solid workflow on one app of a monorepo", { tags: ["slow"] }, () => {
   let repo;
   let run;
@@ -314,5 +465,12 @@ describe.skipIf(!bin)("react-to-solid workflow as codemod publish bundles it", {
     for (const file of ["src/App.tsx", "src/components/TodoList.tsx", "src/components/ThemeContext.tsx", "src/hooks/useFilter.ts"]) {
       expect(read(bundled, file)).toBe(read(unbundled, file));
     }
-  }, 240_000);
+    // nextRoutes runs src/nextjs.mjs in its steps and callbacks too.
+    const [plainNext, bundledNext] = [givenNextApp(), givenNextApp()];
+    migrate(plainNext, ["apply=true", "nextRoutes=true"]);
+    expect(migrate(bundledNext, ["apply=true", "nextRoutes=true"], path.join(pkg, "src/workflow.ts")).status).toBe("succeeded");
+    for (const file of ["src/App.tsx", "src/Document.tsx", "src/routes/items/[id]/index.tsx", "src/routes/items.tsx", "vite.config.ts", "package.json"]) {
+      expect(read(bundledNext, file)).toBe(read(plainNext, file));
+    }
+  }, 360_000);
 });

@@ -73,8 +73,10 @@ const lcfirst = (s) => s.charAt(0).toLowerCase() + s.slice(1);
 const ucfirst = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 // `ports`: the React libraries the project moves to their Solid 2 port, by name, each with its
-// PORTS entry (src/manifests.mjs); R44 points their imports at the port.
-export function transform(input, { parse, Lang, ports = {} }) {
+// PORTS entry (src/manifests.mjs); R44 points their imports at the port. `next`: set when Next.js's
+// App Router moves to Solid's file routes (R47-R54); see there. For the root layout, the result's
+// `document` holds the stylesheets and head tags that move to src/App.tsx.
+export function transform(input, { parse, Lang, ports = {}, next = null }) {
   // Offsets are per file, so the helpers that read them live in here: a module-level binding
   // that changes can't be copied into a workflow callback once the package is bundled.
   // Edits are { start, end, text } or { start, end, wrap(innerText) }. Nested edits are applied
@@ -257,6 +259,326 @@ export function transform(input, { parse, Lang, ports = {} }) {
     for (let i = 2; new RegExp(`\\b${n}\\b`).test(src) || taken.includes(n); i++) n = `${base}${i}`;
     return n;
   };
+
+  // R47-R54 Next.js, with nextRoutes on (`next` is set): what @solidjs/vite-plugin's start mode and
+  // @solidjs/router's file routes have a counterpart for, before the React rules run. `next.kind` is
+  // the App Router file this is (page, layout, document for the root layout, route, not-found) or
+  // null for any other file; `next.pattern` is its route's path in the router's pattern language,
+  // `next.key` the file it came from, and `next.wrap` the loading and error components a layout
+  // wraps its children in, as import specifiers from where the layout now lives.
+  const routerNames = new Set();
+  const routerTypes = new Set();
+  let document = null;
+  if (next) {
+    // R47 next/link's <Link> -> <a>: @solidjs/router intercepts plain anchors, and reads `replace`
+    // and `noscroll` off them. An object href or Link's legacy props stay, flagged.
+    const link = src.match(/^import\s+([\w$]+)\s+from\s+["']next\/link["'];?[ \t]*\n/m);
+    if (link) {
+      let left = 0;
+      pass((root) =>
+        root.findAll({ rule: { any: [{ kind: "jsx_opening_element" }, { kind: "jsx_self_closing_element" }], has: { field: "name", regex: `^${link[1]}$` } } }).flatMap((open) => {
+          const attrs = open.children().filter((c) => c.kind() === "jsx_attribute");
+          const blocker = attrs.find((a) => ["legacyBehavior", "passHref", "as", "locale", "shallow", "onNavigate"].includes(attrName(a)) || (attrName(a) === "href" && attrValue(a)?.kind() === "object"));
+          if (blocker) {
+            left++;
+            flag("Next.js", open, `<${link[1]} ${attrName(blocker)}${attrName(blocker) === "href" ? "={{...}}" : ""}> has no <a> counterpart: build the URL as a string (or with the router's paths) and use <a href>`);
+            return [];
+          }
+          const edits = [rep(open.field("name"), "a")];
+          for (const a of attrs) {
+            if (attrName(a) === "prefetch") edits.push(dropAttr(a));
+            else if (attrName(a) === "scroll") edits.push(attrValue(a)?.text() === "false" ? rep(a, "noscroll") : dropAttr(a));
+          }
+          const close = open.kind() === "jsx_opening_element" ? open.parent()?.children().find((c) => c.kind() === "jsx_closing_element") : null;
+          if (close) edits.push(rep(close, "</a>"));
+          note("next/link <Link> -> <a>");
+          return edits;
+        }),
+      );
+      if (!left) src = src.replace(link[0], "");
+    }
+
+    // R48 next/image's <Image> -> <img>, lazy and async-decoded as Next.js renders it; `priority`
+    // (and Next 16's `preload`) becomes fetchpriority="high". `quality` and `unoptimized` only meant
+    // something to Next.js's image optimizer. `fill`, placeholders, loaders and spreads stay, flagged.
+    const image = src.match(/^import\s+([\w$]+)\s+from\s+["']next\/image["'];?[ \t]*\n/m);
+    if (image) {
+      let left = 0;
+      const kept = new Set(["src", "alt", "width", "height", "className", "style", "id", "title", "sizes", "srcSet", "loading", "decoding", "onLoad", "onError", "draggable", "crossOrigin", "referrerPolicy", "fetchPriority"]);
+      pass((root) =>
+        root.findAll({ rule: { any: [{ kind: "jsx_opening_element" }, { kind: "jsx_self_closing_element" }], has: { field: "name", regex: `^${image[1]}$` } } }).flatMap((open) => {
+          const attrs = open.children().filter((c) => c.kind() === "jsx_attribute");
+          const blocker = attrs.find((a) => !kept.has(attrName(a)) && !["priority", "preload", "quality", "unoptimized"].includes(attrName(a)));
+          if (blocker || open.children().some((c) => c.kind() === "jsx_expression")) {
+            left++;
+            flag("Next.js", open, `<${image[1]}> with ${blocker ? attrName(blocker) : "a spread"}: write the <img> by hand (Next.js's image optimizer has no Solid counterpart)`);
+            return [];
+          }
+          const eager = attrs.some((a) => ["priority", "preload"].includes(attrName(a)) && attrValue(a)?.text() !== "false");
+          const dropped = attrs.filter((a) => ["priority", "preload", "quality", "unoptimized"].includes(attrName(a)));
+          const has = (n) => attrs.some((a) => attrName(a) === n);
+          const added = [eager ? 'fetchpriority="high"' : has("loading") ? "" : 'loading="lazy"', has("decoding") ? "" : 'decoding="async"'].filter(Boolean);
+          // After the last attribute that stays (as part of its edit: a dropped one after it takes
+          // the line break an insert there would sit on), on lines of their own when the tag has them.
+          const last = attrs.filter((a) => !dropped.includes(a)).at(-1) ?? open.field("name");
+          const sep = open.text().includes("\n") && last.kind() === "jsx_attribute" ? `\n${" ".repeat(last.range().start.column)}` : " ";
+          const tail = added.length ? `${sep}${added.join(sep)}` : "";
+          const edits = [rep(open.field("name"), `img${last.kind() === "jsx_attribute" ? "" : tail}`), ...dropped.map(dropAttr), ...(last.kind() === "jsx_attribute" && tail ? [rep(last, `${last.text()}${tail}`)] : [])];
+          const close = open.kind() === "jsx_opening_element" ? open.parent()?.children().find((c) => c.kind() === "jsx_closing_element") : null;
+          if (close) edits.push(rep(close, "</img>"));
+          note("next/image <Image> -> <img>");
+          return edits;
+        }),
+      );
+      if (!left) src = src.replace(image[0], "");
+    }
+
+    // R49 next/dynamic's dynamic(() => import("./x")) -> lazy from solid-js, which suspends under
+    // <Loading>. Options (ssr: false, a loading component) and a picked export stay, flagged.
+    const loader = src.match(/^import\s+([\w$]+)\s+from\s+["']next\/dynamic["'];?[ \t]*\n/m);
+    if (loader) {
+      let left = 0;
+      pass((root) =>
+        root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: `^${loader[1]}$` } } }).flatMap((call) => {
+          const args = kids(call.field("arguments")).filter((a) => a.kind() !== "comment");
+          const body = args[0]?.kind() === "arrow_function" ? unparen(args[0].field("body")) : null;
+          if (args.length !== 1 || body?.kind() !== "call_expression" || body.field("function")?.text() !== "import") {
+            left++;
+            flag("Next.js", call, `${call.text().split("\n")[0]}: lazy(() => import("./x")) from solid-js loads a module's default export, under <Loading>; options such as ssr: false or loading have no counterpart`);
+            return [];
+          }
+          note("next/dynamic -> lazy");
+          return [rep(call.field("function"), "lazy")];
+        }),
+      );
+      if (!left) src = src.replace(loader[0], "");
+    }
+
+    // R50 next/font loaders set a font's class names; there is no Solid counterpart, so each
+    // declaration becomes the same shape with empty names (the code that reads them still type-checks
+    // and renders) and is flagged with what to load instead.
+    for (const m of [...src.matchAll(/^import\s+(?:([\w$]+)|\{([^}]*)\})\s+from\s+["'](next\/font\/(?:google|local))["'];?[ \t]*\n/gm)]) {
+      const loaders = m[1] ? [m[1]] : m[2].split(",").map((s) => s.trim().split(/\s+as\s+/).pop()).filter(Boolean);
+      let left = 0;
+      pass((root) =>
+        root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: `^(${loaders.join("|")})$` } } }).flatMap((call) => {
+          const decl = call.parent();
+          if (decl?.kind() !== "variable_declarator" || decl.field("name")?.kind() !== "identifier" || !decl.parent()?.parent() || decl.parent().parent().kind() !== "program") {
+            left++;
+            flag("Next.js", call, `${call.field("function").text()}() from ${m[3]}: load the font with CSS (@font-face, or a @fontsource package) instead`);
+            return [];
+          }
+          const variable = call.find({ rule: { kind: "pair", has: { field: "key", regex: "^variable$" } } })?.field("value")?.text();
+          flag("Next.js", decl, `${decl.field("name").text()} was ${call.field("function").text()} from ${m[3]}, which has no Solid counterpart: it is now an object with empty class names, so the font isn't loaded. Load it with CSS (@font-face, or a @fontsource package)${variable ? ` and set the ${variable} custom property it defined` : ""}`);
+          note("next/font loader -> empty class names");
+          return [rep(call, `{ className: "", variable: "", style: {} }`)];
+        }),
+      );
+      if (!left) src = src.replace(m[0], "");
+    }
+
+    // R51 Next.js's global route types: PageProps<"/items/[id]"> -> RouteProps<"/items/:id"> from
+    // @solidjs/router, LayoutProps<...> -> ParentProps from solid-js.
+    pass((root) =>
+      root.findAll({ rule: { kind: "generic_type", has: { field: "name", regex: "^(PageProps|LayoutProps)$" } } }).flatMap((t) => {
+        if (new RegExp(`\\b${t.field("name").text()}\\b`).test(src.match(/^import\b[^;]*;/gm)?.join("\n") ?? "")) return [];
+        if (t.field("name").text() === "LayoutProps") {
+          introduced["solid-js"].add("ParentProps");
+          note("LayoutProps -> ParentProps");
+          return [rep(t, "ParentProps")];
+        }
+        if (!next.pattern) return [];
+        routerTypes.add("RouteProps");
+        note("PageProps -> RouteProps");
+        return [rep(t, `RouteProps<${JSON.stringify(next.pattern)}>`)];
+      }),
+    );
+
+    // R52 an async page or layout of the simple shape (const declarations, which may await params,
+    // searchParams and data, then a return of JSX) -> a sync component reading one async memo. The
+    // declarations move into a query over a server function ("use server"), so they still run on the
+    // server only, as in a Server Component: during SSR it's a direct call, and on a client
+    // navigation a fetch. The memo's reads suspend under <Loading>. Anything else stays async and is
+    // flagged as a server component below.
+    if (next.kind === "page" || next.kind === "layout") {
+      pass((root) => {
+        const fn = componentFns(root, true).find((f) => f.kind() === "function_declaration" && (/^export\s+default\b/.test(f.parent()?.text() ?? "") || new RegExp(`^export\\s+default\\s+${f.field("name").text()}\\s*;?\\s*$`, "m").test(src)));
+        if (!fn) return [];
+        const allowed = next.kind === "layout" ? ["params", "children"] : ["params", "searchParams"];
+        const params = kids(fn.field("parameters"));
+        const pattern = params[0]?.field("pattern");
+        if (params.length > 1 || (params.length && (pattern?.kind() !== "object_pattern" || !kids(pattern).every((p) => p.kind() === "shorthand_property_identifier_pattern" && allowed.includes(p.text()))))) return [];
+        const statements = kids(fn.field("body")).filter((s) => s.kind() !== "comment");
+        const ret = statements.pop();
+        const view = ret?.kind() === "return_statement" ? unparen(arg(ret)) : null;
+        if (!isJsx(view) || !statements.length || !statements.every((s) => s.kind() === "lexical_declaration" && /^const\b/.test(s.text()))) return [];
+        const jsx = { any: [{ kind: "jsx_element" }, { kind: "jsx_self_closing_element" }] };
+        const names = [];
+        for (const d of statements.flatMap((s) => kids(s).filter((c) => c.kind() === "variable_declarator"))) {
+          const name = d.field("name");
+          const parts = name.kind() === "identifier" ? [name] : name.kind() === "array_pattern" ? kids(name) : name.kind() === "object_pattern" ? kids(name).map((p) => (p.kind() === "pair_pattern" ? p.field("value") : p)) : [null];
+          if (!parts.every((p) => p && ["identifier", "shorthand_property_identifier_pattern"].includes(p.kind())) || d.find({ rule: jsx })) return [];
+          names.push(...parts.map((p) => p.text()));
+        }
+        const declared = statements.map((s) => s.text()).join("\n");
+        if (/\bchildren\b/.test(declared) || readsOf(view, "params").length || readsOf(view, "searchParams").length) return [];
+        const shown = names.filter((n) => readsOf(view, n).length);
+        if (!shown.length) return [];
+        const name = fn.field("name").text();
+        const load = freeName(`load${name}`);
+        const data = freeName("data");
+        const inputs = [/\bparams\b/.test(declared) && ["params", `RouteProps<${JSON.stringify(next.pattern)}>["params"]`, "{ ...props.params }"], /\bsearchParams\b/.test(declared) && ["searchParams", "SearchParams", "{ ...props.location.query }"]].filter(Boolean);
+        const usesChildren = readsOf(view, "children").length > 0;
+        routerNames.add("query");
+        if (inputs.length || usesChildren) routerTypes.add("RouteProps");
+        if (inputs.some(([n]) => n === "searchParams")) routerTypes.add("SearchParams");
+        const body = src.slice(ix(statements[0].range().start.index), ix(statements.at(-1).range().end.index));
+        const holder = fn.parent()?.kind() === "export_statement" ? fn.parent() : fn;
+        const server = `const ${load} = query(async (${inputs.map(([n, t]) => `${n}: ${t}`).join(", ")}) => {\n  "use server";\n  ${body}\n  return { ${shown.join(", ")} };\n}, ${JSON.stringify(next.key)});\n\n`;
+        const reads = [...shown.flatMap((n) => readsOf(view, n).map((id) => readAs(id, `${data}().${n}`))), ...readsOf(view, "children").map((id) => readAs(id, "props.children"))];
+        const param = inputs.length || usesChildren ? `props: RouteProps<${JSON.stringify(next.pattern)}>` : "";
+        const memo = `const ${data} = createMemo(() => ${load}(${inputs.map(([, , v]) => v).join(", ")}));`;
+        note("async page -> query + async createMemo");
+        return [
+          { start: holder.range().start.index, end: holder.range().start.index, text: server },
+          rep(fn.field("parameters"), `(${param})`),
+          { start: fn.range().start.index, end: fn.field("name").range().start.index, text: "function " },
+          { start: statements[0].range().start.index, end: statements.at(-1).range().end.index, text: memo },
+          rep(view, textWith(view, reads)),
+        ];
+      });
+    }
+
+    // R53 a page's or layout's static metadata -> useHead from @solidjs/web, in its component. Only a
+    // string title and description convert; the root layout's go to src/App.tsx, which is generated.
+    const metadata = (root) => root.find({ rule: { kind: "export_statement", has: { kind: "lexical_declaration", has: { kind: "variable_declarator", has: { field: "name", regex: "^metadata$" } } } } });
+    const tags = (decl) => {
+      const object = unparen(decl.find({ rule: { kind: "variable_declarator" } })?.field("value"));
+      const pairs = object?.kind() === "object" ? kids(object).filter((p) => p.kind() !== "comment") : [];
+      const read = (key) => pairs.find((p) => p.kind() === "pair" && p.field("key")?.text() === key)?.field("value")?.find({ rule: { kind: "string_fragment" } })?.text();
+      const ok = pairs.length && pairs.every((p) => p.kind() === "pair" && ["title", "description"].includes(p.field("key")?.text()) && p.field("value").kind() === "string");
+      return ok ? [read("title") && { tag: "title", props: { children: read("title") } }, read("description") && { tag: "meta", props: { name: "description", content: read("description") } }].filter(Boolean) : null;
+    };
+    if (next.kind === "page" || next.kind === "layout") {
+      pass((root) => {
+        const decl = metadata(root);
+        const fn = componentFns(root).find((f) => f.kind() === "function_declaration" && (/^export\s+default\b/.test(f.parent()?.text() ?? "") || new RegExp(`^export\\s+default\\s+${f.field("name").text()}\\s*;?\\s*$`, "m").test(src)));
+        const head = decl && tags(decl);
+        if (!decl) return [];
+        if (!head || !fn) {
+          flag("Next.js", decl, `metadata: ${fn ? "only a string title and description convert" : "the component is still async"}; set the page's head with useHead from @solidjs/web in its component`);
+          return [];
+        }
+        note("metadata -> useHead");
+        const open = fn.field("body").child(0);
+        const list = head.map((t) => `{ tag: ${JSON.stringify(t.tag)}, props: { ${Object.entries(t.props).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(", ")} } }`).join(", ");
+        return [dropLine(decl, src), { start: open.range().end.index, end: open.range().end.index, text: `\n  useHead([${list}]);` }];
+      });
+    }
+    pass((root) => {
+      for (const fn of root.findAll({ rule: { kind: "function_declaration", has: { field: "name", regex: "^generateMetadata$" } } }))
+        flag("Next.js", fn, "generateMetadata has no Solid counterpart: compute the head in the component and set it with useHead from @solidjs/web (with the page's data, under the same async memo)");
+      return [];
+    });
+
+    // R54 the root layout -> the start-mode document (src/Document.tsx): it renders <html> around the
+    // app, and needs <HydrationScript /> and the meta tags Next.js added by itself in its <head>. Its
+    // stylesheet imports and metadata go to src/App.tsx (returned as `document`), because the
+    // document is server-only: it isn't hydrated, and only the app's CSS is linked.
+    if (next.kind === "document") {
+      document = { css: [], head: [] };
+      pass((root) => {
+        const edits = [];
+        const decl = metadata(root);
+        if (decl) {
+          const head = tags(decl);
+          if (head) document.head = head;
+          else flag("Next.js", decl, "the root layout's metadata: only a string title and description convert; set the rest with useHead from @solidjs/web in src/App.tsx");
+          edits.push(dropLine(decl, src));
+        }
+        for (const imp of root.findAll({ rule: { kind: "import_statement", has: { field: "source", regex: "\\.(css|scss|sass|less)[\"']$" } } })) {
+          if (imp.text().includes(" from ")) continue;
+          document.css.push(imp.field("source").text().slice(1, -1));
+          edits.push(dropLine(imp, src));
+        }
+        const html = root.find({ rule: { kind: "jsx_element", has: { kind: "jsx_opening_element", has: { field: "name", regex: "^html$" } } } });
+        const body = html && kids(html).find((c) => c.kind() === "jsx_element" && c.child(0)?.field("name")?.text() === "body");
+        if (!html || !body) {
+          flag("Next.js", html, "the root layout doesn't render <html> with a <body>: src/Document.tsx must render the whole document, with <HydrationScript /> from @solidjs/web in its <head>");
+          return edits;
+        }
+        const inside = kids(body).filter((c) => c.kind() !== "jsx_opening_element" && c.kind() !== "jsx_closing_element" && !(c.kind() === "jsx_text" && !c.text().trim()));
+        if (inside.length !== 1 || !/^\{\s*(props\.)?children\s*\}$/.test(inside[0].text()))
+          flag("Next.js", body, "the root layout renders more than {children} in <body>: src/Document.tsx is server-only (it isn't hydrated), so move providers and interactive parts around the routes into src/App.tsx's <Router> root");
+        const head = kids(html).find((c) => c.kind() === "jsx_element" && c.child(0)?.field("name")?.text() === "head");
+        const indent = " ".repeat(body.range().start.column);
+        const has = (re) => head && re.test(head.text());
+        const added = [has(/<meta\s+charSet|<meta\s+charset/i) ? "" : '<meta charset="utf-8" />', has(/name="viewport"/) ? "" : '<meta name="viewport" content="width=device-width, initial-scale=1" />', "<HydrationScript />"].filter(Boolean);
+        if (head) {
+          const close = kids(head).find((c) => c.kind() === "jsx_closing_element");
+          edits.push({ start: close.range().start.index, end: close.range().start.index, text: `  ${added.join(`\n${indent}  `)}\n${indent}` });
+        } else edits.push({ start: body.range().start.index, end: body.range().start.index, text: `<head>\n${indent}  ${added.join(`\n${indent}  `)}\n${indent}</head>\n${indent}` });
+        note("root layout -> Document");
+        return edits;
+      });
+    }
+
+    // A layout whose segment has a loading.tsx or error.tsx wraps its children in <Errored> and
+    // <Loading>, where Next.js put its error boundary and Suspense.
+    if (next.kind === "layout" && next.wrap) {
+      pass((root) => {
+        const fn = componentFns(root).find((f) => f.kind() === "function_declaration" && (/^export\s+default\b/.test(f.parent()?.text() ?? "") || new RegExp(`^export\\s+default\\s+${f.field("name").text()}\\s*;?\\s*$`, "m").test(src)));
+        const slots = fn ? fn.findAll({ rule: { kind: "jsx_expression", regex: "^\\{\\s*(props\\.)?children\\s*\\}$" } }) : [];
+        if (slots.length !== 1) {
+          flag("Next.js", fn, `this segment's ${[next.wrap.loading && "loading.tsx", next.wrap.error && "error.tsx"].filter(Boolean).join(" and ")} wrapped its pages: put {children} in <Errored fallback={(err, reset) => ...}> and <Loading fallback={...}> by hand`);
+          return [];
+        }
+        const loading = next.wrap.loading ? `<Loading fallback={<SegmentLoading />}>${slots[0].text()}</Loading>` : slots[0].text();
+        const wrapped = next.wrap.error ? `<Errored fallback={(err, reset) => { const error = err(); return <SegmentError error={error instanceof Error ? error : new Error(String(error))} reset={reset} />; }}>${loading}</Errored>` : loading;
+        const imports = [next.wrap.loading && `import SegmentLoading from ${JSON.stringify(next.wrap.loading)};\n`, next.wrap.error && `import SegmentError from ${JSON.stringify(next.wrap.error)};\n`].filter(Boolean).join("");
+        const last = root.findAll({ rule: { kind: "import_statement" } }).at(-1);
+        note("loading.tsx/error.tsx -> <Loading>/<Errored>");
+        return [rep(slots[0], wrapped), { start: last ? last.range().end.index : 0, end: last ? last.range().end.index : 0, text: last ? `\n${imports.trimEnd()}` : imports }];
+      });
+    }
+
+    // The root not-found.tsx is the catch-all route ([...404].tsx): it answers 404 during SSR.
+    if (next.kind === "not-found") {
+      pass((root) => {
+        const last = root.findAll({ rule: { kind: "import_statement" } }).at(-1);
+        const at = last ? last.range().end.index : 0;
+        note("not-found -> [...404] route");
+        return [{ start: at, end: at, text: `${last ? "\n\n" : ""}export const route = { preload: () => httpStatus(404) };${last ? "" : "\n\n"}` }];
+      });
+    }
+
+    // A route handler (route.ts) -> an API route of filesystem-routing, which calls each method
+    // export with an event: the Next.js handler is kept under another name and called with the
+    // request, and with the params when it takes them (Next.js passes them as a promise).
+    if (next.kind === "route") {
+      pass((root) => {
+        const edits = [];
+        for (const fn of root.findAll({ rule: { kind: "function_declaration", has: { field: "name", regex: "^(GET|HEAD|POST|PUT|DELETE|PATCH|OPTIONS)$" }, inside: { kind: "export_statement" } } })) {
+          const method = fn.field("name").text();
+          const exp = fn.parent();
+          const arity = kids(fn.field("parameters")).length;
+          // A lowercase name: it isn't a component.
+          const call = `next${method}(${arity === 0 ? "" : arity === 1 ? "event.request" : "event.request, { params: Promise.resolve(event.params ?? {}) }"})`;
+          if (arity > 1) flag("Next.js", fn, `${method} takes the route's params: they come from event.params, typed Record<string, string> (Next.js typed them from the folder names)`);
+          edits.push({ start: exp.range().start.index, end: fn.field("name").range().end.index, text: `${fn.text().startsWith("async") ? "async " : ""}function next${method}` });
+          // `event` even when unused: R31 moves a zero-parameter arrow's type to its return.
+          edits.push({ start: exp.range().end.index, end: exp.range().end.index, text: `\n\nexport const ${method}: APIHandler = (event) => ${call};` });
+          note("route handler -> API route");
+        }
+        if (edits.length) edits.push({ start: 0, end: 0, text: `import type { APIHandler } from "filesystem-routing/api";\n` });
+        for (const res of root.findAll({ rule: { kind: "member_expression", regex: "^NextResponse\\.json$" } })) edits.push(rep(res, "Response.json"));
+        return edits;
+      });
+      if (!/\bNextResponse\b/.test(src.replace(/^import\b[^;]*;/gm, ""))) src = src.replace(/^import\s+\{\s*NextResponse\s*\}\s+from\s+["']next\/server["'];?[ \t]*\n/m, "");
+    }
+    // Next.js's Metadata type goes with the metadata export it typed (R53, R54).
+    if (!/\bMetadata\b/.test(src.replace(/^import\b[^;]*;/gm, ""))) src = src.replace(/^import\s+type\s+\{\s*Metadata\s*\}\s+from\s+["']next["'];?[ \t]*\n/m, "");
+  }
 
   // R7 {arr.map((x) => <JSX/>)} -> <For>, keyed the way React keyed it (R22), index reads as accessor
   // calls. Derived values in the callback become accessors in a late pass (R23).
@@ -1670,8 +1992,8 @@ export function transform(input, { parse, Lang, ports = {} }) {
     if (/\(\s*(undefined)?\s*\)$/.test(c.text())) flag("context default", c, "Solid 2: undefined default means 'no provider' and throws; use null for optional");
   for (const c of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^use[A-Z]\\w*$" } } }))
     // React's own hooks left over are flagged once, as React APIs (R10). A hook under test in
-    // renderHook is read through its result (R46).
-    if (!/^use(Context|State|Memo|Callback|Effect|LayoutEffect|Ref)$/.test(c.field("function").text()) && !fromReact.has(c.field("function").text()) && !c.ancestors().some((a) => a.kind() === "call_expression" && a.field("function")?.text() === testing.renderHook)) flag("custom hook call", c, `${c.field("function").text()}() returns values in React; decide value vs accessor`);
+    // renderHook is read through its result (R46). R53's useHead is @solidjs/web's.
+    if (!/^use(Context|State|Memo|Callback|Effect|LayoutEffect|Ref)$/.test(c.field("function").text()) && !fromReact.has(c.field("function").text()) && !c.ancestors().some((a) => a.kind() === "call_expression" && a.field("function")?.text() === testing.renderHook) && !(next && c.field("function").text() === "useHead")) flag("custom hook call", c, `${c.field("function").text()}() returns values in React; decide value vs accessor`);
 
   // R44 a library whose Solid 2 port exports its names (`lacks` lists the ones it doesn't) is
   // imported from the port, so the code matches the package.json the run writes (or, for a catalog
@@ -1729,11 +2051,12 @@ export function transform(input, { parse, Lang, ports = {} }) {
   // second import of one would be a duplicate identifier.
   const have = new Set([...src.matchAll(/^import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["'](?:solid-js|@solidjs\/web)["']/gm)].flatMap((m) => m[1].split(",").map((s) => s.trim().replace(/^type\s+/, "").split(/\s+as\s+/).pop()).filter(Boolean)));
   const solidNames = [
-    ...["createSignal", "createMemo", "createContext", "useContext", "createEffect", "onSettled", "merge", "omit", "For", "createUniqueId", "lazy"].filter((n) => used(new RegExp(`\\b${n}\\b`))).filter((n) => !have.has(n)).filter(free((n) => new RegExp(`\\b${n}\\b`))),
-    ...["Show", "Switch", "Match", "Loading"].filter((n) => used(new RegExp(`<${n}\\b`))).filter((n) => !have.has(n)).filter(free((n) => new RegExp(`<${n}\\b`))),
+    // `lazy` by its call: loading="lazy" (R48's <img>) isn't a use.
+    ...["createSignal", "createMemo", "createContext", "useContext", "createEffect", "onSettled", "merge", "omit", "For", "createUniqueId", "lazy"].filter((n) => used(new RegExp(n === "lazy" ? "\\blazy\\(" : `\\b${n}\\b`))).filter((n) => !have.has(n)).filter(free((n) => new RegExp(`\\b${n}\\b`))),
+    ...["Show", "Switch", "Match", "Loading", ...(next ? ["Errored"] : [])].filter((n) => used(new RegExp(`<${n}\\b`))).filter((n) => !have.has(n)).filter(free((n) => new RegExp(`<${n}\\b`))),
     ...["untrack", "flush"].filter((n) => used(new RegExp(`\\b${n}\\(`))).filter((n) => !have.has(n)).filter(free((n) => new RegExp(`\\b${n}\\(`))),
   ];
-  const webNames = [...(renders ? ["render"] : []), ...["Portal"].filter((n) => used(new RegExp(`<${n}\\b`))), ...["dynamic"].filter((n) => used(new RegExp(`\\b${n}\\(`)))].filter((n) => !have.has(n)).filter(free((n) => new RegExp(n === "Portal" ? "<Portal\\b" : `\\b${n}\\(`)));
+  const webNames = [...(renders ? ["render"] : []), ...["Portal", ...(next ? ["HydrationScript"] : [])].filter((n) => used(new RegExp(`<${n}\\b`))), ...["dynamic", ...(next ? ["useHead", "httpStatus"] : [])].filter((n) => used(new RegExp(`\\b${n}\\(`)))].filter((n) => !have.has(n)).filter(free((n) => new RegExp(/^[A-Z]/.test(n) ? `<${n}\\b` : `\\b${n}\\(`)));
   const webTypes = [...new Set([...["JSX", "ComponentProps"].filter((n) => used(new RegExp(`\\b${n}\\b`))), ...introduced["@solidjs/web"]])].filter((n) => !have.has(n)).filter(free((n) => new RegExp(`\\b${n}\\b`)));
   // `extends Component<P, S>` is React's class (R39), not Solid's Component type.
   const solidTypes = [...new Set([...["Component", "Setter"].filter((n) => new RegExp(`\\b${n}<`).test(code.replace(/\bextends\s+Component</g, ""))), ...introduced["solid-js"]])].filter((n) => !have.has(n)).filter(free((n) => new RegExp(`\\b${n}\\b`)));
@@ -1742,13 +2065,17 @@ export function transform(input, { parse, Lang, ports = {} }) {
   src = src.replace(/^import\s+\{\s*flushSync\s*\}\s+from\s+["']react-dom["'];?[ \t]*\n/gm, "");
   // New names join the file's own import from that module when it has one.
   const lines = [];
-  for (const [module, type, names] of [["solid-js", false, solidNames], ["solid-js", true, solidTypes], ["@solidjs/web", false, webNames], ["@solidjs/web", true, webTypes]]) {
+  // R52 and R51's names from @solidjs/router, when the code still uses them.
+  const fromRouter = (names) => [...names].filter((n) => used(new RegExp(`\\b${n}\\b`)) && !new RegExp(`\\b${n}\\b`).test(elsewhere));
+  for (const [module, type, names] of [["solid-js", false, solidNames], ["solid-js", true, solidTypes], ["@solidjs/web", false, webNames], ["@solidjs/web", true, webTypes], ["@solidjs/router", false, fromRouter(routerNames)], ["@solidjs/router", true, fromRouter(routerTypes)]]) {
     if (!names.length) continue;
     const existing = new RegExp(`^import\\s+${type ? "type\\s+" : ""}\\{([^}]*)\\}\\s*from\\s*["']${module.replace("/", "\\/")}["']`, "m");
     if (existing.test(src)) src = src.replace(existing, (m, list) => m.replace(`{${list}}`, () => `{ ${[...list.split(",").map((s) => s.trim()).filter(Boolean), ...names].join(", ")} }`));
     else lines.push(`import ${type ? "type " : ""}{ ${names.join(", ")} } from "${module}";`);
   }
   if (lines.length) src = src.replace(/^(["']use client["'];\n\n?)?/, (m) => `${m}${lines.join("\n")}\n`);
+  // The Next.js imports removed above can leave the file starting with a blank line.
+  if (next) src = src.replace(/^\n+/, "");
   if (removedReact) note("react imports -> solid-js");
   src = src.replace(/^["']use client["'];\n\n?/m, () => { note("drop 'use client'"); return ""; });
   // The React Compiler's own directives mean nothing to Solid.
@@ -1777,6 +2104,6 @@ export function transform(input, { parse, Lang, ports = {} }) {
   for (const [name, detail] of leftover) flags.push({ kind: "React API", line: sourceLines.findIndex((l) => !/^\s*(import\b|\/\/)/.test(l) && new RegExp(`(^|[^.\\w$])${name}\\b`).test(l)) + 1, detail });
   if (/\bReact\.\w+/.test(src)) flag("React namespace", null, [...new Set(src.match(/\bReact\.\w+/g))].join(", "));
 
-  return { code: src, applied, flags };
+  return { code: src, applied, flags, ...(document ? { document } : {}) };
 }
 

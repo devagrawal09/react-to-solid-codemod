@@ -101,7 +101,13 @@ export const NO_PORT = {
 // React-only packages the converted app no longer needs.
 const REMOVED = new Set(["@types/react", "@types/react-dom", "babel-plugin-react-compiler"]);
 // Left in place: removing them breaks the lint config that loads them.
-const LINT_PLUGINS = new Set(["eslint-plugin-react", "eslint-plugin-react-hooks", "eslint-plugin-react-refresh"]);
+const LINT_PLUGINS = new Set(["eslint-plugin-react", "eslint-plugin-react-hooks", "eslint-plugin-react-refresh", "eslint-config-next"]);
+// What a Next.js app moved to file routes (nextRoutes) runs on instead of next: the router in
+// dependencies, the build in devDependencies, as solidjs/templates' solid-v2/fullstack has them.
+const NEXT_ROUTES = { dependencies: [["@solidjs/router", "^2.0.0"]], devDependencies: [["@solidjs/vite-plugin", "^3.0.1"], ["filesystem-routing", "^0.5.0"], ["vite", `^${VITE}`]] };
+// next's commands -> start mode's: `vite` serves and `vite build` builds both bundles; the build
+// writes dist/server/node.js (start.nodeServer), which serves the app on PORT, 3000 by default.
+const NEXT_SCRIPTS = { dev: "vite", build: "vite build", start: "node dist/server/node.js" };
 
 // A JSONC value with string indexes: { start, end }, plus `entries` for an object or array. An
 // entry has its own start and end, the object key if any, its value, and the index of the comma
@@ -216,8 +222,9 @@ export function reactPeers(path, text) {
 // package.json: React packages out, their Solid 2 ports in, each dependency list rewritten in its
 // own order with new names inserted alphabetically. A `catalog:` or `workspace:` range is defined
 // elsewhere, so it's reported instead. `peers` (from reactPeers) says which other packages depend
-// on React; without it, a name with "react" in it does.
-export function migratePackageJson(text, peers = null) {
+// on React; without it, a name with "react" in it does. With `next` (nextRoutes), next goes too, the
+// router and start mode's build come in (NEXT_ROUTES), and the scripts that run next run Vite.
+export function migratePackageJson(text, peers = null, { next = false } = {}) {
   const changes = [];
   const flags = [];
   const root = parseJsonc(text);
@@ -232,6 +239,11 @@ export function migratePackageJson(text, peers = null) {
       const range = JSON.parse(text.slice(e.value.start, e.value.end));
       const port = PORTS[e.key];
       const elsewhere = /^(catalog|workspace):/.test(range);
+      if (next && e.key === "next" && !elsewhere) {
+        changes.push("removed next: @solidjs/vite-plugin's start mode serves and builds the app");
+        changed = true;
+        continue;
+      }
       if (REMOVED.has(e.key) && !elsewhere) {
         changes.push(`removed ${e.key}`);
         changed = true;
@@ -261,6 +273,15 @@ export function migratePackageJson(text, peers = null) {
         changes.push(`added ${name}@^${SOLID}`);
         changed = true;
       }
+    }
+    // Build tools go in devDependencies, or in dependencies when there are none.
+    const nextAdds = !next ? [] : pair.key === "dependencies" ? [...NEXT_ROUTES.dependencies, ...(sections.some((p) => p.key === "devDependencies") ? [] : NEXT_ROUTES.devDependencies)] : NEXT_ROUTES.devDependencies;
+    for (const [name, spec] of nextAdds) {
+      if (present.has(name)) continue;
+      present.add(name);
+      added.push([name, JSON.stringify(spec)]);
+      changes.push(`added ${name}@${spec}`);
+      changed = true;
     }
     // @solidjs/vite-plugin needs Vite 8 or 9.
     const vite = kept.find(([name]) => name === "vite");
@@ -293,6 +314,21 @@ export function migratePackageJson(text, peers = null) {
     const body = !pairs.length ? "{}" : /^\s*$/.test(inner) && /^\s*$/.test(outer) ? `{\n${pairs.map((p) => inner + p).join(",\n")}\n${outer}}` : `{ ${pairs.join(", ")} }`;
     edits.push({ start: object.start, end: object.end, text: body });
   }
+  // `next dev`, `next build` and `next start` (with or without Turbopack) -> NEXT_SCRIPTS; any other
+  // next command, or one with options, is flagged.
+  for (const e of (next && root.entries?.find((s) => s.key === "scripts")?.value.entries) || []) {
+    const command = JSON.parse(text.slice(e.value.start, e.value.end));
+    if (typeof command !== "string") continue;
+    const swapped = command.replace(/(^|[\s;&|])next (dev|build|start)(?: --turbo(?:pack)?)?(?=\s*($|&&|\|\||;))/g, (_, lead, cmd) => `${lead}${NEXT_SCRIPTS[cmd]}`);
+    if (swapped !== command) {
+      edits.push({ start: e.value.start, end: e.value.end, text: JSON.stringify(swapped) });
+      changes.push(`scripts.${e.key}: ${command} -> ${swapped}`);
+    }
+    if (/(^|[\s;&|])next(\s|$)/.test(swapped)) flags.push({ kind: "dependency", detail: `scripts.${e.key} runs "${swapped}", and next is gone: run Vite instead (vite, vite build, vite preview), or remove it` });
+  }
+  // Next.js didn't need it; Vite and the built server are ES modules, which Node and Vite then
+  // detect by reparsing, with a warning. Not added: a CommonJS .js config in the package would break.
+  if (next && !root.entries?.some((e) => e.key === "type")) flags.push({ kind: "build config", detail: `package.json has no "type": "module": vite.config.ts and dist/server/node.js are ES modules, which Vite and Node reparse with a warning. Add it once no .js file in the package uses require or module.exports` });
   const out = edits.sort((a, b) => b.start - a.start).reduce((t, e) => t.slice(0, e.start) + e.text + t.slice(e.end), text);
   return { text: out, changes, flags };
 }

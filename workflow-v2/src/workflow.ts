@@ -12,20 +12,35 @@
 // 4. Project: package.json, tsconfig and the Vite config move to Solid 2 (no install).
 // 5. Verify: eslint-plugin-solid's Solid 2 config on the migrated files.
 // 6. Optionally hand the flagged spots to an agent, after an approval.
+//
+// With --param nextRoutes=true, a Next.js App Router (src/app, or app/ at the package root) also
+// moves to Solid's file routes (src/nextjs.mjs): route files go to src/routes, the root layout
+// becomes src/Document.tsx, and start mode's files (src/App.tsx, vite.config.ts, ...) are written.
 import { step, forEachFile, shell, agent, approval, branch, commit } from "codemod/workflow";
 import { parse } from "codemod/ast-grep";
 import { applyContracts, decide, extract, rewrite } from "./lib/reactivity.mjs";
 import { transform } from "./rules/mechanical.mjs";
 import { NO_PORT, PORTS, migratePackageJson, migrateTsconfig, migrateViteConfig, reactPeers } from "./manifests.mjs";
+import { moveImports, nextAppFiles, nextConfigKeys, planNextRoutes } from "./nextjs.mjs";
 
 const NOT_SHIPPED = /^(@types\/|babel-plugin-react-compiler$|eslint-plugin-react|typescript$)/;
 
-export default async function main({ params }: { params: { include?: string; apply?: boolean | string; agent?: boolean | string } }) {
+export default async function main({ params }: { params: { include?: string; apply?: boolean | string; agent?: boolean | string; nextRoutes?: boolean | string } }) {
   // --param values arrive as JSON when they parse as JSON, so true is a boolean.
   const apply = params.apply === true || params.apply === "true";
-  const root = (params.include ?? "src").replace(/\/$/, "");
+  const nextRoutes = params.nextRoutes === true || params.nextRoutes === "true";
+  // nextRoutes without include: a Next.js app with app/ at its root (create-next-app without
+  // --src-dir) is converted from the root, where its components/ and lib/ are too.
+  const rootApp = nextRoutes && params.include === undefined
+    ? (await step("Find the App Router", forEachFile(["app/layout.tsx", "app/layout.jsx", "app/layout.ts", "app/layout.js", "src/app/layout.tsx", "src/app/layout.jsx"], (file) => file.path))).outputs
+    : [];
+  const fallback = rootApp.some((f) => f.startsWith("app/")) && !rootApp.some((f) => f.startsWith("src/")) ? "." : "src";
+  // "" is the target's root (include=.).
+  const root = (params.include ?? fallback).replace(/\/$/, "").replace(/^\.$/, "");
+  const at = root ? `${root}/` : "";
   // Test files too: the rule pass converts @testing-library/react's API to @solidjs/testing-library's.
-  const sources = { include: [`${root}/**/*.tsx`, `${root}/**/*.ts`], exclude: ["**/*.d.ts"] };
+  // From the root, the config files (next.config.ts, ...) and build output aren't app code.
+  const sources = { include: [`${at}**/*.tsx`, `${at}**/*.ts`], exclude: ["**/*.d.ts", ...(root ? [] : ["*.config.*", "**/node_modules/**", ".next/**", "dist/**"])] };
 
   const manifests = await step("Read package.json files", forEachFile("**/package.json", (file) => {
     const pkg = JSON.parse(file.text);
@@ -79,24 +94,45 @@ export default async function main({ params }: { params: { include?: string; app
     applyContracts(results);
     return Object.fromEntries(files.map((file, i) => [file, results[i]]));
   });
+  // nextRoutes: where each App Router file goes. The App Router is the package's src/app (converted
+  // from src/) or its app/ (converted from the package root); either way the routes go to src/routes
+  // and start mode's files to src/, where start mode and filesystem-routing look by default.
+  const owner = plan.manifest.replace(/\/?package\.json$/, "");
+  const routing = !nextRoutes ? null : await step("Plan the Next.js routes", () => {
+    const pkg = owner ? `${owner}/` : "";
+    const src = `${pkg}src`;
+    const fail = (detail: string) => ({ routes: null, flags: [{ file: root || ".", line: 0, kind: "Next.js route", detail }] });
+    if (root !== src && root !== owner) return fail(`nextRoutes moves the App Router at ${src}/app or ${pkg}app, and converts from ${src} or the package's root; ${root || "."} is neither: run it with include=${src} or include=${owner || "."}`);
+    const app = `${root ? `${root}/` : ""}app`;
+    if (!files.some((f) => f.startsWith(`${app}/`))) return fail(`no App Router at ${app}`);
+    const routes = planNextRoutes(files, { app, src });
+    const middleware = files.filter((f) => [`${pkg}middleware.ts`, `${pkg}proxy.ts`, `${src}/middleware.ts`, `${src}/proxy.ts`].includes(f));
+    return { routes, flags: [...routes.flags, ...middleware.map((file) => ({ file, line: 0, kind: "Next.js route", detail: "Next.js middleware: port it to a start-mode middleware, (event, next) => Response, listed in start.middleware in vite.config.ts" }))] };
+  });
+  const routes = routing?.routes ?? null;
+  const moves: Record<string, string> = routes ? Object.fromEntries(Object.entries(routes.entries).map(([file, entry]) => [file, entry.to])) : {};
   // One pass per file: the compiler's decisions, then the rules on that text. A preview
-  // stops before writing.
+  // stops before writing. With nextRoutes, a route file moves where the plan says, its relative
+  // imports re-pointed from there.
   const converted = await step(apply ? "Convert each file to Solid 2" : "Preview the conversion of each file", forEachFile(sources, (file) => {
     const result = decided[file.path];
+    const route = routes?.entries[file.path] ?? null;
     let code = file.text;
     if (result && !result.parseError) {
       // The rewrite adds its own createMemo import; the rule pass writes the full solid-js import.
       code = rewrite(code, result).code.replace(/^import \{ createMemo \} from "solid-js";\n/m, "");
     }
-    const { code: out, applied, flags } = transform(code, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" }, ports });
+    if (route) code = moveImports(code, file.path, route.to, moves);
+    const next = !routes ? null : { kind: route?.kind ?? null, pattern: route?.pattern ?? null, key: route?.key ?? null, wrap: route?.wrap ?? null };
+    const { code: out, applied, flags, document } = transform(code, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" }, ports, next });
     const changed = out !== file.text;
     if (apply && changed) file.write(out);
-    return { file: file.path, changed, applied, flags };
+    if (apply && route) file.rename(route.to);
+    return { file: file.path, changed, applied, flags, to: route?.to ?? null, document: document ?? null };
   }));
   // The package that owns the converted directory moves to Solid 2: its package.json, the
   // tsconfig files between it and the directory, and its Vite config. A package.json or tsconfig
   // above it is shared with the rest of the workspace, so what would change there is reported.
-  const owner = plan.manifest.replace(/\/?package\.json$/, "");
   // The other workspace packages that depend on React, which this run doesn't convert.
   const reactPackages = manifests.outputs.map((m) => ({ dir: m.path.replace(/\/?package\.json$/, ""), react: "react" in m.deps })).filter((m) => m.react && !(m.dir === "" || root === m.dir || root.startsWith(`${m.dir}/`))).map((m) => m.dir);
   const configs = await step(apply ? "Move package.json, tsconfig and the Vite config to Solid 2" : "Preview the package.json, tsconfig and Vite config changes", forEachFile({
@@ -116,22 +152,57 @@ export default async function main({ params }: { params: { include?: string; app
     let edit;
     if (name.startsWith("next.config")) {
       if (dir !== owner) return undefined;
-      return { file: file.path, shared: false, changes: [], flags: [{ kind: "build config", detail: `${name} configures Next.js, which has no Solid 2 equivalent: move what it sets (rewrites, redirects, headers, images, env) to @solidjs/vite-plugin's start mode or SolidStart and vite.config, then delete it` }], jsx: false };
+      // With nextRoutes the app no longer runs on Next.js: what the config sets is listed.
+      const keys = routes ? nextConfigKeys(file.text, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" } }) : [];
+      const detail = !routes ? `${name} configures Next.js, which has no Solid 2 equivalent: move what it sets (rewrites, redirects, headers, images, env) to @solidjs/vite-plugin's start mode or SolidStart and vite.config, then delete it`
+        : keys.length ? `${name} sets ${keys.join(", ")}, which Next.js applied and start mode doesn't read: port each to vite.config.ts or a start-mode middleware (redirects, rewrites and headers are a middleware; env is Vite's import.meta.env or the plugin's env.ts), then delete it`
+        : `${name} sets nothing: delete it`;
+      return { file: file.path, shared: false, changes: [], flags: [{ kind: "build config", detail }], jsx: false, paths: false, vite: false };
     }
     if (name.startsWith("jest.config")) {
       if (dir !== owner) return undefined;
-      return { file: file.path, shared: false, changes: [], flags: [{ kind: "build config", detail: `${name} runs the tests on Jest, and Solid's test setup is Vitest with @solidjs/vite-plugin, which compiles Solid's JSX and resolves Solid's browser build: move the tests to Vitest (the converted tests import @solidjs/testing-library), or give Jest babel-preset-solid and the "browser" and "development" export conditions` }], jsx: false };
+      return { file: file.path, shared: false, changes: [], flags: [{ kind: "build config", detail: `${name} runs the tests on Jest, and Solid's test setup is Vitest with @solidjs/vite-plugin, which compiles Solid's JSX and resolves Solid's browser build: move the tests to Vitest (the converted tests import @solidjs/testing-library), or give Jest babel-preset-solid and the "browser" and "development" export conditions` }], jsx: false, paths: false, vite: false };
     }
-    if (name === "package.json") edit = migratePackageJson(file.text, peers);
+    if (name === "package.json") edit = migratePackageJson(file.text, peers, { next: !!routes && !shared && dir === owner });
     else if (name.startsWith("tsconfig")) edit = migrateTsconfig(file.text, { dir, reactPackages });
     else if (dir === owner) edit = migrateViteConfig(file.text, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" }, vitest: name.startsWith("vitest.config") });
     else return undefined;
+    // nextRoutes: start mode's vite.config.ts is written unless the package has one, and asks Vite to
+    // resolve tsconfig paths when the package's tsconfig maps any.
+    const vite = name.startsWith("vite.config");
+    if (vite && routes) edit = { ...edit, flags: [...edit.flags, { kind: "build config", detail: `${name} was already here, so start mode's isn't written: add solid({ start: { nodeServer: true }, ssr: true, serverFunctions: true, extensions: [".jsx", ".tsx"] }) and fileRoutes() from filesystem-routing/vite to its plugins` }] };
     if (apply && !shared && edit.text !== file.text) file.write(edit.text);
-    return { file: file.path, shared, changes: edit.changes, flags: edit.flags, jsx: !shared && "jsx" in edit && edit.jsx };
+    return { file: file.path, shared, changes: edit.changes, flags: edit.flags, jsx: !shared && "jsx" in edit && edit.jsx, paths: dir === owner && name.startsWith("tsconfig") && /"paths"\s*:/.test(file.text), vite };
   }));
+  // nextRoutes: the files start mode needs (App.tsx, vite.config.ts, ...), written by a shell step
+  // each, since a forEachFile step only changes files that exist. One already there is kept.
+  const created = !routes ? [] : (await step("Plan start mode's files", () => {
+    const document = converted.outputs.find((o) => o.document)?.document ?? null;
+    const api = Object.values(routes.entries).some((e) => e.kind === "route");
+    const middleware = files.includes(`${routes.src}/middleware.ts`) ? `${routes.src}/start-middleware.ts` : `${routes.src}/middleware.ts`;
+    const tsconfigPaths = configs.outputs.some((o) => o.paths);
+    const hasVite = configs.outputs.some((o) => o.vite && !o.shared);
+    return nextAppFiles(routes, { document, api, tsconfigPaths, middleware }).filter((f) => !(hasVite && /(^|\/)vite\.config\.ts$/.test(f.path)));
+  })).map((f) => ({ path: f.path, text: f.text }));
+  const kept: string[] = [];
+  const favicon: string[] = [];
+  if (apply && routes) {
+    for (const f of created) {
+      const written = await step(`Write ${f.path}`, shell({ cwd: "." })`if [ -e ${f.path} ]; then echo kept; else mkdir -p ${f.path.replace(/\/?[^/]+$/, "") || "."} && printf '%s' ${f.text} > ${f.path}; fi`);
+      if (written.stdout?.trim() === "kept") kept.push(f.path);
+    }
+    // Next.js served app/favicon.ico at /favicon.ico; Vite serves public/.
+    const icon = [`${routes.app}/favicon.ico`, `${owner ? `${owner}/` : ""}public/favicon.ico`];
+    const moved = await step("Move the favicon to public/", shell({ cwd: "." })`if [ -f ${icon[0]} ] && [ ! -e ${icon[1]} ]; then mkdir -p ${icon[1].replace(/\/?[^/]+$/, "") || "."} && mv ${icon[0]} ${icon[1]} && echo moved; fi`);
+    if (moved.stdout?.trim() === "moved") favicon.push(...icon);
+  }
   const configChanges = configs.outputs.filter((o) => !o.shared && o.changes.length).map((o) => ({ file: o.file, changes: o.changes }));
   const changed = converted.outputs.filter((o) => o.changed).map((o) => o.file);
   const report = await step("Summarize the conversion", () => {
+    // A moved route file's flags are reported where it now is; the plan's flags have no line.
+    const fileFlags = converted.outputs.map((o) => ({ file: (apply && o.to) || o.file, applied: o.applied, flags: o.flags }));
+    const routeFlags = [...(routing?.flags ?? []), ...kept.map((file) => ({ file, line: 0, kind: "Next.js route", detail: "was already here, so start mode's version of it wasn't written: check it does what the README's nextRoutes section describes" }))]
+      .map((f) => ({ file: f.file, applied: {}, flags: [{ line: f.line, kind: f.kind, detail: f.detail }] }));
     // Project flags have no line; a shared file's changes are left for a person.
     const projectFlags = configs.outputs.map((o) => ({
       file: o.file,
@@ -139,23 +210,27 @@ export default async function main({ params }: { params: { include?: string; app
       flags: [...o.flags, ...(o.shared ? o.changes.map((change) => ({ kind: "shared config", detail: `shared with the workspace, so not changed: ${change}` })) : [])].map((f) => ({ line: 0, ...f })),
     }));
     if (configs.outputs.some((o) => o.file.includes("tsconfig") && !o.shared) && !configs.outputs.some((o) => o.jsx)) {
-      projectFlags.push({ file: owner || ".", applied: {}, flags: [{ line: 0, kind: "build config", detail: `no tsconfig on the way to ${root} sets jsx: set "jsx": "preserve" and "jsxImportSource": "@solidjs/web" in the one that covers it` }] });
+      projectFlags.push({ file: owner || ".", applied: {}, flags: [{ line: 0, kind: "build config", detail: `no tsconfig on the way to ${root || "."} sets jsx: set "jsx": "preserve" and "jsxImportSource": "@solidjs/web" in the one that covers it` }] });
     }
-    return summarize(files, decided, [...converted.outputs, ...projectFlags]);
+    return summarize(files, decided, [...fileFlags, ...routeFlags, ...projectFlags]);
   });
-  const result = { plan, analyzed: files.length, failures: [...analyzed.failures, ...converted.failures, ...configs.failures], ...report, config: configChanges };
+  // nextRoutes: which App Router files moved where, and the files written for start mode.
+  const nextjs = routes ? { moved: moves, created: created.map((f) => f.path).filter((path) => !kept.includes(path)) } : undefined;
+  const result = { plan, analyzed: files.length, failures: [...analyzed.failures, ...converted.failures, ...configs.failures], ...report, config: configChanges, ...(nextjs ? { nextjs } : {}) };
 
   if (!apply) {
     console.log(`Preview: ${changed.length} of ${files.length} files would change, and ${configChanges.length} package.json, tsconfig or Vite config files, with ${report.flags.length} flagged spots to finish by hand. Nothing was written; run again with --param apply=true to convert them, then ${plan.install}.`);
     return { ...result, preview: true, wouldChange: changed };
   }
-  await step(commit("Convert React components to Solid 2", { add: [...files, ...configChanges.map((c) => c.file)] }));
+  await step(commit("Convert React components to Solid 2", { add: [...files, ...Object.values(moves), ...(nextjs?.created ?? []), ...favicon, ...configChanges.map((c) => c.file)] }));
 
   const lintDir = `${import.meta.dirname}/lint`;
   await step("Install the Solid 2 lint", shell`cd ${lintDir} && { [ -x node_modules/.bin/eslint ] || npm ci --silent --no-audit --no-fund >&2; }`);
   // Paths are relative to the target, so the command runs there (cwd "."), not in the CLI's
   // directory. summarize.mjs prints its summary as the last line of stdout.
-  const linted = await step("Lint with eslint-plugin-solid (Solid 2 config)", shell({ cwd: "." })`${lintDir}/node_modules/.bin/eslint -c ${lintDir}/eslint.config.mjs -f json ${files} | node ${lintDir}/summarize.mjs`);
+  // Moved route files are linted where they now are, with the components nextRoutes wrote.
+  const lintFiles = [...files.map((f) => moves[f] ?? f), ...(nextjs?.created ?? []).filter((f) => /\.tsx?$/.test(f) && !f.endsWith(".d.ts") && routes !== null && f.startsWith(`${routes.src}/`))];
+  const linted = await step("Lint with eslint-plugin-solid (Solid 2 config)", shell({ cwd: "." })`${lintDir}/node_modules/.bin/eslint -c ${lintDir}/eslint.config.mjs -f json ${lintFiles} | node ${lintDir}/summarize.mjs`);
   let lint = {};
   try {
     lint = JSON.parse(linted.stdout?.trimEnd().split("\n").pop() ?? "");
@@ -168,7 +243,8 @@ export default async function main({ params }: { params: { include?: string; app
     await step("Finish flagged spots", agent(agentPrompt(report.flags), { maxSteps: 40 }));
   }
   // Nothing was installed: the dependency changes only take effect after an install.
-  console.log(`Converted ${changed.length} of ${files.length} files and ${configChanges.length} package.json, tsconfig or Vite config files, with ${report.flags.length} flagged spots to finish by hand. Next: ${plan.install}, then type-check and build.`);
+  const routed = nextjs ? `, moved ${Object.keys(moves).length} App Router files to Solid's file routes and wrote ${nextjs.created.length} start-mode files` : "";
+  console.log(`Converted ${changed.length} of ${files.length} files and ${configChanges.length} package.json, tsconfig or Vite config files${routed}, with ${report.flags.length} flagged spots to finish by hand. Next: ${plan.install}, then type-check and build.`);
   return { ...result, changed, lint };
 }
 

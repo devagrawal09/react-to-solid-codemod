@@ -836,3 +836,185 @@ it("R46 converts a component defined in a test like any other, and leaves the te
   expect(run(code).code).toContain(`import { render } from "@testing-library/react";`);
   expect(run(code).code).toContain(`render(<Toggle />);`);
 });
+
+// Next.js with nextRoutes: `next` says which App Router file this is.
+const runNext = (code, next = { kind: null, pattern: null, key: null, wrap: null }) => transform(code, { parse, Lang, next });
+
+it("R47 turns next/link's <Link> into <a>, dropping prefetch and turning scroll={false} into noscroll", () => {
+  const { code, flags } = runNext(`import Link from "next/link";\n\nexport function Nav() {\n  return <Link href="/items" prefetch={false} scroll={false} replace className="nav">Items</Link>;\n}\n`);
+  expect(code).toBe(`export function Nav() {\n  return <a href="/items" noscroll replace class="nav">Items</a>;\n}\n`);
+  expect(flags).toEqual([]);
+});
+
+it("R47 keeps a <Link> with an object href, flagged, and its import with it", () => {
+  const { code, flags } = runNext(`import Link from "next/link";\nconst a = <Link href={{ pathname: "/x" }}>X</Link>;\nconst b = <Link href="/y">Y</Link>;\n`);
+  expect(code).toBe(`import Link from "next/link";\nconst a = <Link href={{ pathname: "/x" }}>X</Link>;\nconst b = <a href="/y">Y</a>;\n`);
+  expect(flags.map((f) => [f.kind, f.line, f.detail])).toEqual([
+    ["Next.js", 2, expect.stringMatching(/^<Link href=\{\{\.\.\.\}\}> has no <a> counterpart/)],
+    ["Next.js", 1, expect.stringMatching(/^Link from next\/link/)],
+  ]);
+});
+
+it("R48 turns next/image's <Image> into a lazy <img>, and priority into fetchpriority", () => {
+  const { code, flags } = runNext(`import Image from "next/image";\nconst a = <Image src="/a.png" alt="A" width={10} height={10} quality={80} />;\nconst b = (\n  <Image\n    src="/b.png"\n    alt="B"\n    priority\n  />\n);\n`);
+  expect(code).toBe(`const a = <img src="/a.png" alt="A" width={10} height={10} loading="lazy" decoding="async" />;\nconst b = (\n  <img\n    src="/b.png"\n    alt="B"\n    fetchpriority="high"\n    decoding="async"\n  />\n);\n`);
+  expect(flags).toEqual([]);
+});
+
+it("R48 keeps an <Image> it can't write as an <img> (fill), flagged", () => {
+  const { code, flags } = runNext(`import Image from "next/image";\nconst a = <Image src="/a.png" alt="" fill />;\n`);
+  expect(code).toContain(`<Image src="/a.png" alt="" fill />`);
+  expect(flags[0]).toEqual({ kind: "Next.js", line: 2, detail: expect.stringMatching(/^<Image> with fill: write the <img> by hand/) });
+});
+
+it("R49 turns next/dynamic's dynamic(() => import(...)) into lazy from solid-js, and flags one with options", () => {
+  const { code, flags } = runNext(`import dynamic from "next/dynamic";\nconst Chart = dynamic(() => import("./chart"));\nconst Map = dynamic(() => import("./map"), { ssr: false });\n`);
+  expect(code).toBe(`import { lazy } from "solid-js";\nimport dynamic from "next/dynamic";\nconst Chart = lazy(() => import("./chart"));\nconst Map = dynamic(() => import("./map"), { ssr: false });\n`);
+  expect(flags.filter((f) => f.kind === "Next.js").map((f) => f.line)).toEqual([3, 1]);
+  expect(runNext(`import dynamic from "next/dynamic";\nconst Chart = dynamic(() => import("./chart"));\n`).code).toBe(`import { lazy } from "solid-js";\nconst Chart = lazy(() => import("./chart"));\n`);
+});
+
+it("R50 leaves a next/font loader's class names empty, flagged with the custom property it set", () => {
+  const { code, flags } = runNext(`import { Geist } from "next/font/google";\n\nconst sans = Geist({ variable: "--font-sans", subsets: ["latin"] });\nexport const cls = sans.variable;\n`);
+  expect(code).toBe(`const sans = { className: "", variable: "", style: {} };\nexport const cls = sans.variable;\n`);
+  expect(flags).toEqual([{ kind: "Next.js", line: 3, detail: expect.stringContaining(`set the "--font-sans" custom property it defined`) }]);
+});
+
+it("R51 turns Next.js's PageProps into the route's RouteProps and LayoutProps into ParentProps", () => {
+  const page = runNext(`export default function P(props: PageProps<"/items/[id]">) {\n  return <p>{props.params.id}</p>;\n}\n`, { kind: "page", pattern: "/items/:id", key: "src/app/items/[id]/page.tsx" }).code;
+  expect(page).toBe(`import type { RouteProps } from "@solidjs/router";\nexport default function P(props: RouteProps<"/items/:id">) {\n  return <p>{props.params.id}</p>;\n}\n`);
+  const layout = runNext(`export default function L({ children }: LayoutProps<"/items">) {\n  return <div>{children}</div>;\n}\n`, { kind: "layout", pattern: "/items", key: "src/app/items/layout.tsx" }).code;
+  expect(layout).toBe(`import type { ParentProps } from "solid-js";\nexport default function L(props: ParentProps) {\n  return <div>{props.children}</div>;\n}\n`);
+});
+
+it("R52 turns an async page that awaits params and data into a query over a server function, read through an async memo", () => {
+  const code = `import { getItem } from "@/lib/items";\n\nexport default async function ItemPage({ params }: { params: Promise<{ id: string }> }) {\n  const { id } = await params;\n  const item = await getItem(id);\n  return <h1 className="t">{item ? item.name : id}</h1>;\n}\n`;
+  const { code: out, flags } = runNext(code, { kind: "page", pattern: "/items/:id", key: "src/app/items/[id]/page.tsx" });
+  expect(out).toBe(`import { createMemo } from "solid-js";
+import { query } from "@solidjs/router";
+import type { RouteProps } from "@solidjs/router";
+import { getItem } from "@/lib/items";
+
+const loadItemPage = query(async (params: RouteProps<"/items/:id">["params"]) => {
+  "use server";
+  const { id } = await params;
+  const item = await getItem(id);
+  return { id, item };
+}, "src/app/items/[id]/page.tsx");
+
+export default function ItemPage(props: RouteProps<"/items/:id">) {
+  const data = createMemo(() => loadItemPage({ ...props.params }));
+  return <h1 class="t">{data().item ? data().item.name : data().id}</h1>;
+}
+`);
+  expect(flags.filter((f) => f.kind === "server component")).toEqual([]);
+});
+
+it("R52 passes searchParams from the location's query, and a page with neither takes no props", () => {
+  const search = runNext(`export default async function Search({ searchParams }) {\n  const { q } = await searchParams;\n  return <p>{q}</p>;\n}\n`, { kind: "page", pattern: "/search", key: "src/app/search/page.tsx" }).code;
+  expect(search).toContain(`const loadSearch = query(async (searchParams: SearchParams) => {`);
+  expect(search).toContain(`const data = createMemo(() => loadSearch({ ...props.location.query }));`);
+  expect(search).toContain(`import type { RouteProps, SearchParams } from "@solidjs/router";`);
+  const plain = runNext(`export default async function Home() {\n  const posts = await getPosts();\n  return <ul>{posts.length}</ul>;\n}\n`, { kind: "page", pattern: "/", key: "src/app/page.tsx" }).code;
+  expect(plain).toContain(`export default function Home() {\n  const data = createMemo(() => loadHome());`);
+  expect(plain).not.toContain("RouteProps");
+});
+
+it("R52 converts an async layout too, its children read from props", () => {
+  const out = runNext(`export default async function Shell({ children }) {\n  const user = await getUser();\n  return <main><b>{user.name}</b>{children}</main>;\n}\n`, { kind: "layout", pattern: "/app", key: "src/app/app/layout.tsx" }).code;
+  expect(out).toContain(`export default function Shell(props: RouteProps<"/app">) {\n  const data = createMemo(() => loadShell());\n  return <main><b>{data().user.name}</b>{props.children}</main>;`);
+});
+
+it("R52 leaves an async page that isn't const declarations then JSX, and flags it as a server component", () => {
+  const code = `export default async function Page({ searchParams }) {\n  const { q } = await searchParams;\n  if (!q) return null;\n  return <div>{q}</div>;\n}\n`;
+  const { code: out, flags } = runNext(code, { kind: "page", pattern: "/", key: "src/app/page.tsx" });
+  expect(out).toBe(code);
+  expect(flags.map((f) => f.kind)).toEqual(["server component"]);
+  // a component that renders JSX it computed on the server, or isn't a page
+  expect(runNext(`export default async function P() {\n  const rows = (await getRows()).map((r) => <li>{r}</li>);\n  return <ul>{rows}</ul>;\n}\n`, { kind: "page", pattern: "/", key: "k" }).code).toContain("async function P");
+  expect(runNext(`export default async function P() {\n  const rows = await getRows();\n  return <ul>{rows.length}</ul>;\n}\n`).code).toContain("async function P");
+});
+
+it("R53 moves a page's string title and description into useHead, and flags metadata it can't read or generateMetadata", () => {
+  const { code, flags } = runNext(`import type { Metadata } from "next";\n\nexport const metadata: Metadata = { title: "Items", description: 'All of them' };\n\nexport default function Items() {\n  return <p />;\n}\n`, { kind: "page", pattern: "/items", key: "k" });
+  expect(code).toBe(`import { useHead } from "@solidjs/web";\n\nexport default function Items() {\n  useHead([{ tag: "title", props: { children: "Items" } }, { tag: "meta", props: { name: "description", content: "All of them" } }]);\n  return <p />;\n}\n`);
+  expect(flags).toEqual([]);
+  const other = runNext(`export const metadata = { title: { default: "A", template: "%s | A" } };\nexport async function generateMetadata() { return {}; }\nexport default function P() { return <p />; }\n`, { kind: "page", pattern: "/", key: "k" });
+  expect(other.flags.map((f) => [f.line, f.detail])).toEqual([
+    [1, expect.stringMatching(/^metadata: only a string title and description convert/)],
+    [2, expect.stringMatching(/^generateMetadata has no Solid counterpart/)],
+  ]);
+});
+
+it("R54 makes the root layout the document: HydrationScript and Next.js's meta tags in <head>, its stylesheets and metadata handed to App.tsx", () => {
+  const code = `import type { Metadata } from "next";\nimport "./globals.css";\n\nexport const metadata: Metadata = { title: "App" };\n\nexport default function RootLayout({ children }: LayoutProps<"/">) {\n  return (\n    <html lang="en">\n      <body>{children}</body>\n    </html>\n  );\n}\n`;
+  const { code: out, flags, document } = runNext(code, { kind: "document", pattern: "/", key: "src/app/layout.tsx" });
+  expect(out).toBe(`import type { ParentProps } from "solid-js";
+import { HydrationScript } from "@solidjs/web";
+
+export default function RootLayout(props: ParentProps) {
+  return (
+    <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <HydrationScript />
+      </head>
+      <body>{props.children}</body>
+    </html>
+  );
+}
+`);
+  expect(document).toEqual({ css: ["./globals.css"], head: [{ tag: "title", props: { children: "App" } }] });
+  expect(flags).toEqual([]);
+});
+
+it("R54 adds to the root layout's own <head>, and flags a body that renders more than the routes", () => {
+  const code = `export default function RootLayout({ children }) {\n  return (\n    <html>\n      <head>\n        <meta charSet="utf-8" />\n      </head>\n      <body>\n        <Providers>{children}</Providers>\n      </body>\n    </html>\n  );\n}\n`;
+  const { code: out, flags } = runNext(code, { kind: "document", pattern: "/", key: "k" });
+  expect(out).toContain(`      <head>\n        <meta charset="utf-8" />\n        <meta name="viewport" content="width=device-width, initial-scale=1" />\n        <HydrationScript />\n      </head>`);
+  expect(flags).toEqual([{ kind: "Next.js", line: 7, detail: expect.stringMatching(/^the root layout renders more than \{children\} in <body>: src\/Document.tsx is server-only/) }]);
+});
+
+it("a layout whose segment has loading.tsx and error.tsx wraps its children in <Errored> and <Loading>", () => {
+  const code = `import Nav from "./nav";\n\nexport default function ItemsLayout({ children }) {\n  return <section><Nav />{children}</section>;\n}\n`;
+  const { code: out } = runNext(code, { kind: "layout", pattern: "/items", key: "src/app/items/layout.tsx", wrap: { loading: "../app/items/loading", error: "../app/items/error" } });
+  expect(out).toBe(`import { Loading, Errored } from "solid-js";
+import Nav from "./nav";
+import SegmentLoading from "../app/items/loading";
+import SegmentError from "../app/items/error";
+
+export default function ItemsLayout(props) {
+  return <section><Nav /><Errored fallback={(err, reset) => { const error = err(); return <SegmentError error={error instanceof Error ? error : new Error(String(error))} reset={reset} />; }}><Loading fallback={<SegmentLoading />}>{props.children}</Loading></Errored></section>;
+}
+`);
+});
+
+it("the root not-found.tsx becomes the catch-all route, answering 404", () => {
+  const { code } = runNext(`export default function NotFound() {\n  return <h1>Gone</h1>;\n}\n`, { kind: "not-found", pattern: "/", key: "src/app/not-found.tsx" });
+  expect(code).toBe(`import { httpStatus } from "@solidjs/web";\nexport const route = { preload: () => httpStatus(404) };\n\nexport default function NotFound() {\n  return <h1>Gone</h1>;\n}\n`);
+});
+
+it("a route handler keeps its body under another name, called by a filesystem-routing API handler with the request", () => {
+  const code = `import { NextResponse } from "next/server";\n\nexport async function GET() {\n  return NextResponse.json(await list());\n}\n\nexport async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {\n  return Response.json({ id: (await params).id, body: await request.json() });\n}\n`;
+  const { code: out, flags } = runNext(code, { kind: "route", pattern: "/api/items/:id", key: "src/app/api/items/[id]/route.ts" });
+  expect(out).toBe(`import type { APIHandler } from "filesystem-routing/api";
+
+async function nextGET() {
+  return Response.json(await list());
+}
+
+export const GET: APIHandler = (event) => nextGET();
+
+async function nextPOST(request: Request, { params }: { params: Promise<{ id: string }> }) {
+  return Response.json({ id: (await params).id, body: await request.json() });
+}
+
+export const POST: APIHandler = (event) => nextPOST(event.request, { params: Promise.resolve(event.params ?? {}) });
+`);
+  expect(flags).toEqual([{ kind: "Next.js", line: 7, detail: expect.stringMatching(/^POST takes the route's params: they come from event.params/) }]);
+});
+
+it("R10 doesn't take loading=\"lazy\" for a use of lazy", () => {
+  expect(convert(`export function A() { return <img src="a" loading="lazy" />; }\n`)).not.toContain("import");
+});
