@@ -744,13 +744,13 @@ it("R8 leaves a nested function's parameter of the same name alone", () => {
 // Next.js with nextRoutes: `next` says which App Router file this is.
 const runNext = (code, next = { kind: null, pattern: null, key: null, wrap: null }) => transform(code, { parse, Lang, next });
 
-it("R46 turns next/link's <Link> into <a>, dropping prefetch and turning scroll={false} into noscroll", () => {
+it("R47 turns next/link's <Link> into <a>, dropping prefetch and turning scroll={false} into noscroll", () => {
   const { code, flags } = runNext(`import Link from "next/link";\n\nexport function Nav() {\n  return <Link href="/items" prefetch={false} scroll={false} replace className="nav">Items</Link>;\n}\n`);
   expect(code).toBe(`export function Nav() {\n  return <a href="/items" noscroll replace class="nav">Items</a>;\n}\n`);
   expect(flags).toEqual([]);
 });
 
-it("R46 keeps a <Link> with an object href, flagged, and its import with it", () => {
+it("R47 keeps a <Link> with an object href, flagged, and its import with it", () => {
   const { code, flags } = runNext(`import Link from "next/link";\nconst a = <Link href={{ pathname: "/x" }}>X</Link>;\nconst b = <Link href="/y">Y</Link>;\n`);
   expect(code).toBe(`import Link from "next/link";\nconst a = <Link href={{ pathname: "/x" }}>X</Link>;\nconst b = <a href="/y">Y</a>;\n`);
   expect(flags.map((f) => [f.kind, f.line, f.detail])).toEqual([
@@ -759,39 +759,39 @@ it("R46 keeps a <Link> with an object href, flagged, and its import with it", ()
   ]);
 });
 
-it("R47 turns next/image's <Image> into a lazy <img>, and priority into fetchpriority", () => {
+it("R48 turns next/image's <Image> into a lazy <img>, and priority into fetchpriority", () => {
   const { code, flags } = runNext(`import Image from "next/image";\nconst a = <Image src="/a.png" alt="A" width={10} height={10} quality={80} />;\nconst b = (\n  <Image\n    src="/b.png"\n    alt="B"\n    priority\n  />\n);\n`);
   expect(code).toBe(`const a = <img src="/a.png" alt="A" width={10} height={10} loading="lazy" decoding="async" />;\nconst b = (\n  <img\n    src="/b.png"\n    alt="B"\n    fetchpriority="high"\n    decoding="async"\n  />\n);\n`);
   expect(flags).toEqual([]);
 });
 
-it("R47 keeps an <Image> it can't write as an <img> (fill), flagged", () => {
+it("R48 keeps an <Image> it can't write as an <img> (fill), flagged", () => {
   const { code, flags } = runNext(`import Image from "next/image";\nconst a = <Image src="/a.png" alt="" fill />;\n`);
   expect(code).toContain(`<Image src="/a.png" alt="" fill />`);
   expect(flags[0]).toEqual({ kind: "Next.js", line: 2, detail: expect.stringMatching(/^<Image> with fill: write the <img> by hand/) });
 });
 
-it("R48 turns next/dynamic's dynamic(() => import(...)) into lazy from solid-js, and flags one with options", () => {
+it("R49 turns next/dynamic's dynamic(() => import(...)) into lazy from solid-js, and flags one with options", () => {
   const { code, flags } = runNext(`import dynamic from "next/dynamic";\nconst Chart = dynamic(() => import("./chart"));\nconst Map = dynamic(() => import("./map"), { ssr: false });\n`);
   expect(code).toBe(`import { lazy } from "solid-js";\nimport dynamic from "next/dynamic";\nconst Chart = lazy(() => import("./chart"));\nconst Map = dynamic(() => import("./map"), { ssr: false });\n`);
   expect(flags.filter((f) => f.kind === "Next.js").map((f) => f.line)).toEqual([3, 1]);
   expect(runNext(`import dynamic from "next/dynamic";\nconst Chart = dynamic(() => import("./chart"));\n`).code).toBe(`import { lazy } from "solid-js";\nconst Chart = lazy(() => import("./chart"));\n`);
 });
 
-it("R49 leaves a next/font loader's class names empty, flagged with the custom property it set", () => {
+it("R50 leaves a next/font loader's class names empty, flagged with the custom property it set", () => {
   const { code, flags } = runNext(`import { Geist } from "next/font/google";\n\nconst sans = Geist({ variable: "--font-sans", subsets: ["latin"] });\nexport const cls = sans.variable;\n`);
   expect(code).toBe(`const sans = { className: "", variable: "", style: {} };\nexport const cls = sans.variable;\n`);
   expect(flags).toEqual([{ kind: "Next.js", line: 3, detail: expect.stringContaining(`set the "--font-sans" custom property it defined`) }]);
 });
 
-it("R50 turns Next.js's PageProps into the route's RouteProps and LayoutProps into ParentProps", () => {
+it("R51 turns Next.js's PageProps into the route's RouteProps and LayoutProps into ParentProps", () => {
   const page = runNext(`export default function P(props: PageProps<"/items/[id]">) {\n  return <p>{props.params.id}</p>;\n}\n`, { kind: "page", pattern: "/items/:id", key: "src/app/items/[id]/page.tsx" }).code;
   expect(page).toBe(`import type { RouteProps } from "@solidjs/router";\nexport default function P(props: RouteProps<"/items/:id">) {\n  return <p>{props.params.id}</p>;\n}\n`);
   const layout = runNext(`export default function L({ children }: LayoutProps<"/items">) {\n  return <div>{children}</div>;\n}\n`, { kind: "layout", pattern: "/items", key: "src/app/items/layout.tsx" }).code;
   expect(layout).toBe(`import type { ParentProps } from "solid-js";\nexport default function L(props: ParentProps) {\n  return <div>{props.children}</div>;\n}\n`);
 });
 
-it("R51 turns an async page that awaits params and data into a query over a server function, read through an async memo", () => {
+it("R52 turns an async page that awaits params and data into a query over a server function, read through an async memo", () => {
   const code = `import { getItem } from "@/lib/items";\n\nexport default async function ItemPage({ params }: { params: Promise<{ id: string }> }) {\n  const { id } = await params;\n  const item = await getItem(id);\n  return <h1 className="t">{item ? item.name : id}</h1>;\n}\n`;
   const { code: out, flags } = runNext(code, { kind: "page", pattern: "/items/:id", key: "src/app/items/[id]/page.tsx" });
   expect(out).toBe(`import { createMemo } from "solid-js";
@@ -814,7 +814,7 @@ export default function ItemPage(props: RouteProps<"/items/:id">) {
   expect(flags.filter((f) => f.kind === "server component")).toEqual([]);
 });
 
-it("R51 passes searchParams from the location's query, and a page with neither takes no props", () => {
+it("R52 passes searchParams from the location's query, and a page with neither takes no props", () => {
   const search = runNext(`export default async function Search({ searchParams }) {\n  const { q } = await searchParams;\n  return <p>{q}</p>;\n}\n`, { kind: "page", pattern: "/search", key: "src/app/search/page.tsx" }).code;
   expect(search).toContain(`const loadSearch = query(async (searchParams: SearchParams) => {`);
   expect(search).toContain(`const data = createMemo(() => loadSearch({ ...props.location.query }));`);
@@ -824,12 +824,12 @@ it("R51 passes searchParams from the location's query, and a page with neither t
   expect(plain).not.toContain("RouteProps");
 });
 
-it("R51 converts an async layout too, its children read from props", () => {
+it("R52 converts an async layout too, its children read from props", () => {
   const out = runNext(`export default async function Shell({ children }) {\n  const user = await getUser();\n  return <main><b>{user.name}</b>{children}</main>;\n}\n`, { kind: "layout", pattern: "/app", key: "src/app/app/layout.tsx" }).code;
   expect(out).toContain(`export default function Shell(props: RouteProps<"/app">) {\n  const data = createMemo(() => loadShell());\n  return <main><b>{data().user.name}</b>{props.children}</main>;`);
 });
 
-it("R51 leaves an async page that isn't const declarations then JSX, and flags it as a server component", () => {
+it("R52 leaves an async page that isn't const declarations then JSX, and flags it as a server component", () => {
   const code = `export default async function Page({ searchParams }) {\n  const { q } = await searchParams;\n  if (!q) return null;\n  return <div>{q}</div>;\n}\n`;
   const { code: out, flags } = runNext(code, { kind: "page", pattern: "/", key: "src/app/page.tsx" });
   expect(out).toBe(code);
@@ -839,7 +839,7 @@ it("R51 leaves an async page that isn't const declarations then JSX, and flags i
   expect(runNext(`export default async function P() {\n  const rows = await getRows();\n  return <ul>{rows.length}</ul>;\n}\n`).code).toContain("async function P");
 });
 
-it("R52 moves a page's string title and description into useHead, and flags metadata it can't read or generateMetadata", () => {
+it("R53 moves a page's string title and description into useHead, and flags metadata it can't read or generateMetadata", () => {
   const { code, flags } = runNext(`import type { Metadata } from "next";\n\nexport const metadata: Metadata = { title: "Items", description: 'All of them' };\n\nexport default function Items() {\n  return <p />;\n}\n`, { kind: "page", pattern: "/items", key: "k" });
   expect(code).toBe(`import { useHead } from "@solidjs/web";\n\nexport default function Items() {\n  useHead([{ tag: "title", props: { children: "Items" } }, { tag: "meta", props: { name: "description", content: "All of them" } }]);\n  return <p />;\n}\n`);
   expect(flags).toEqual([]);
@@ -850,7 +850,7 @@ it("R52 moves a page's string title and description into useHead, and flags meta
   ]);
 });
 
-it("R53 makes the root layout the document: HydrationScript and Next.js's meta tags in <head>, its stylesheets and metadata handed to App.tsx", () => {
+it("R54 makes the root layout the document: HydrationScript and Next.js's meta tags in <head>, its stylesheets and metadata handed to App.tsx", () => {
   const code = `import type { Metadata } from "next";\nimport "./globals.css";\n\nexport const metadata: Metadata = { title: "App" };\n\nexport default function RootLayout({ children }: LayoutProps<"/">) {\n  return (\n    <html lang="en">\n      <body>{children}</body>\n    </html>\n  );\n}\n`;
   const { code: out, flags, document } = runNext(code, { kind: "document", pattern: "/", key: "src/app/layout.tsx" });
   expect(out).toBe(`import type { ParentProps } from "solid-js";
@@ -873,7 +873,7 @@ export default function RootLayout(props: ParentProps) {
   expect(flags).toEqual([]);
 });
 
-it("R53 adds to the root layout's own <head>, and flags a body that renders more than the routes", () => {
+it("R54 adds to the root layout's own <head>, and flags a body that renders more than the routes", () => {
   const code = `export default function RootLayout({ children }) {\n  return (\n    <html>\n      <head>\n        <meta charSet="utf-8" />\n      </head>\n      <body>\n        <Providers>{children}</Providers>\n      </body>\n    </html>\n  );\n}\n`;
   const { code: out, flags } = runNext(code, { kind: "document", pattern: "/", key: "k" });
   expect(out).toContain(`      <head>\n        <meta charset="utf-8" />\n        <meta name="viewport" content="width=device-width, initial-scale=1" />\n        <HydrationScript />\n      </head>`);

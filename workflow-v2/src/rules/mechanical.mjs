@@ -74,7 +74,7 @@ const ucfirst = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 // `ports`: the React libraries the project moves to their Solid 2 port, by name, each with its
 // PORTS entry (src/manifests.mjs); R44 points their imports at the port. `next`: set when Next.js's
-// App Router moves to Solid's file routes (R46-R53); see there. For the root layout, the result's
+// App Router moves to Solid's file routes (R47-R54); see there. For the root layout, the result's
 // `document` holds the stylesheets and head tags that move to src/App.tsx.
 export function transform(input, { parse, Lang, ports = {}, next = null }) {
   // Offsets are per file, so the helpers that read them live in here: a module-level binding
@@ -260,7 +260,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
     return n;
   };
 
-  // R46-R53 Next.js, with nextRoutes on (`next` is set): what @solidjs/vite-plugin's start mode and
+  // R47-R54 Next.js, with nextRoutes on (`next` is set): what @solidjs/vite-plugin's start mode and
   // @solidjs/router's file routes have a counterpart for, before the React rules run. `next.kind` is
   // the App Router file this is (page, layout, document for the root layout, route, not-found) or
   // null for any other file; `next.pattern` is its route's path in the router's pattern language,
@@ -270,7 +270,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
   const routerTypes = new Set();
   let document = null;
   if (next) {
-    // R46 next/link's <Link> -> <a>: @solidjs/router intercepts plain anchors, and reads `replace`
+    // R47 next/link's <Link> -> <a>: @solidjs/router intercepts plain anchors, and reads `replace`
     // and `noscroll` off them. An object href or Link's legacy props stay, flagged.
     const link = src.match(/^import\s+([\w$]+)\s+from\s+["']next\/link["'];?[ \t]*\n/m);
     if (link) {
@@ -298,7 +298,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       if (!left) src = src.replace(link[0], "");
     }
 
-    // R47 next/image's <Image> -> <img>, lazy and async-decoded as Next.js renders it; `priority`
+    // R48 next/image's <Image> -> <img>, lazy and async-decoded as Next.js renders it; `priority`
     // (and Next 16's `preload`) becomes fetchpriority="high". `quality` and `unoptimized` only meant
     // something to Next.js's image optimizer. `fill`, placeholders, loaders and spreads stay, flagged.
     const image = src.match(/^import\s+([\w$]+)\s+from\s+["']next\/image["'];?[ \t]*\n/m);
@@ -333,7 +333,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       if (!left) src = src.replace(image[0], "");
     }
 
-    // R48 next/dynamic's dynamic(() => import("./x")) -> lazy from solid-js, which suspends under
+    // R49 next/dynamic's dynamic(() => import("./x")) -> lazy from solid-js, which suspends under
     // <Loading>. Options (ssr: false, a loading component) and a picked export stay, flagged.
     const loader = src.match(/^import\s+([\w$]+)\s+from\s+["']next\/dynamic["'];?[ \t]*\n/m);
     if (loader) {
@@ -354,7 +354,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       if (!left) src = src.replace(loader[0], "");
     }
 
-    // R49 next/font loaders set a font's class names; there is no Solid counterpart, so each
+    // R50 next/font loaders set a font's class names; there is no Solid counterpart, so each
     // declaration becomes the same shape with empty names (the code that reads them still type-checks
     // and renders) and is flagged with what to load instead.
     for (const m of [...src.matchAll(/^import\s+(?:([\w$]+)|\{([^}]*)\})\s+from\s+["'](next\/font\/(?:google|local))["'];?[ \t]*\n/gm)]) {
@@ -377,7 +377,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       if (!left) src = src.replace(m[0], "");
     }
 
-    // R50 Next.js's global route types: PageProps<"/items/[id]"> -> RouteProps<"/items/:id"> from
+    // R51 Next.js's global route types: PageProps<"/items/[id]"> -> RouteProps<"/items/:id"> from
     // @solidjs/router, LayoutProps<...> -> ParentProps from solid-js.
     pass((root) =>
       root.findAll({ rule: { kind: "generic_type", has: { field: "name", regex: "^(PageProps|LayoutProps)$" } } }).flatMap((t) => {
@@ -394,7 +394,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       }),
     );
 
-    // R51 an async page or layout of the simple shape (const declarations, which may await params,
+    // R52 an async page or layout of the simple shape (const declarations, which may await params,
     // searchParams and data, then a return of JSX) -> a sync component reading one async memo. The
     // declarations move into a query over a server function ("use server"), so they still run on the
     // server only, as in a Server Component: during SSR it's a direct call, and on a client
@@ -449,7 +449,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       });
     }
 
-    // R52 a page's or layout's static metadata -> useHead from @solidjs/web, in its component. Only a
+    // R53 a page's or layout's static metadata -> useHead from @solidjs/web, in its component. Only a
     // string title and description convert; the root layout's go to src/App.tsx, which is generated.
     const metadata = (root) => root.find({ rule: { kind: "export_statement", has: { kind: "lexical_declaration", has: { kind: "variable_declarator", has: { field: "name", regex: "^metadata$" } } } } });
     const tags = (decl) => {
@@ -481,7 +481,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       return [];
     });
 
-    // R53 the root layout -> the start-mode document (src/Document.tsx): it renders <html> around the
+    // R54 the root layout -> the start-mode document (src/Document.tsx): it renders <html> around the
     // app, and needs <HydrationScript /> and the meta tags Next.js added by itself in its <head>. Its
     // stylesheet imports and metadata go to src/App.tsx (returned as `document`), because the
     // document is server-only: it isn't hydrated, and only the app's CSS is linked.
@@ -576,7 +576,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       });
       if (!/\bNextResponse\b/.test(src.replace(/^import\b[^;]*;/gm, ""))) src = src.replace(/^import\s+\{\s*NextResponse\s*\}\s+from\s+["']next\/server["'];?[ \t]*\n/m, "");
     }
-    // Next.js's Metadata type goes with the metadata export it typed (R52, R53).
+    // Next.js's Metadata type goes with the metadata export it typed (R53, R54).
     if (!/\bMetadata\b/.test(src.replace(/^import\b[^;]*;/gm, ""))) src = src.replace(/^import\s+type\s+\{\s*Metadata\s*\}\s+from\s+["']next["'];?[ \t]*\n/m, "");
   }
 
@@ -1817,7 +1817,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
     if (/\(\s*(undefined)?\s*\)$/.test(c.text())) flag("context default", c, "Solid 2: undefined default means 'no provider' and throws; use null for optional");
   for (const c of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^use[A-Z]\\w*$" } } }))
     // React's own hooks left over are flagged once, as React APIs (R10).
-    // R52's useHead is @solidjs/web's.
+    // R53's useHead is @solidjs/web's.
     if (!/^use(Context|State|Memo|Callback|Effect|LayoutEffect|Ref)$/.test(c.field("function").text()) && !fromReact.has(c.field("function").text()) && !(next && c.field("function").text() === "useHead")) flag("custom hook call", c, `${c.field("function").text()}() returns values in React; decide value vs accessor`);
 
   // R44 a library whose Solid 2 port exports its names (`lacks` lists the ones it doesn't) is
@@ -1876,7 +1876,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
   // second import of one would be a duplicate identifier.
   const have = new Set([...src.matchAll(/^import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["'](?:solid-js|@solidjs\/web)["']/gm)].flatMap((m) => m[1].split(",").map((s) => s.trim().replace(/^type\s+/, "").split(/\s+as\s+/).pop()).filter(Boolean)));
   const solidNames = [
-    // `lazy` by its call: loading="lazy" (R47's <img>) isn't a use.
+    // `lazy` by its call: loading="lazy" (R48's <img>) isn't a use.
     ...["createSignal", "createMemo", "createContext", "useContext", "createEffect", "onSettled", "merge", "omit", "For", "createUniqueId", "lazy"].filter((n) => used(new RegExp(n === "lazy" ? "\\blazy\\(" : `\\b${n}\\b`))).filter((n) => !have.has(n)).filter(free((n) => new RegExp(`\\b${n}\\b`))),
     ...["Show", "Switch", "Match", "Loading", ...(next ? ["Errored"] : [])].filter((n) => used(new RegExp(`<${n}\\b`))).filter((n) => !have.has(n)).filter(free((n) => new RegExp(`<${n}\\b`))),
     ...["untrack", "flush"].filter((n) => used(new RegExp(`\\b${n}\\(`))).filter((n) => !have.has(n)).filter(free((n) => new RegExp(`\\b${n}\\(`))),
@@ -1890,7 +1890,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
   src = src.replace(/^import\s+\{\s*flushSync\s*\}\s+from\s+["']react-dom["'];?[ \t]*\n/gm, "");
   // New names join the file's own import from that module when it has one.
   const lines = [];
-  // R51 and R50's names from @solidjs/router, when the code still uses them.
+  // R52 and R51's names from @solidjs/router, when the code still uses them.
   const fromRouter = (names) => [...names].filter((n) => used(new RegExp(`\\b${n}\\b`)) && !new RegExp(`\\b${n}\\b`).test(elsewhere));
   for (const [module, type, names] of [["solid-js", false, solidNames], ["solid-js", true, solidTypes], ["@solidjs/web", false, webNames], ["@solidjs/web", true, webTypes], ["@solidjs/router", false, fromRouter(routerNames)], ["@solidjs/router", true, fromRouter(routerTypes)]]) {
     if (!names.length) continue;
