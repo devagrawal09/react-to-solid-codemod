@@ -180047,6 +180047,18 @@ ${printAliasingSignature(signature)}`
   function applyContracts(results, { modules = {} } = {}) {
     const { settle } = buildContracts(results, { modules });
     for (const r of results) for (const fn of r.functions) settle(r.file, fn, /* @__PURE__ */ new Set());
+    const files = new Map(results.map((r) => [r.file, r]));
+    const order = [];
+    const seen = /* @__PURE__ */ new Set();
+    const visit = (file) => {
+      if (seen.has(file)) return;
+      seen.add(file);
+      const imported = Object.values(files.get(file).imports ?? {}).map((imp) => resolveImport(file, imp.source, files, modules)).filter(Boolean).sort();
+      for (const dep of imported) visit(dep);
+      order.push(file);
+    };
+    for (const file of [...files.keys()].sort()) visit(file);
+    return order;
   }
 
   // src/reactivity/rewrite.mjs

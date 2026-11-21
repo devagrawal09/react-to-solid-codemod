@@ -114,6 +114,19 @@ describe("hook contracts across files", () => {
     return results[1].functions[0].values;
   };
 
+  it("hands back the files in dependency order: each after the local files it imports, then by path", () => {
+    const at = (file, code) => decide(extract(code, `/repo/apps/web/src/${file}`));
+    const results = [
+      at("App.tsx", `import { Page } from "./pages/Page";\nimport { cn } from "~/lib/cn";\nexport function App() { return <Page class={cn("a")} />; }`),
+      at("pages/Page.tsx", `import { useThing } from "../useThing";\nimport { Missing } from "./nowhere";\nimport { clsx } from "clsx";\nexport function Page() { const t = useThing([]); return <p class={clsx("p")}>{t.count}</p>; }`),
+      at("useThing.ts", `import { cn } from "./lib/cn";\nexport function useThing(items) { const sorted = items.toSorted(); return { count: sorted.length, cls: cn("x") }; }`),
+      at("lib/cn.ts", `export const cn = (...names) => names.join(" ");`),
+      at("lib/z-cycle-a.ts", `import { b } from "./z-cycle-b";\nexport const a = () => b;`),
+      at("lib/z-cycle-b.ts", `import { a } from "./z-cycle-a";\nexport const b = () => a;`),
+    ];
+    expect(applyContracts(results).map((file) => file.slice("/repo/apps/web/src/".length))).toEqual(["lib/cn.ts", "useThing.ts", "pages/Page.tsx", "App.tsx", "lib/z-cycle-b.ts", "lib/z-cycle-a.ts"]);
+  });
+
   it("a value from a local hook that returns a memo is read as an accessor", () => {
     expect(settle(`const sorted = useSorted(items); return <p>{sorted.length}</p>;`)[0].decision).toBe("accessor");
   });
@@ -167,6 +180,14 @@ describe("hook contracts across files", () => {
     expect(decision("@repo/hooks", { "@repo/hooks": ["/repo/packages/hooks/dist/index", "/repo/packages/hooks/src/sorted"] }).decision).toBe("accessor");
     expect(decision("@repo/hooks/sorted", { "@repo/hooks/*": ["/repo/packages/hooks/src/*"] }).decision).toBe("accessor");
     expect(decision("@repo/hooks/other", { "@repo/hooks/*": ["/repo/packages/hooks/src/*"] })).toMatchObject({ contract: { kind: "opaque" } });
+  });
+
+  it("puts a workspace package's file before the app files that import it by name", () => {
+    const results = [
+      decide(extract(`import { useSorted } from "@repo/hooks";\nexport function A({ items }) { const sorted = useSorted(items); return <p>{sorted.length}</p>; }`, "/repo/apps/web/src/A.tsx")),
+      decide(extract(`export function useSorted(items) { const sorted = items.toSorted(); return sorted; }`, "/repo/packages/hooks/src/sorted.ts")),
+    ];
+    expect(applyContracts(results, { modules: { "@repo/hooks": ["/repo/packages/hooks/src/sorted"] } })).toEqual(["/repo/packages/hooks/src/sorted.ts", "/repo/apps/web/src/A.tsx"]);
   });
 });
 

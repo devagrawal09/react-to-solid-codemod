@@ -32,7 +32,8 @@ import { PORTS, reactPeers } from "../src/manifests.mjs";
  * 1. clones the repository at the pinned commit (or generates the create-vite app) into the cache;
  * 2. once per commit, installs the React app as its lockfile says and type-checks it: the React
  *    baseline, cached, which should be 0 (a file's React errors are subtracted from its Solid ones);
- * 3. runs the workflow with apply=true on a fresh copy (reset with git, node_modules kept);
+ * 3. runs the workflow with apply=true on a fresh copy (reset with git, node_modules kept), and
+ *    typecheck=false: step 6 type-checks after its own install, with the pinned TypeScript;
  * 4. checks that every converted file still parses (TypeScript's parser) and has no `await`
  *    outside an async function;
  * 5. installs the converted app (package.json, tsconfig and Vite config as the workflow left them),
@@ -258,7 +259,7 @@ for (const entry of corpus.filter((e) => !only || only.includes(e.name))) {
           const [from, to = from] = range.split("-").map(Number);
           return Array.from({ length: to - from + 1 }, (_, i) => from + i);
         });
-        const cli = run([tools.codemod, "workflow", "run", "-w", workflow, "-t", target, "--param", `include=${entry.include}`, "--param", "apply=true", ...(entry.params ?? []).flatMap((param) => ["--param", param]), "--no-interactive", "--approve", "--disable-analytics", "--no-color"], {
+        const cli = run([tools.codemod, "workflow", "run", "-w", workflow, "-t", target, "--param", `include=${entry.include}`, "--param", "apply=true", "--param", "typecheck=false", ...(entry.params ?? []).flatMap((param) => ["--param", param]), "--no-interactive", "--approve", "--disable-analytics", "--no-color"], {
           cwd: packageDirectory,
           extraEnv: { CODEMOD_RUN_STORE_DIR: store },
           cpus: entry.workflowCpus ? allowed.slice(0, entry.workflowCpus).join(",") : undefined,

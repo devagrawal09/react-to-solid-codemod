@@ -212,7 +212,21 @@ export function at(contract, keys) {
 
 // Sets `contract` on every hook-result value and redecides every function, leaf hooks first.
 // `modules`: imports by package name that resolve to these files (see resolveImport).
+// Returns the files in dependency order: each after the local files it imports, workspace packages'
+// by name included (leaf modules and hooks first), then by path.
 export function applyContracts(results, { modules = {} } = {}) {
   const { settle } = buildContracts(results, { modules });
   for (const r of results) for (const fn of r.functions) settle(r.file, fn, new Set());
+  const files = new Map(results.map((r) => [r.file, r]));
+  const order = [];
+  const seen = new Set();
+  const visit = (file) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const imported = Object.values(files.get(file).imports ?? {}).map((imp) => resolveImport(file, imp.source, files, modules)).filter(Boolean).sort();
+    for (const dep of imported) visit(dep);
+    order.push(file);
+  };
+  for (const file of [...files.keys()].sort()) visit(file);
+  return order;
 }

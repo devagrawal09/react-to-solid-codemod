@@ -1,17 +1,19 @@
 // React -> Solid 2 migration on the code-first engine.
 //
-//   codemod workflow run -w src/workflow.ts -t <app> [--param include=src] [--param apply=true] [--param agent=true]
+//   codemod workflow run -w src/workflow.ts -t <app> [--param include=src] [--param apply=true] [--param install=true] [--param agent=true]
 //
 // Without apply=true the run is a preview: it converts every file in memory and reports
-// what it would change, flags included, and writes nothing.
+// what it would change, flags included, and writes nothing but the work list.
 //
 // 1. Guard: the target is a React app, and which of its libraries have a Solid port.
 // 2. Reactivity pass: the React Compiler (run inside jssg, no Node) decides what each
 //    component-body value becomes; a whole-program pass works out what each hook returns.
 // 3. Rule pass: mechanical rewrites (props, hooks, JSX, imports), with flags for the rest.
 // 4. Project: package.json, tsconfig and the Vite config move to Solid 2 (no install).
-// 5. Verify: eslint-plugin-solid's Solid 2 config on the migrated files.
-// 6. Optionally hand the flagged spots to an agent, after an approval.
+// 5. Verify: eslint-plugin-solid's Solid 2 config on the migrated files, then, once Solid 2 is
+//    installed (install=true runs the install), the project's own TypeScript (src/verify/).
+// 6. The work list: every flag and type error, in .react-to-solid/worklist.md (src/worklist.mjs),
+//    which the run also writes in a preview. Optionally handed to an agent, after an approval.
 //
 // With --param nextRoutes=true, a Next.js App Router (src/app, or app/ at the package root) also
 // moves to Solid's file routes (src/nextjs.mjs): route files go to src/routes, the root layout
@@ -30,12 +32,15 @@ import { transform } from "./rules/mechanical.mjs";
 import { NO_PORT, PORTS, migratePackageJson, migrateTsconfig, migrateViteConfig, reactPeers } from "./manifests.mjs";
 import { moveImports, nextAppFiles, nextConfigKeys, planNextRoutes } from "./nextjs.mjs";
 import { packageModules, pnpmWorkspaces, workspaceDependencies } from "./workspaces.mjs";
+import { renderWorklist } from "./worklist.mjs";
 
 const NOT_SHIPPED = /^(@types\/|babel-plugin-react-compiler$|eslint-plugin-react|typescript$)/;
 
-export default async function main({ params }: { params: { include?: string; apply?: boolean | string; agent?: boolean | string; nextRoutes?: boolean | string; workspace?: boolean | string } }) {
+export default async function main({ params }: { params: { include?: string; apply?: boolean | string; install?: boolean | string; typecheck?: boolean | string; agent?: boolean | string; nextRoutes?: boolean | string; workspace?: boolean | string } }) {
   // --param values arrive as JSON when they parse as JSON, so true is a boolean.
   const apply = params.apply === true || params.apply === "true";
+  const install = params.install === true || params.install === "true";
+  const typecheck = params.typecheck !== false && params.typecheck !== "false";
   const nextRoutes = params.nextRoutes === true || params.nextRoutes === "true";
   // nextRoutes without include: a Next.js app with app/ at its root (create-next-app without
   // --src-dir) is converted from the root, where its components/ and lib/ are too.
@@ -55,6 +60,7 @@ export default async function main({ params }: { params: { include?: string; app
       path: file.path,
       deps: { ...pkg.peerDependencies, ...pkg.devDependencies, ...pkg.dependencies },
       packageManager: pkg.packageManager ?? null,
+      scripts: Object.keys(pkg.scripts ?? {}),
       name: typeof pkg.name === "string" ? pkg.name : null,
       workspaces: Array.isArray(pkg.workspaces) ? pkg.workspaces : pkg.workspaces?.packages ?? null,
       entry: { exports: pkg.exports ?? null, main: pkg.main ?? null, module: pkg.module ?? null, types: pkg.types ?? null, typings: pkg.typings ?? null, source: pkg.source ?? null },
@@ -98,6 +104,7 @@ export default async function main({ params }: { params: { include?: string; app
       react: deps.react ?? null,
       usesReactCompiler: "babel-plugin-react-compiler" in deps,
       manifest: owner ? `${owner}/package.json` : "package.json",
+      manager,
       install: `${manager} install${solid1.length ? " --config.strict-peer-dependencies=false" : ""}`,
       installNote: solid1.length ? `${solid1.join(", ")} still depends on Solid 1 helper packages, which peer on solid-js 1: pnpm's strict-peer-dependencies (fatal by default in pnpm 12) rejects them, so install with --config.strict-peer-dependencies=false, or allow solid-js 2 for them with a peerDependencyRules.allowedVersions entry ("solid-js": "2") in pnpm-workspace.yaml` : null,
       ported: reactish.filter((name) => PORTS[name]).map((name) => `${name} -> ${PORTS[name].to}${PORTS[name].version ? `@${PORTS[name].version}` : ""}${PORTS[name].note ? ` (${PORTS[name].note})` : ""}`),
@@ -163,8 +170,9 @@ export default async function main({ params }: { params: { include?: string; app
     const results = pending.map((o) => JSON.parse(JSON.stringify(o.result)));
     // An import of a converted workspace package by name resolves to its source.
     const modules = Object.assign({}, ...manifests.outputs.filter((m) => packages.includes(m.path.replace(/\/?package\.json$/, "")) && m.name).map((m) => packageModules({ dir: m.path.replace(/\/?package\.json$/, ""), name: m.name, ...m.entry })));
-    applyContracts(results, { modules });
-    return Object.fromEntries(pending.map((o, i) => [o.file, results[i]]));
+    // The pass names files by an absolute-looking path (above); the order is the work list's.
+    const order = applyContracts(results, { modules }).map((file: string) => file.slice(1));
+    return { byFile: Object.fromEntries(pending.map((o, i) => [o.file, results[i]])), order };
   });
   // nextRoutes: where each App Router file goes. The App Router is the package's src/app (converted
   // from src/) or its app/ (converted from the package root); either way the routes go to src/routes
@@ -188,7 +196,7 @@ export default async function main({ params }: { params: { include?: string; app
   // imports re-pointed from there.
   const converted = await step(apply ? "Convert each file to Solid 2" : "Preview the conversion of each file", forEachFile(sources, (file) => {
     if (alreadySolid.includes(file.path)) return { file: file.path, changed: false, applied: {}, flags: [], to: null, document: null };
-    const result = decided[file.path];
+    const result = decided.byFile[file.path];
     const route = routes?.entries[file.path] ?? null;
     let code = file.text;
     if (result && !result.parseError) {
@@ -201,7 +209,10 @@ export default async function main({ params }: { params: { include?: string; app
     const changed = out !== file.text;
     if (apply && changed) file.write(out);
     if (apply && route) file.rename(route.to);
-    return { file: file.path, changed, applied, flags, to: route?.to ?? null, document: document ?? null };
+    // For the work list: each flagged line as converted, and the `// solid:` note above it.
+    const lines = out.split("\n");
+    const quoted = flags.map((f) => (f.line ? { ...f, excerpt: lines[f.line - 1].trim().slice(0, 200), note: /^\s*\/\/ solid:/.test(lines[f.line - 2] ?? "") ? lines[f.line - 2].trim() : null } : f));
+    return { file: file.path, changed, applied, flags: quoted, to: route?.to ?? null, document: document ?? null };
   }));
   // The package that owns the converted directory moves to Solid 2: its package.json, the
   // tsconfig files between it and the directory, and its Vite config. A package.json or tsconfig
@@ -301,7 +312,7 @@ export default async function main({ params }: { params: { include?: string; app
         ? p.usedBy.map((user) => ({ line: 0, kind: "workspace", detail: `${p.name ?? p.dir} was converted with ${owner || "."}, and ${user} depends on it too: ${user} breaks until it's converted as well, or uses a React copy of ${p.dir}` }))
         : [{ line: 0, kind: "workspace", detail: `${p.name ?? p.dir} (${p.dir}) is a workspace package that depends on React, and this run doesn't convert it, so ${owner || "."} still imports React code from it: run with --param workspace=true to convert it in the same run${p.usedBy.length ? `, which changes it for ${p.usedBy.join(", ")} too` : ""}` }],
     }));
-    return summarize(files, decided, [...fileFlags, ...routeFlags, ...projectFlags, ...workspaceFlags]);
+    return summarize(files, decided.byFile, [...fileFlags, ...routeFlags, ...projectFlags, ...workspaceFlags]);
   });
   // nextRoutes: which App Router files moved where, and the files written for start mode.
   const nextjs = routes ? { moved: moves, created: created.map((f) => f.path).filter((path) => !kept.includes(path)) } : undefined;
@@ -309,34 +320,76 @@ export default async function main({ params }: { params: { include?: string; app
   const result = { plan, analyzed: files.length, alreadySolid, failures: [...analyzed.failures, ...converted.failures, ...configs.failures], ...report, config: configChanges, ...(workspace ? { workspace: plan.workspace } : {}), ...(nextjs ? { nextjs } : {}) };
   const extra = `${packages.length ? `, ${packages.length} workspace package${packages.length > 1 ? "s" : ""} included` : ""}${alreadySolid.length ? ` (already Solid: ${alreadySolid.length} file${alreadySolid.length > 1 ? "s" : ""}, skipped)` : ""}`;
 
-  if (!apply) {
-    console.log(`Preview: ${changed.length} of ${files.length} files would change${extra}, and ${configChanges.length} package.json, tsconfig or Vite config files, with ${report.flags.length} flagged spots to finish by hand. Nothing was written; run again with --param apply=true to convert them, then ${plan.install}${plan.installNote ? ` (${plan.installNote})` : ""}.`);
-    return { ...result, preview: true, wouldChange: changed };
-  }
-  await step(commit("Convert React components to Solid 2", { add: [...files, ...Object.values(moves), ...(nextjs?.created ?? []), ...favicon, ...configChanges.map((c) => c.file)] }));
-
-  const lintDir = `${import.meta.dirname}/lint`;
-  await step("Install the Solid 2 lint", shell`cd ${lintDir} && { [ -x node_modules/.bin/eslint ] || npm ci --silent --no-audit --no-fund >&2; }`);
-  // Paths are relative to the target, so the command runs there (cwd "."), not in the CLI's
-  // directory. summarize.mjs prints its summary as the last line of stdout.
-  // Moved route files are linted where they now are, with the components nextRoutes wrote.
-  const lintFiles = [...files.map((f) => moves[f] ?? f), ...(nextjs?.created ?? []).filter((f) => /\.tsx?$/.test(f) && !f.endsWith(".d.ts") && routes !== null && f.startsWith(`${routes.src}/`))];
-  const linted = await step("Lint with eslint-plugin-solid (Solid 2 config)", shell({ cwd: "." })`${lintDir}/node_modules/.bin/eslint -c ${lintDir}/eslint.config.mjs -f json ${lintFiles} | node ${lintDir}/summarize.mjs`);
   let lint = {};
-  try {
-    lint = JSON.parse(linted.stdout?.trimEnd().split("\n").pop() ?? "");
-  } catch {
-    // A dry run skips shell steps; only the last 1 MiB of output comes back.
+  if (apply) {
+    await step(commit("Convert React components to Solid 2", { add: [...files, ...Object.values(moves), ...(nextjs?.created ?? []), ...favicon, ...configChanges.map((c) => c.file)] }));
+
+    const lintDir = `${import.meta.dirname}/lint`;
+    await step("Install the Solid 2 lint", shell`cd ${lintDir} && { [ -x node_modules/.bin/eslint ] || npm ci --silent --no-audit --no-fund >&2; }`);
+    // Paths are relative to the target, so the command runs there (cwd "."), not in the CLI's
+    // directory. summarize.mjs prints its summary as the last line of stdout.
+    // Moved route files are linted where they now are, with the components nextRoutes wrote.
+    const lintFiles = [...files.map((f) => moves[f] ?? f), ...(nextjs?.created ?? []).filter((f) => /\.tsx?$/.test(f) && !f.endsWith(".d.ts") && routes !== null && f.startsWith(`${routes.src}/`))];
+    const linted = await step("Lint with eslint-plugin-solid (Solid 2 config)", shell({ cwd: "." })`${lintDir}/node_modules/.bin/eslint -c ${lintDir}/eslint.config.mjs -f json ${lintFiles} | node ${lintDir}/summarize.mjs`);
+    try {
+      lint = JSON.parse(linted.stdout?.trimEnd().split("\n").pop() ?? "");
+    } catch {
+      // A dry run skips shell steps; only the last 1 MiB of output comes back.
+    }
   }
 
+  // The project's own TypeScript, once Solid 2 resolves (install=true installs it first, as the
+  // printed command would). typecheck.mjs writes every error to .react-to-solid/typecheck.json: a
+  // shell step only returns the last 1 MiB of output, less than a big app's errors.
+  const [, , ...installArgs] = plan.install.split(" ");
+  const ran = apply && typecheck ? await step(install ? "Install, then type-check with the project's TypeScript" : "Type-check with the project's TypeScript", shell({ cwd: "." })`node ${import.meta.dirname}/verify/typecheck.mjs ${owner || "."} ${install ? ["install", plan.manager, ...installArgs] : []}`) : null;
+  const types = ran && !ran.skipped ? (await step("Read the type-check", forEachFile([".react-to-solid/typecheck.json"], (file) => JSON.parse(file.text)))).outputs[0] ?? null : null;
+
+  // The work list, in both modes: a preview's is what would be left. It goes in .react-to-solid/,
+  // which ignores itself, so the run changes nothing git sees and the commit leaves it out. A
+  // workflow's console output goes to stderr between the step lines, and a shell step's arguments
+  // can't hold a big app's list, so it's written by a forEachFile step into a file a shell step makes.
+  const scripts = manifests.outputs.find((m) => m.path === plan.manifest)?.scripts ?? [];
+  const cd = owner ? `cd ${owner} && ` : "";
+  const typecheckScript = ["typecheck", "type-check", "check-types", "tsc"].find((name) => scripts.includes(name));
+  const commands = [
+    ...(apply ? [] : ["npx codemod@alpha run react-to-solid --param apply=true"]),
+    plan.install,
+    ...(typecheckScript ? [`${cd}${plan.manager} run ${typecheckScript}`] : types?.configs ? types.configs.map((config: string) => `npx tsc --noEmit -p ${config}`) : [`${cd}npx tsc --noEmit`]),
+    ...["lint", "test", "build"].filter((name) => scripts.includes(name)).map((name) => `${cd}${plan.manager} run ${name}`),
+  ];
+  const checked = !apply ? null
+    : !typecheck ? { status: "skipped", detail: "typecheck=false" }
+    : !types ? { status: "skipped", detail: "a dry run runs no commands" }
+    : types.status === "checked" ? { status: "checked", detail: `TypeScript ${types.typescript} on ${types.configs.join(", ")}, ${types.chunks} ${types.chunks === 1 ? "chunk" : "chunks"}${types.unchecked.length ? `; not checked, out of memory or time: ${types.unchecked.join(", ")}` : ""}` }
+    : { status: "skipped", detail: types.reason };
+  const worklist = await step("Write the work list", () => renderWorklist({
+    mode: apply ? "apply" : "preview",
+    root,
+    flags: report.flags,
+    errors: types?.errors ?? [],
+    order: decided.order.map((file: string) => (apply && moves[file]) || file),
+    typecheck: checked,
+    commands,
+  }));
+  await step("Make .react-to-solid/", shell({ cwd: "." })`mkdir -p .react-to-solid && { [ -e .react-to-solid/.gitignore ] || printf '*\n' > .react-to-solid/.gitignore; } && : > .react-to-solid/worklist.md`);
+  await step("Save the work list", forEachFile([".react-to-solid/worklist.md"], (file) => file.write(worklist)));
+  const listed = ".react-to-solid/worklist.md";
+
+  if (!apply) {
+    console.log(`Preview: ${changed.length} of ${files.length} files would change${extra}, and ${configChanges.length} package.json, tsconfig or Vite config files, with ${report.flags.length} flagged spots to finish by hand, listed in ${listed}. Nothing else was written; run again with --param apply=true to convert them, then ${plan.install}${plan.installNote ? ` (${plan.installNote})` : ""}.`);
+    return { ...result, preview: true, wouldChange: changed, worklist: listed };
+  }
   if ((params.agent === true || params.agent === "true") && report.flags.length) {
     await step(approval(`Hand ${report.flags.length} flagged spots to an agent?`));
-    await step("Finish flagged spots", agent(agentPrompt(report.flags), { maxSteps: 40 }));
+    await step("Finish flagged spots", agent(worklist, { maxSteps: 40 }));
   }
-  // Nothing was installed: the dependency changes only take effect after an install.
   const routed = nextjs ? `, moved ${Object.keys(moves).length} App Router files to Solid's file routes and wrote ${nextjs.created.length} start-mode files` : "";
-  console.log(`Converted ${changed.length} of ${files.length} files${extra} and ${configChanges.length} package.json, tsconfig or Vite config files${routed}, with ${report.flags.length} flagged spots to finish by hand. Next: ${plan.install}${plan.installNote ? ` (${plan.installNote})` : ""}, then type-check and build.`);
-  return { ...result, changed, lint };
+  const typed = types?.status === "checked" ? `${types.errors.length} type errors` : `type-check skipped (${checked?.detail})`;
+  const next = types?.install?.ok ? "" : ` Next: ${plan.install}${plan.installNote ? ` (${plan.installNote})` : ""}, then type-check and build.`;
+  console.log(`Converted ${changed.length} of ${files.length} files${extra} and ${configChanges.length} package.json, tsconfig or Vite config files${routed}, with ${report.flags.length} flagged spots to finish by hand and ${typed}, listed in ${listed}.${next}`);
+  // The errors themselves are in the work list and .react-to-solid/typecheck.json.
+  return { ...result, changed, lint, typecheck: types ? { ...types, errors: types.errors?.length ?? 0 } : checked, worklist: listed };
 }
 
 
@@ -356,12 +409,4 @@ function summarize(files: string[], decided: Record<string, any>, ruleResults: {
     for (const f of r.flags) flags.push({ file: r.file, ...f });
   }
   return { compiler, decisions, applied, flags };
-}
-
-function agentPrompt(flags: { file: string; line: number; kind: string; detail: string }[]) {
-  return [
-    "These files were converted from React to Solid 2 by a codemod. Finish the spots it flagged.",
-    "Keep each `// solid:` note accurate. Do not touch code that was not flagged.",
-    ...flags.map((f) => `- ${f.file}:${f.line} ${f.kind}: ${f.detail}`),
-  ].join("\n");
 }
