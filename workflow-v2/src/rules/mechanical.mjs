@@ -790,7 +790,8 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
   // component still converts.
   pass((root) =>
     root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: "^(React\\.)?(useCallback|memo|useEffectEvent)$" } } }).flatMap((call) => {
-      const [fn] = kids(call.field("arguments"));
+      // A comment before fn goes with the call.
+      const fn = arg(call.field("arguments"));
       if (!fn) return [];
       note(call.field("function").text().replace("React.", ""));
       return [{ start: call.range().start.index, end: fn.range().start.index, text: "" }, { start: fn.range().end.index, end: call.range().end.index, text: "" }];

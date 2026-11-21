@@ -246,7 +246,7 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 ## Tests
 
 ```sh
-pnpm test                                       # reactivity (55), rule (187), project file (34), workspace (8), Next.js route (15) and Solid behavior (12) specs
+pnpm test                                       # reactivity (55), rule (188), project file (34), workspace (8), Next.js route (15) and Solid behavior (12) specs
 CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (47, tagged slow), which run the CLI on copies of tests/fixtures/todo-app and tests/fixtures/pnpm-monorepo, and on Next.js apps the specs write
 ```
 

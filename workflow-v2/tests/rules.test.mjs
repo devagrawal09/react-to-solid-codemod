@@ -136,6 +136,11 @@ it("R24 keeps a hook's result as an object instead of destructuring it once", ()
   expect(flat(code)).toContain(`const settingsScope = useSettingsScope(); return <b>{settingsScope.environment.name}{settingsScope.scope}</b>;`);
 });
 
+it("R4 unwraps useCallback when a comment comes before its function", () => {
+  const code = `function C() {\n  const onRef = useCallback(\n    // a ref callback\n    (node) => { setup(node); },\n    [],\n  );\n  return <canvas ref={onRef} />;\n}`;
+  expect(flat(code)).toContain(`const onRef = (node) => { setup(node); }; return <canvas ref={onRef} />;`);
+});
+
 it("R24 reads a quoted key of a hook's result with brackets", () => {
   const code = `function C() { const { "data-id": id, open } = useItem(); return <b>{id}{open}</b>; }`;
   expect(flat(code)).toContain(`const item = useItem(); return <b>{item["data-id"]}{item.open}</b>;`);
