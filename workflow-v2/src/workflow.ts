@@ -36,7 +36,7 @@ import { renderWorklist } from "./worklist.mjs";
 
 const NOT_SHIPPED = /^(@types\/|babel-plugin-react-compiler$|eslint-plugin-react|typescript$)/;
 
-export default async function main({ params }: { params: { include?: string; apply?: boolean | string; install?: boolean | string; typecheck?: boolean | string; agent?: boolean | string; nextRoutes?: boolean | string; workspace?: boolean | string; cache?: boolean | string } }) {
+export default async function main({ params }: { params: { include?: string; apply?: boolean | string; install?: boolean | string; typecheck?: boolean | string; agent?: boolean | string; nextRoutes?: boolean | string; workspace?: boolean | string; workspaceExclude?: string; cache?: boolean | string } }) {
   // --param values arrive as JSON when they parse as JSON, so true is a boolean.
   const apply = params.apply === true || params.apply === "true";
   const install = params.install === true || params.install === "true";
@@ -52,6 +52,9 @@ export default async function main({ params }: { params: { include?: string; app
   const root = (params.include ?? fallback).replace(/\/$/, "").replace(/^\.$/, "");
   const at = root ? `${root}/` : "";
   const workspace = params.workspace === true || params.workspace === "true";
+  // workspaceExclude: workspace packages to leave as they are, by name or directory, `*` within a
+  // segment and `**` across them (an email-template package that renders React to HTML).
+  const excludes = String(params.workspaceExclude ?? "").split(",").map((pattern) => pattern.trim()).filter(Boolean);
 
   // A package's name and entry points say what an import of it by name resolves to (workspace=true).
   const manifests = await step("Read package.json files", forEachFile("**/package.json", (file) => {
@@ -90,7 +93,9 @@ export default async function main({ params }: { params: { include?: string; app
     // and their dependencies are then this run's as well.
     const globs = pnpmWorkspace.outputs[0] ?? manifests.outputs.find((m) => m.path === "package.json")?.workspaces ?? [];
     const linked = workspaceDependencies(manifests.outputs, globs, owner ?? "", { pnpm: pnpmWorkspace.outputs.length > 0 }).filter((p) => p.react && p.dir !== "" && !(root === p.dir || root.startsWith(`${p.dir}/`)));
-    const used = workspace ? Object.assign({}, deps, ...linked.map((p) => manifests.outputs.find((m) => m.path === `${p.dir}/package.json`)?.deps)) : deps;
+    const patterns = excludes.map((pattern) => ({ pattern, re: new RegExp(`^${pattern.replace(/^\.\//, "").replace(/\/$/, "").replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\0").replace(/\*/g, "[^/]*").replace(/\0/g, ".*")}$`) }));
+    const excluded = linked.filter((p) => patterns.some(({ re }) => re.test(p.dir) || (p.name !== null && re.test(p.name))));
+    const used = workspace ? Object.assign({}, deps, ...linked.filter((p) => !excluded.includes(p)).map((p) => manifests.outputs.find((m) => m.path === `${p.dir}/package.json`)?.deps)) : deps;
     const names = linked.map((p) => p.name);
     // Without a lockfile that records peers, a name with "react" in it stands in for a React peer.
     const reactish = Object.keys(used).filter((name) => ((peers ? peers.includes(name) : /react/i.test(name)) || name in PORTS || name in NO_PORT) && !NOT_SHIPPED.test(name) && !names.includes(name)).sort();
@@ -113,11 +118,13 @@ export default async function main({ params }: { params: { include?: string; app
       byName: reactish.filter((name) => PORTS[name]?.lacks),
       // The workspace packages that depend on React (converted with workspace=true), and the other
       // packages that use each.
-      workspace: linked.map((p) => ({ dir: p.dir, name: p.name, usedBy: p.usedBy })),
+      workspace: linked.map((p) => ({ dir: p.dir, name: p.name, usedBy: p.usedBy, ...(excluded.includes(p) ? { excluded: true } : {}) })),
+      // workspaceExclude's patterns that name none of them: a typo, or a package this one doesn't use.
+      unmatched: patterns.filter(({ re }) => !linked.some((p) => re.test(p.dir) || (p.name !== null && re.test(p.name)))).map(({ pattern }) => pattern),
     };
   });
   const ports = Object.fromEntries(plan.byName.map((name) => [name, PORTS[name]]));
-  const packages = workspace ? plan.workspace.map((p) => p.dir) : [];
+  const packages = workspace ? plan.workspace.filter((p) => !p.excluded).map((p) => p.dir) : [];
   // Test files too: the rule pass converts @testing-library/react's API to @solidjs/testing-library's.
   // From a package's root, the config files (next.config.ts, ...) and build output aren't its code.
   const sources = {
@@ -335,14 +342,16 @@ export default async function main({ params }: { params: { include?: string; app
       if (own.length && !own.some((o) => o.jsx)) projectFlags.push({ file: dir, applied: {}, flags: [{ line: 0, kind: "build config", detail: `no tsconfig in ${dir} sets jsx: set "jsx": "preserve" and "jsxImportSource": "@solidjs/web" in the one it extends, or in its own` }] });
     }
     // A workspace package that depends on React: converted with workspace=true, which changes it for
-    // the other packages that use it too; otherwise this app keeps importing React code from it.
+    // the other packages that use it too; otherwise (or excluded) this app keeps importing React code
+    // from it.
     const workspaceFlags = plan.workspace.map((p) => ({
-      file: workspace ? `${p.dir}/package.json` : plan.manifest,
+      file: workspace && !p.excluded ? `${p.dir}/package.json` : plan.manifest,
       applied: {},
-      flags: workspace
+      flags: workspace && !p.excluded
         ? p.usedBy.map((user) => ({ line: 0, kind: "workspace", detail: `${p.name ?? p.dir} was converted with ${owner || "."}, and ${user} depends on it too: ${user} breaks until it's converted as well, or uses a React copy of ${p.dir}` }))
-        : [{ line: 0, kind: "workspace", detail: `${p.name ?? p.dir} (${p.dir}) is a workspace package that depends on React, and this run doesn't convert it, so ${owner || "."} still imports React code from it: run with --param workspace=true to convert it in the same run${p.usedBy.length ? `, which changes it for ${p.usedBy.join(", ")} too` : ""}` }],
+        : [{ line: 0, kind: "workspace", detail: `${p.name ?? p.dir} (${p.dir}) is a workspace package that depends on React, and this run doesn't convert it, so ${owner || "."} still imports React code from it: ${workspace ? "--param workspaceExclude leaves it out; take it off that list" : "run with --param workspace=true"} to convert it in the same run${p.usedBy.length ? `, which changes it for ${p.usedBy.join(", ")} too` : ""}` }],
     }));
+    if (workspace && plan.unmatched.length) workspaceFlags.push({ file: plan.manifest, applied: {}, flags: plan.unmatched.map((pattern) => ({ line: 0, kind: "workspace", detail: `--param workspaceExclude=${pattern} matches no workspace package that ${owner || "."} depends on and that depends on React` })) });
     return summarize(files, decided.byFile, [...fileFlags, ...routeFlags, ...projectFlags, ...workspaceFlags]);
   });
   // nextRoutes: which App Router files moved where, and the files written for start mode.

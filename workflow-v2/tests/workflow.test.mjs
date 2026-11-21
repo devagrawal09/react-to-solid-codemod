@@ -486,6 +486,27 @@ describe.skipIf(!bin)("react-to-solid workflow with workspace=true on a pnpm mon
   });
 });
 
+describe.skipIf(!bin)("react-to-solid workflow with workspace=true and workspaceExclude", { tags: ["slow"] }, () => {
+  it("leaves an excluded package as it is, flags it as not converted, and flags a pattern that matches nothing", () => {
+    const repo = givenApp(() => {}, monorepo);
+    const run = migrate(repo, ["apply=true", "include=apps/web/src", "workspace=true", "workspaceExclude=@repo/hook*, packages/nothing"]);
+    expect(run.status).toBe("succeeded");
+    const changed = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" }).split("\n").filter(Boolean).map((line) => line.slice(3));
+    expect(changed.filter((file) => file.startsWith("packages/hooks"))).toEqual([]);
+    expect(changed).toContain("packages/ui/src/toggle.tsx");
+    expect(run.output.analyzed).toBe(2);
+    expect(run.output.workspace).toEqual([{ dir: "packages/ui", name: "@repo/ui", usedBy: ["apps/docs"] }, { dir: "packages/hooks", name: "@repo/hooks", usedBy: [], excluded: true }]);
+    expect(run.output.flags.filter((f) => f.kind === "workspace")).toEqual([
+      { file: "packages/ui/package.json", line: 0, kind: "workspace", detail: "@repo/ui was converted with apps/web, and apps/docs depends on it too: apps/docs breaks until it's converted as well, or uses a React copy of packages/ui" },
+      { file: "apps/web/package.json", line: 0, kind: "workspace", detail: "@repo/hooks (packages/hooks) is a workspace package that depends on React, and this run doesn't convert it, so apps/web still imports React code from it: --param workspaceExclude leaves it out; take it off that list to convert it in the same run" },
+      { file: "apps/web/package.json", line: 0, kind: "workspace", detail: "--param workspaceExclude=packages/nothing matches no workspace package that apps/web depends on and that depends on React" },
+    ]);
+    // The excluded package's hook is a React library's to the converted ones.
+    expect(read(repo, "packages/ui/src/toggle.tsx")).toContain("useToggle(false)");
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "packages/ui/src/toggle.tsx", kind: "custom hook call" }));
+  }, 120_000);
+});
+
 describe.skipIf(!bin)("react-to-solid workflow on a pnpm monorepo without workspace=true", { tags: ["slow"] }, () => {
   it("converts only the app, and flags each React workspace package it uses with the param that converts it", () => {
     const repo = givenApp(() => {}, monorepo);
