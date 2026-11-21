@@ -117,24 +117,38 @@ export default async function main({ params }: { params: { include?: string; app
     include: [`${at}**/*.tsx`, `${at}**/*.ts`, ...packages.flatMap((dir) => [`${dir}/**/*.tsx`, `${dir}/**/*.ts`])],
     exclude: ["**/*.d.ts", ...(root ? [] : ["*.config.*", "**/node_modules/**", ".next/**", "dist/**"]), ...(packages.length ? ["**/node_modules/**"] : []), ...packages.flatMap((dir) => [`${dir}/*.config.*`, `${dir}/.next/**`, `${dir}/.turbo/**`, `${dir}/dist/**`, `${dir}/build/**`])],
   };
-  // Libraries that only work with React: a file importing one isn't Solid yet.
-  const reactOnly = [...(peers ?? []), ...Object.keys(PORTS).filter((name) => PORTS[name].to !== name), ...Object.keys(NO_PORT)];
+  // Libraries whose port takes their names: the rule pass moves their imports (R44), so a file that
+  // still imports one wasn't converted. Other React libraries stay in converted files, flagged.
+  const movedByName = Object.keys(PORTS).filter((name) => PORTS[name].lacks);
   const solidPorts = Object.values(PORTS).map((port) => port.to).filter((name) => !(name in PORTS));
 
   if (apply) await step(branch("react-to-solid-2"));
   // Each step returns its per-file results; nothing goes through state.
   const analyzed = await step("Run the React Compiler on each file", forEachFile(sources, (file) => {
     // Already Solid (a second run, or a file a person converted): it imports solid-js, @solidjs/* or
-    // a Solid port, and nothing from React or a library that only works with React. Converting it
-    // again would wrap merge() in a memo and call solid-query's results. A file that imports neither
-    // (a util, or a component with no imports) is converted as before; the rules leave it alone.
-    const imported = parse(file.text, { language: "tsx" }).root().children()
+    // a Solid port, or has the `// solid:` notes this workflow writes (a converted file that needs
+    // no Solid import, such as one whose hooks come from react-router), and it imports nothing from
+    // react or a library whose port takes its names. Converting it again would wrap merge() in a
+    // memo, call solid-query's results and write each note twice. The rule pass removes every
+    // react import but R39's (React's Component or PureComponent, or `* as React` for
+    // React.Component, kept for a class it leaves), which doesn't make a file React; it leaves
+    // react-dom's other names and React libraries without such a port, flagged, so those don't
+    // either. A file with neither Solid imports nor notes (a util, or a component the rules had
+    // nothing to do in) is converted as before; the rules leave it alone.
+    const imports = parse(file.text, { language: "tsx" }).root().children()
       .filter((node) => node.kind() === "import_statement" || node.kind() === "export_statement")
-      .map((node) => node.field("source")?.text().slice(1, -1))
-      .filter((source): source is string => !!source)
-      .map((source) => source.split("/").slice(0, source.startsWith("@") ? 2 : 1).join("/"));
-    const solid = imported.some((name) => name === "solid-js" || name.startsWith("@solidjs/") || solidPorts.includes(name));
-    const react = imported.some((name) => name === "react" || name === "react-dom" || reactOnly.includes(name) || (!peers && /react/i.test(name)));
+      .map((node) => ({ text: node.text(), source: node.field("source")?.text().slice(1, -1) ?? "" }))
+      .filter((i) => i.source)
+      .map((i) => ({ ...i, name: i.source.split("/").slice(0, i.source.startsWith("@") ? 2 : 1).join("/") }));
+    const solid = /^[ \t]*\/\/ solid: /m.test(file.text) || imports.some((i) => i.name === "solid-js" || i.name.startsWith("@solidjs/") || solidPorts.includes(i.name));
+    const react = imports.some((i) => {
+      if (i.source === "react") {
+        const named = i.text.match(/^import\s*\{([^}]*)\}\s*from/)?.[1];
+        if (named !== undefined && named.split(",").map((s) => s.trim()).filter(Boolean).every((s) => /^(Pure)?Component(\s+as\s+[\w$]+)?$/.test(s))) return false;
+        if (/^import\s*\*\s*as\s+React\s+from/.test(i.text) && [...file.text.matchAll(/\bReact\.(\w+)/g)].every((m) => /^(Pure)?Component$/.test(m[1]))) return false;
+      }
+      return i.source === "react" || i.source.startsWith("react/") || movedByName.includes(i.name);
+    });
     if (solid && !react) return { file: file.path, solid: true, result: null };
     // contracts.mjs finds `~/` imports by an absolute-looking path. The round trip drops the
     // `undefined` fields the pass leaves, which step outputs reject.

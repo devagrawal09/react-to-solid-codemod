@@ -432,6 +432,15 @@ describe.skipIf(!bin)("react-to-solid workflow run twice", { tags: ["slow"] }, (
   // Already Solid: converting them again wrapped merge() in a memo and called solid-query's result.
   const badge = `import { merge } from "solid-js";\nimport { Check } from "@lucide/solid";\n\nexport function Badge(props: { icon?: typeof Check; text: string }) {\n  const merged = merge({ icon: Check }, props);\n  const Icon = merged.icon;\n  return <span><Icon />{merged.text}</span>;\n}\n`;
   const count = `import { useQuery } from "@tanstack/solid-query";\n\nexport function Count() {\n  const query2 = useQuery(() => ({ queryKey: ["count"], queryFn: () => 1 }));\n  return <p>{query2.data}</p>;\n}\n`;
+  // React: R42 converts Hint (merge() then imports from solid-js) and R39 leaves Counter, which keeps
+  // React's Component import, so the second run sees a file that imports both.
+  // React: R8 turns the rest into omit() from solid-js, and the react-router import stays (no port
+  // that takes its names), as bulletproof-react's Link does.
+  const navLink = `import { Link, type LinkProps } from "react-router";\n\nexport const NavLink = ({ className, ...rest }: LinkProps) => {\n  return <Link className={className} {...rest} />;\n};\n`;
+  // React: the conversion writes its notes and needs no Solid import (react-router's hooks stay), as
+  // bulletproof-react's login route does.
+  const back = `import { useNavigate, useSearchParams } from "react-router";\n\nexport function Back() {\n  const navigate = useNavigate();\n  const [searchParams] = useSearchParams();\n  const to = searchParams.get("to") ?? "/";\n  return <button onClick={() => navigate(to)}>Back</button>;\n}\n`;
+  const legacy = `import { Component } from "react";\n\nexport class Hint extends Component<{ text: string; tone?: string }> {\n  static defaultProps = { tone: "muted" };\n  render() {\n    return <small className={this.props.tone}>{this.props.text}</small>;\n  }\n}\n\nexport class Counter extends Component<{ step: number }, { count: number }> {\n  state = { count: 0 };\n  render() {\n    return <button onClick={() => this.setState({ count: this.state.count + this.props.step })}>{this.state.count}</button>;\n  }\n}\n`;
   beforeAll(() => {
     app = givenApp((dir) => {
       const pkg = JSON.parse(read(dir, "package.json"));
@@ -442,6 +451,9 @@ describe.skipIf(!bin)("react-to-solid workflow run twice", { tags: ["slow"] }, (
       fs.writeFileSync(path.join(dir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
       fs.writeFileSync(path.join(dir, "src/components/Badge.tsx"), badge);
       fs.writeFileSync(path.join(dir, "src/components/Count.tsx"), count);
+      fs.writeFileSync(path.join(dir, "src/components/Legacy.tsx"), legacy);
+      fs.writeFileSync(path.join(dir, "src/components/NavLink.tsx"), navLink);
+      fs.writeFileSync(path.join(dir, "src/components/Back.tsx"), back);
     });
     first = migrate(app);
   }, 120_000);
@@ -450,6 +462,9 @@ describe.skipIf(!bin)("react-to-solid workflow run twice", { tags: ["slow"] }, (
     expect(read(app, "src/components/Badge.tsx")).toBe(badge);
     expect(read(app, "src/components/Count.tsx")).toBe(count);
     expect(first.output.alreadySolid).toEqual(["src/components/Badge.tsx", "src/components/Count.tsx"]);
+    expect(read(app, "src/components/Back.tsx")).toMatch(/^import \{ useNavigate, useSearchParams \} from "react-router";\n[^]*\/\/ solid: navigate: static/);
+    expect(read(app, "src/components/NavLink.tsx")).toContain(`const rest = omit(props, "class");`);
+    expect(read(app, "src/components/Legacy.tsx")).toMatch(/^import \{ merge \} from "solid-js";\nimport \{ Component \} from "react";\n/);
   });
 
   it("changes nothing the second time: source, package.json, tsconfig and the Vite config", () => {
@@ -460,7 +475,8 @@ describe.skipIf(!bin)("react-to-solid workflow run twice", { tags: ["slow"] }, (
     expect(execFileSync("git", ["status", "--porcelain"], { cwd: app, encoding: "utf8" })).toBe("");
     expect(again.output.config).toEqual([]);
     // App.tsx imports nothing from Solid or React, so it goes through the rules again, unchanged.
-    expect(again.output.alreadySolid).toEqual(["src/components/Badge.tsx", "src/components/Clock.tsx", "src/components/Count.tsx", "src/components/ThemeContext.tsx", "src/components/TodoItem.tsx", "src/components/TodoList.tsx", "src/hooks/useFilter.ts"]);
+    expect(again.output.alreadySolid).toEqual(["src/components/Back.tsx", "src/components/Badge.tsx", "src/components/Clock.tsx", "src/components/Count.tsx", "src/components/Legacy.tsx", "src/components/NavLink.tsx", "src/components/ThemeContext.tsx", "src/components/TodoItem.tsx", "src/components/TodoList.tsx", "src/hooks/useFilter.ts"]);
+    // Counter's class component flag is the note R39 left in the file, not a new one.
     expect(again.output.flags).toEqual([]);
   }, 120_000);
 });
