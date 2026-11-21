@@ -179935,15 +179935,20 @@ ${printAliasingSignature(signature)}`
     "react-redux": { useDispatch: S, useStore: S }
   };
   var STATIC_DECISIONS = /* @__PURE__ */ new Set(["static", "function", "unused"]);
-  function resolveImport(fromFile, source, files) {
-    let base;
-    if ((source.startsWith("~/") || source.startsWith("@/")) && fromFile.includes("/src/")) base = import_node_path.default.join(fromFile.slice(0, fromFile.indexOf("/src/") + "/src/".length), source.slice(2));
-    else if (source.startsWith(".")) base = import_node_path.default.join(import_node_path.default.dirname(fromFile), source);
-    else return null;
-    for (const ext of ["", ".ts", ".tsx", "/index.ts", "/index.tsx"]) if (files.has(base + ext)) return base + ext;
+  function resolveImport(fromFile, source, files, modules = {}) {
+    let bases;
+    if ((source.startsWith("~/") || source.startsWith("@/")) && fromFile.includes("/src/")) bases = [import_node_path.default.join(fromFile.slice(0, fromFile.indexOf("/src/") + "/src/".length), source.slice(2))];
+    else if (source.startsWith(".")) bases = [import_node_path.default.join(import_node_path.default.dirname(fromFile), source)];
+    else if (modules[source]) bases = modules[source];
+    else {
+      const pattern = Object.keys(modules).find((key) => key.endsWith("/*") && source.startsWith(key.slice(0, -1)));
+      if (!pattern) return null;
+      bases = modules[pattern].map((to) => to.replace("*", source.slice(pattern.length - 1)));
+    }
+    for (const base of bases) for (const ext of ["", ".ts", ".tsx", "/index.ts", "/index.tsx"]) if (files.has(base + ext)) return base + ext;
     return null;
   }
-  function buildContracts(results) {
+  function buildContracts(results, { modules = {} } = {}) {
     const files = new Map(results.map((r) => [r.file, r]));
     const hooks = /* @__PURE__ */ new Map();
     for (const r of results) for (const fn of r.functions) if (fn.kind === "hook" && fn.name) hooks.set(`${r.file}#${fn.name}`, fn);
@@ -179969,7 +179974,7 @@ ${printAliasingSignature(signature)}`
       if (!callee) return null;
       const imp = files.get(file)?.imports?.[callee];
       if (imp) {
-        const resolved = resolveImport(file, imp.source, files);
+        const resolved = resolveImport(file, imp.source, files, modules);
         if (resolved && imp.imported !== "default" && imp.imported !== "*") return files.get(resolved).stores?.[imp.imported] ? { store: files.get(resolved).stores[imp.imported] } : { key: `${resolved}#${imp.imported}` };
         const library = Object.entries(LIBRARY).find(([source]) => source === imp.source)?.[1];
         if (library?.[imp.imported]) return { library: library[imp.imported] };
@@ -180039,8 +180044,8 @@ ${printAliasingSignature(signature)}`
     }
     return c;
   }
-  function applyContracts(results) {
-    const { settle } = buildContracts(results);
+  function applyContracts(results, { modules = {} } = {}) {
+    const { settle } = buildContracts(results, { modules });
     for (const r of results) for (const fn of r.functions) settle(r.file, fn, /* @__PURE__ */ new Set());
   }
 

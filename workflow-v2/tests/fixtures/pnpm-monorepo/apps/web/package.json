@@ -1,0 +1,15 @@
+{
+  "name": "web",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@repo/ui": "workspace:*",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  },
+  "devDependencies": {
+    "@repo/tsconfig": "workspace:*",
+    "@vitejs/plugin-react": "^6.1.2",
+    "vite": "^8.3.6"
+  }
+}

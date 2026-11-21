@@ -16,16 +16,24 @@
 // With --param nextRoutes=true, a Next.js App Router (src/app, or app/ at the package root) also
 // moves to Solid's file routes (src/nextjs.mjs): route files go to src/routes, the root layout
 // becomes src/Document.tsx, and start mode's files (src/App.tsx, vite.config.ts, ...) are written.
+//
+// With --param workspace=true, the workspace packages the converted package depends on that depend
+// on React (src/workspaces.mjs) are converted in the same run: their files, package.json, tsconfig
+// and Vite config, with hook contracts followed into them by package name.
+//
+// A file that's already Solid (it imports Solid and nothing from React) is skipped, so a second run
+// changes nothing.
 import { step, forEachFile, shell, agent, approval, branch, commit } from "codemod/workflow";
 import { parse } from "codemod/ast-grep";
 import { applyContracts, decide, extract, rewrite } from "./lib/reactivity.mjs";
 import { transform } from "./rules/mechanical.mjs";
 import { NO_PORT, PORTS, migratePackageJson, migrateTsconfig, migrateViteConfig, reactPeers } from "./manifests.mjs";
 import { moveImports, nextAppFiles, nextConfigKeys, planNextRoutes } from "./nextjs.mjs";
+import { packageModules, pnpmWorkspaces, workspaceDependencies } from "./workspaces.mjs";
 
 const NOT_SHIPPED = /^(@types\/|babel-plugin-react-compiler$|eslint-plugin-react|typescript$)/;
 
-export default async function main({ params }: { params: { include?: string; apply?: boolean | string; agent?: boolean | string; nextRoutes?: boolean | string } }) {
+export default async function main({ params }: { params: { include?: string; apply?: boolean | string; agent?: boolean | string; nextRoutes?: boolean | string; workspace?: boolean | string } }) {
   // --param values arrive as JSON when they parse as JSON, so true is a boolean.
   const apply = params.apply === true || params.apply === "true";
   const nextRoutes = params.nextRoutes === true || params.nextRoutes === "true";
@@ -38,17 +46,25 @@ export default async function main({ params }: { params: { include?: string; app
   // "" is the target's root (include=.).
   const root = (params.include ?? fallback).replace(/\/$/, "").replace(/^\.$/, "");
   const at = root ? `${root}/` : "";
-  // Test files too: the rule pass converts @testing-library/react's API to @solidjs/testing-library's.
-  // From the root, the config files (next.config.ts, ...) and build output aren't app code.
-  const sources = { include: [`${at}**/*.tsx`, `${at}**/*.ts`], exclude: ["**/*.d.ts", ...(root ? [] : ["*.config.*", "**/node_modules/**", ".next/**", "dist/**"])] };
+  const workspace = params.workspace === true || params.workspace === "true";
 
+  // A package's name and entry points say what an import of it by name resolves to (workspace=true).
   const manifests = await step("Read package.json files", forEachFile("**/package.json", (file) => {
     const pkg = JSON.parse(file.text);
-    return { path: file.path, deps: { ...pkg.peerDependencies, ...pkg.devDependencies, ...pkg.dependencies }, packageManager: pkg.packageManager ?? null };
+    return {
+      path: file.path,
+      deps: { ...pkg.peerDependencies, ...pkg.devDependencies, ...pkg.dependencies },
+      packageManager: pkg.packageManager ?? null,
+      name: typeof pkg.name === "string" ? pkg.name : null,
+      workspaces: Array.isArray(pkg.workspaces) ? pkg.workspaces : pkg.workspaces?.packages ?? null,
+      entry: { exports: pkg.exports ?? null, main: pkg.main ?? null, module: pkg.module ?? null, types: pkg.types ?? null, typings: pkg.typings ?? null, source: pkg.source ?? null },
+    };
   }));
   // The lockfile names the package manager, and which packages peer on React.
   const lockfiles = await step("Read the lockfile", forEachFile(["pnpm-lock.yaml", "yarn.lock", "bun.lock", "package-lock.json"], (file) => ({ path: file.path, peers: reactPeers(file.path, file.text) })));
   const peers = lockfiles.outputs.find((l) => l.peers)?.peers ?? null;
+  // pnpm's workspace packages; npm and yarn list theirs in the root package.json's `workspaces`.
+  const pnpmWorkspace = await step("Read the workspace definition", forEachFile(["pnpm-workspace.yaml"], (file) => pnpmWorkspaces(file.text)));
   const plan = await step("Check React libraries for Solid ports", () => {
     // Only the package.json files on the way to the converted directory: in a monorepo, the
     // other apps' dependencies say nothing about this one. The deepest one owns the directory.
@@ -61,9 +77,17 @@ export default async function main({ params }: { params: { include?: string; app
         if (owner === null || dir.length > owner.length) owner = dir;
       }
     }
-    if (!deps.react) throw new Error("No package.json here depends on react; nothing to migrate.");
+    // A package already on solid-js is a second run, or one a person finished: its files that are
+    // already Solid are skipped, and the rest converted.
+    if (!deps.react && !deps["solid-js"]) throw new Error("No package.json here depends on react; nothing to migrate.");
+    // The workspace packages it depends on that depend on React: converted too with workspace=true,
+    // and their dependencies are then this run's as well.
+    const globs = pnpmWorkspace.outputs[0] ?? manifests.outputs.find((m) => m.path === "package.json")?.workspaces ?? [];
+    const linked = workspaceDependencies(manifests.outputs, globs, owner ?? "", { pnpm: pnpmWorkspace.outputs.length > 0 }).filter((p) => p.react && p.dir !== "" && !(root === p.dir || root.startsWith(`${p.dir}/`)));
+    const used = workspace ? Object.assign({}, deps, ...linked.map((p) => manifests.outputs.find((m) => m.path === `${p.dir}/package.json`)?.deps)) : deps;
+    const names = linked.map((p) => p.name);
     // Without a lockfile that records peers, a name with "react" in it stands in for a React peer.
-    const reactish = Object.keys(deps).filter((name) => ((peers ? peers.includes(name) : /react/i.test(name)) || name in PORTS || name in NO_PORT) && !NOT_SHIPPED.test(name)).sort();
+    const reactish = Object.keys(used).filter((name) => ((peers ? peers.includes(name) : /react/i.test(name)) || name in PORTS || name in NO_PORT) && !NOT_SHIPPED.test(name) && !names.includes(name)).sort();
     // The root package.json's packageManager field, then the lockfile.
     const managers: Record<string, string> = { "pnpm-lock.yaml": "pnpm", "yarn.lock": "yarn", "bun.lock": "bun", "package-lock.json": "npm" };
     const manager = manifests.outputs.find((m) => m.path === "package.json")?.packageManager?.replace(/@.*$/, "") ?? managers[lockfiles.outputs[0]?.path ?? ""] ?? "npm";
@@ -71,7 +95,7 @@ export default async function main({ params }: { params: { include?: string; app
     // default in pnpm 12) won't install them as they are.
     const solid1 = manager === "pnpm" ? reactish.filter((name) => PORTS[name]?.solid1Peers).map((name) => PORTS[name].to) : [];
     return {
-      react: deps.react,
+      react: deps.react ?? null,
       usesReactCompiler: "babel-plugin-react-compiler" in deps,
       manifest: owner ? `${owner}/package.json` : "package.json",
       install: `${manager} install${solid1.length ? " --config.strict-peer-dependencies=false" : ""}`,
@@ -80,23 +104,67 @@ export default async function main({ params }: { params: { include?: string; app
       noPort: reactish.filter((name) => !PORTS[name]).map((name) => (NO_PORT[name] ? `${name}: ${NO_PORT[name]}` : name)),
       // Ports that export the React library's names: the rule pass imports them instead (R44).
       byName: reactish.filter((name) => PORTS[name]?.lacks),
+      // The workspace packages that depend on React (converted with workspace=true), and the other
+      // packages that use each.
+      workspace: linked.map((p) => ({ dir: p.dir, name: p.name, usedBy: p.usedBy })),
     };
   });
   const ports = Object.fromEntries(plan.byName.map((name) => [name, PORTS[name]]));
+  const packages = workspace ? plan.workspace.map((p) => p.dir) : [];
+  // Test files too: the rule pass converts @testing-library/react's API to @solidjs/testing-library's.
+  // From a package's root, the config files (next.config.ts, ...) and build output aren't its code.
+  const sources = {
+    include: [`${at}**/*.tsx`, `${at}**/*.ts`, ...packages.flatMap((dir) => [`${dir}/**/*.tsx`, `${dir}/**/*.ts`])],
+    exclude: ["**/*.d.ts", ...(root ? [] : ["*.config.*", "**/node_modules/**", ".next/**", "dist/**"]), ...(packages.length ? ["**/node_modules/**"] : []), ...packages.flatMap((dir) => [`${dir}/*.config.*`, `${dir}/.next/**`, `${dir}/.turbo/**`, `${dir}/dist/**`, `${dir}/build/**`])],
+  };
+  // Libraries whose port takes their names: the rule pass moves their imports (R44), so a file that
+  // still imports one wasn't converted. Other React libraries stay in converted files, flagged.
+  const movedByName = Object.keys(PORTS).filter((name) => PORTS[name].lacks);
+  const solidPorts = Object.values(PORTS).map((port) => port.to).filter((name) => !(name in PORTS));
 
   if (apply) await step(branch("react-to-solid-2"));
   // Each step returns its per-file results; nothing goes through state.
-  const analyzed = await step("Run the React Compiler on each file", forEachFile(sources, (file) =>
+  const analyzed = await step("Run the React Compiler on each file", forEachFile(sources, (file) => {
+    // Already Solid (a second run, or a file a person converted): it imports solid-js, @solidjs/* or
+    // a Solid port, or has the `// solid:` notes this workflow writes (a converted file that needs
+    // no Solid import, such as one whose hooks come from react-router), and it imports nothing from
+    // react or a library whose port takes its names. Converting it again would wrap merge() in a
+    // memo, call solid-query's results and write each note twice. The rule pass removes every
+    // react import but R39's (React's Component or PureComponent, or `* as React` for
+    // React.Component, kept for a class it leaves), which doesn't make a file React; it leaves
+    // react-dom's other names and React libraries without such a port, flagged, so those don't
+    // either. A file with neither Solid imports nor notes (a util, or a component the rules had
+    // nothing to do in) is converted as before; the rules leave it alone.
+    const imports = parse(file.text, { language: "tsx" }).root().children()
+      .filter((node) => node.kind() === "import_statement" || node.kind() === "export_statement")
+      .map((node) => ({ text: node.text(), source: node.field("source")?.text().slice(1, -1) ?? "" }))
+      .filter((i) => i.source)
+      .map((i) => ({ ...i, name: i.source.split("/").slice(0, i.source.startsWith("@") ? 2 : 1).join("/") }));
+    const solid = /^[ \t]*\/\/ solid: /m.test(file.text) || imports.some((i) => i.name === "solid-js" || i.name.startsWith("@solidjs/") || solidPorts.includes(i.name));
+    const react = imports.some((i) => {
+      if (i.source === "react") {
+        const named = i.text.match(/^import\s*\{([^}]*)\}\s*from/)?.[1];
+        if (named !== undefined && named.split(",").map((s) => s.trim()).filter(Boolean).every((s) => /^(Pure)?Component(\s+as\s+[\w$]+)?$/.test(s))) return false;
+        if (/^import\s*\*\s*as\s+React\s+from/.test(i.text) && [...file.text.matchAll(/\bReact\.(\w+)/g)].every((m) => /^(Pure)?Component$/.test(m[1]))) return false;
+      }
+      return i.source === "react" || i.source.startsWith("react/") || movedByName.includes(i.name);
+    });
+    if (solid && !react) return { file: file.path, solid: true, result: null };
     // contracts.mjs finds `~/` imports by an absolute-looking path. The round trip drops the
     // `undefined` fields the pass leaves, which step outputs reject.
-    ({ file: file.path, result: JSON.parse(JSON.stringify(decide(extract(file.text, `/${file.path}`)))) })));
+    return { file: file.path, solid: false, result: JSON.parse(JSON.stringify(decide(extract(file.text, `/${file.path}`)))) };
+  }));
   const files = analyzed.outputs.map((o) => o.file);
+  const alreadySolid = analyzed.outputs.filter((o) => o.solid).map((o) => o.file);
   if (files.length === 0) return { plan, files: 0, note: `no .ts/.tsx files under ${root}` };
   const decided = await step("Resolve hook contracts across files", () => {
     // Step results are frozen; applyContracts edits its input. (No structuredClone in function steps.)
-    const results = analyzed.outputs.map((o) => JSON.parse(JSON.stringify(o.result)));
-    applyContracts(results);
-    return Object.fromEntries(files.map((file, i) => [file, results[i]]));
+    const pending = analyzed.outputs.filter((o) => o.result);
+    const results = pending.map((o) => JSON.parse(JSON.stringify(o.result)));
+    // An import of a converted workspace package by name resolves to its source.
+    const modules = Object.assign({}, ...manifests.outputs.filter((m) => packages.includes(m.path.replace(/\/?package\.json$/, "")) && m.name).map((m) => packageModules({ dir: m.path.replace(/\/?package\.json$/, ""), name: m.name, ...m.entry })));
+    applyContracts(results, { modules });
+    return Object.fromEntries(pending.map((o, i) => [o.file, results[i]]));
   });
   // nextRoutes: where each App Router file goes. The App Router is the package's src/app (converted
   // from src/) or its app/ (converted from the package root); either way the routes go to src/routes
@@ -119,6 +187,7 @@ export default async function main({ params }: { params: { include?: string; app
   // stops before writing. With nextRoutes, a route file moves where the plan says, its relative
   // imports re-pointed from there.
   const converted = await step(apply ? "Convert each file to Solid 2" : "Preview the conversion of each file", forEachFile(sources, (file) => {
+    if (alreadySolid.includes(file.path)) return { file: file.path, changed: false, applied: {}, flags: [], to: null, document: null };
     const result = decided[file.path];
     const route = routes?.entries[file.path] ?? null;
     let code = file.text;
@@ -137,8 +206,10 @@ export default async function main({ params }: { params: { include?: string; app
   // The package that owns the converted directory moves to Solid 2: its package.json, the
   // tsconfig files between it and the directory, and its Vite config. A package.json or tsconfig
   // above it is shared with the rest of the workspace, so what would change there is reported.
+  // With workspace=true, the workspace packages it depends on move the same way: their package.json,
+  // the tsconfig files at their root, and their Vite config.
   // The other workspace packages that depend on React, which this run doesn't convert.
-  const reactPackages = manifests.outputs.map((m) => ({ dir: m.path.replace(/\/?package\.json$/, ""), react: "react" in m.deps })).filter((m) => m.react && !(m.dir === "" || root === m.dir || root.startsWith(`${m.dir}/`))).map((m) => m.dir);
+  const reactPackages = manifests.outputs.map((m) => ({ dir: m.path.replace(/\/?package\.json$/, ""), react: "react" in m.deps })).filter((m) => m.react && !(m.dir === "" || root === m.dir || root.startsWith(`${m.dir}/`)) && !packages.includes(m.dir)).map((m) => m.dir);
   const configs = await step(apply ? "Move package.json, tsconfig and the Vite config to Solid 2" : "Preview the package.json, tsconfig and Vite config changes", forEachFile({
     include: [
       "**/package.json", "**/tsconfig*.json",
@@ -151,8 +222,9 @@ export default async function main({ params }: { params: { include?: string; app
   }, (file) => {
     const dir = file.path.replace(/\/?[^/]+$/, "");
     const name = file.path.slice(dir ? dir.length + 1 : 0);
-    if (!(dir === "" || root === dir || root.startsWith(`${dir}/`))) return undefined;
-    const shared = !(owner === "" || dir === owner || dir.startsWith(`${owner}/`));
+    const linked = packages.includes(dir);
+    if (!(dir === "" || root === dir || root.startsWith(`${dir}/`)) && !linked) return undefined;
+    const shared = !linked && !(owner === "" || dir === owner || dir.startsWith(`${owner}/`));
     let edit;
     if (name.startsWith("next.config")) {
       if (dir !== owner) return undefined;
@@ -161,22 +233,22 @@ export default async function main({ params }: { params: { include?: string; app
       const detail = !routes ? `${name} configures Next.js, which has no Solid 2 equivalent: move what it sets (rewrites, redirects, headers, images, env) to @solidjs/vite-plugin's start mode or SolidStart and vite.config, then delete it`
         : keys.length ? `${name} sets ${keys.join(", ")}, which Next.js applied and start mode doesn't read: port each to vite.config.ts or a start-mode middleware (redirects, rewrites and headers are a middleware; env is Vite's import.meta.env or the plugin's env.ts), then delete it`
         : `${name} sets nothing: delete it`;
-      return { file: file.path, shared: false, changes: [], flags: [{ kind: "build config", detail }], jsx: false, paths: false, vite: false };
+      return { file: file.path, shared: false, changes: [], flags: [{ kind: "build config", detail }], jsx: false, paths: false, vite: false, linked: false };
     }
     if (name.startsWith("jest.config")) {
       if (dir !== owner) return undefined;
-      return { file: file.path, shared: false, changes: [], flags: [{ kind: "build config", detail: `${name} runs the tests on Jest, and Solid's test setup is Vitest with @solidjs/vite-plugin, which compiles Solid's JSX and resolves Solid's browser build: move the tests to Vitest (the converted tests import @solidjs/testing-library), or give Jest babel-preset-solid and the "browser" and "development" export conditions` }], jsx: false, paths: false, vite: false };
+      return { file: file.path, shared: false, changes: [], flags: [{ kind: "build config", detail: `${name} runs the tests on Jest, and Solid's test setup is Vitest with @solidjs/vite-plugin, which compiles Solid's JSX and resolves Solid's browser build: move the tests to Vitest (the converted tests import @solidjs/testing-library), or give Jest babel-preset-solid and the "browser" and "development" export conditions` }], jsx: false, paths: false, vite: false, linked: false };
     }
     if (name === "package.json") edit = migratePackageJson(file.text, peers, { next: !!routes && !shared && dir === owner });
     else if (name.startsWith("tsconfig")) edit = migrateTsconfig(file.text, { dir, reactPackages });
-    else if (dir === owner) edit = migrateViteConfig(file.text, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" }, vitest: name.startsWith("vitest.config") });
+    else if (dir === owner || linked) edit = migrateViteConfig(file.text, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" }, vitest: name.startsWith("vitest.config") });
     else return undefined;
     // nextRoutes: start mode's vite.config.ts is written unless the package has one, and asks Vite to
     // resolve tsconfig paths when the package's tsconfig maps any.
-    const vite = name.startsWith("vite.config");
+    const vite = name.startsWith("vite.config") && !linked;
     if (vite && routes) edit = { ...edit, flags: [...edit.flags, { kind: "build config", detail: `${name} was already here, so start mode's isn't written: add solid({ start: { nodeServer: true }, ssr: true, serverFunctions: true, extensions: [".jsx", ".tsx"] }) and fileRoutes() from filesystem-routing/vite to its plugins` }] };
     if (apply && !shared && edit.text !== file.text) file.write(edit.text);
-    return { file: file.path, shared, changes: edit.changes, flags: edit.flags, jsx: !shared && "jsx" in edit && edit.jsx, paths: dir === owner && name.startsWith("tsconfig") && /"paths"\s*:/.test(file.text), vite };
+    return { file: file.path, shared, changes: edit.changes, flags: edit.flags, jsx: !shared && "jsx" in edit && edit.jsx, paths: dir === owner && name.startsWith("tsconfig") && /"paths"\s*:/.test(file.text), vite, linked };
   }));
   // nextRoutes: the files start mode needs (App.tsx, vite.config.ts, ...), written by a shell step
   // each, since a forEachFile step only changes files that exist. One already there is kept.
@@ -213,17 +285,32 @@ export default async function main({ params }: { params: { include?: string; app
       applied: {},
       flags: [...o.flags, ...(o.shared ? o.changes.map((change) => ({ kind: "shared config", detail: `shared with the workspace, so not changed: ${change}` })) : [])].map((f) => ({ line: 0, ...f })),
     }));
-    if (configs.outputs.some((o) => o.file.includes("tsconfig") && !o.shared) && !configs.outputs.some((o) => o.jsx)) {
+    if (configs.outputs.some((o) => o.file.includes("tsconfig") && !o.shared && !o.linked) && !configs.outputs.some((o) => o.jsx && !o.linked)) {
       projectFlags.push({ file: owner || ".", applied: {}, flags: [{ line: 0, kind: "build config", detail: `no tsconfig on the way to ${root || "."} sets jsx: set "jsx": "preserve" and "jsxImportSource": "@solidjs/web" in the one that covers it` }] });
     }
-    return summarize(files, decided, [...fileFlags, ...routeFlags, ...projectFlags]);
+    for (const dir of packages) {
+      const own = configs.outputs.filter((o) => o.linked && o.file.startsWith(`${dir}/tsconfig`));
+      if (own.length && !own.some((o) => o.jsx)) projectFlags.push({ file: dir, applied: {}, flags: [{ line: 0, kind: "build config", detail: `no tsconfig in ${dir} sets jsx: set "jsx": "preserve" and "jsxImportSource": "@solidjs/web" in the one it extends, or in its own` }] });
+    }
+    // A workspace package that depends on React: converted with workspace=true, which changes it for
+    // the other packages that use it too; otherwise this app keeps importing React code from it.
+    const workspaceFlags = plan.workspace.map((p) => ({
+      file: workspace ? `${p.dir}/package.json` : plan.manifest,
+      applied: {},
+      flags: workspace
+        ? p.usedBy.map((user) => ({ line: 0, kind: "workspace", detail: `${p.name ?? p.dir} was converted with ${owner || "."}, and ${user} depends on it too: ${user} breaks until it's converted as well, or uses a React copy of ${p.dir}` }))
+        : [{ line: 0, kind: "workspace", detail: `${p.name ?? p.dir} (${p.dir}) is a workspace package that depends on React, and this run doesn't convert it, so ${owner || "."} still imports React code from it: run with --param workspace=true to convert it in the same run${p.usedBy.length ? `, which changes it for ${p.usedBy.join(", ")} too` : ""}` }],
+    }));
+    return summarize(files, decided, [...fileFlags, ...routeFlags, ...projectFlags, ...workspaceFlags]);
   });
   // nextRoutes: which App Router files moved where, and the files written for start mode.
   const nextjs = routes ? { moved: moves, created: created.map((f) => f.path).filter((path) => !kept.includes(path)) } : undefined;
-  const result = { plan, analyzed: files.length, failures: [...analyzed.failures, ...converted.failures, ...configs.failures], ...report, config: configChanges, ...(nextjs ? { nextjs } : {}) };
+  // workspace=true: the workspace packages converted with the app.
+  const result = { plan, analyzed: files.length, alreadySolid, failures: [...analyzed.failures, ...converted.failures, ...configs.failures], ...report, config: configChanges, ...(workspace ? { workspace: plan.workspace } : {}), ...(nextjs ? { nextjs } : {}) };
+  const extra = `${packages.length ? `, ${packages.length} workspace package${packages.length > 1 ? "s" : ""} included` : ""}${alreadySolid.length ? ` (already Solid: ${alreadySolid.length} file${alreadySolid.length > 1 ? "s" : ""}, skipped)` : ""}`;
 
   if (!apply) {
-    console.log(`Preview: ${changed.length} of ${files.length} files would change, and ${configChanges.length} package.json, tsconfig or Vite config files, with ${report.flags.length} flagged spots to finish by hand. Nothing was written; run again with --param apply=true to convert them, then ${plan.install}${plan.installNote ? ` (${plan.installNote})` : ""}.`);
+    console.log(`Preview: ${changed.length} of ${files.length} files would change${extra}, and ${configChanges.length} package.json, tsconfig or Vite config files, with ${report.flags.length} flagged spots to finish by hand. Nothing was written; run again with --param apply=true to convert them, then ${plan.install}${plan.installNote ? ` (${plan.installNote})` : ""}.`);
     return { ...result, preview: true, wouldChange: changed };
   }
   await step(commit("Convert React components to Solid 2", { add: [...files, ...Object.values(moves), ...(nextjs?.created ?? []), ...favicon, ...configChanges.map((c) => c.file)] }));
@@ -248,7 +335,7 @@ export default async function main({ params }: { params: { include?: string; app
   }
   // Nothing was installed: the dependency changes only take effect after an install.
   const routed = nextjs ? `, moved ${Object.keys(moves).length} App Router files to Solid's file routes and wrote ${nextjs.created.length} start-mode files` : "";
-  console.log(`Converted ${changed.length} of ${files.length} files and ${configChanges.length} package.json, tsconfig or Vite config files${routed}, with ${report.flags.length} flagged spots to finish by hand. Next: ${plan.install}${plan.installNote ? ` (${plan.installNote})` : ""}, then type-check and build.`);
+  console.log(`Converted ${changed.length} of ${files.length} files${extra} and ${configChanges.length} package.json, tsconfig or Vite config files${routed}, with ${report.flags.length} flagged spots to finish by hand. Next: ${plan.install}${plan.installNote ? ` (${plan.installNote})` : ""}, then type-check and build.`);
   return { ...result, changed, lint };
 }
 

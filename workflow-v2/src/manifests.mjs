@@ -220,8 +220,8 @@ export function reactPeers(path, text) {
   return [...react].filter((name) => peersOf.has(name) && name !== "react" && name !== "react-dom").sort();
 }
 
-// package.json: React packages out, their Solid 2 ports in, each dependency list rewritten in its
-// own order with new names inserted alphabetically. A `catalog:` or `workspace:` range is defined
+// package.json: React packages out, their Solid 2 ports in, each dependency list (peers included)
+// rewritten in its own order with new names inserted alphabetically. A `catalog:` or `workspace:` range is defined
 // elsewhere, so it's reported instead. `peers` (from reactPeers) says which other packages depend
 // on React; without it, a name with "react" in it does. With `next` (nextRoutes), next goes too, the
 // router and start mode's build come in (NEXT_ROUTES), and the scripts that run next run Vite.
@@ -229,12 +229,18 @@ export function migratePackageJson(text, peers = null, { next = false } = {}) {
   const changes = [];
   const flags = [];
   const root = parseJsonc(text);
-  const sections = ["dependencies", "devDependencies"].map((key) => root.entries?.find((e) => e.key === key)).filter((pair) => pair?.value.entries);
-  const present = new Set(sections.flatMap((pair) => pair.value.entries.map((e) => e.key)));
+  const sections = ["dependencies", "devDependencies", "peerDependencies"].map((key) => root.entries?.find((e) => e.key === key)).filter((pair) => pair?.value.entries);
+  const present = new Set(sections.filter((pair) => pair.key !== "peerDependencies").flatMap((pair) => pair.value.entries.map((e) => e.key)));
+  // A library (a workspace package converted with its app) peers on React: it peers on Solid instead,
+  // and doesn't get its own copy in dependencies.
+  const library = sections.some((pair) => pair.key === "peerDependencies" && pair.value.entries.some((e) => e.key === "react" || e.key === "react-dom"));
   const edits = [];
   for (const pair of sections) {
     const kept = [];
     const added = [];
+    // Peers are their own list: a library peers on what it also has in devDependencies.
+    const seen = pair.key === "peerDependencies" ? new Set(pair.value.entries.map((e) => e.key)) : present;
+    const peer = pair.key === "peerDependencies" ? "peer " : "";
     let changed = false;
     for (const e of pair.value.entries) {
       const range = JSON.parse(text.slice(e.value.start, e.value.end));
@@ -246,15 +252,15 @@ export function migratePackageJson(text, peers = null, { next = false } = {}) {
         continue;
       }
       if (REMOVED.has(e.key) && !elsewhere) {
-        changes.push(`removed ${e.key}`);
+        changes.push(`removed ${peer}${e.key}`);
         changed = true;
         continue;
       }
       if (port?.version && !elsewhere) {
         const spec = port.version.includes("-") ? port.version : `^${port.version}`;
-        if (!present.has(port.to)) added.push([port.to, JSON.stringify(spec)]);
-        present.add(port.to);
-        changes.push(`${e.key} -> ${port.to}@${spec}${port.note ? ` (${port.note})` : ""}`);
+        if (!seen.has(port.to)) added.push([port.to, JSON.stringify(spec)]);
+        seen.add(port.to);
+        changes.push(`${peer}${e.key} -> ${port.to}@${spec}${port.note ? ` (${port.note})` : ""}`);
         changed = true;
         continue;
       }
@@ -266,7 +272,7 @@ export function migratePackageJson(text, peers = null, { next = false } = {}) {
       else if (peers ? peers.includes(e.key) : /react/i.test(e.key)) flags.push({ kind: "dependency", detail: peers ? `${e.key} depends on React (peer) and has no known Solid 2 port` : `${e.key} has no known Solid 2 port` });
       kept.push([e.key, text.slice(e.value.start, e.value.end)]);
     }
-    if (pair.key === "dependencies") {
+    if (pair.key === "dependencies" && !library) {
       for (const name of ["solid-js", "@solidjs/web"]) {
         if (present.has(name)) continue;
         present.add(name);
@@ -276,7 +282,7 @@ export function migratePackageJson(text, peers = null, { next = false } = {}) {
       }
     }
     // Build tools go in devDependencies, or in dependencies when there are none.
-    const nextAdds = !next ? [] : pair.key === "dependencies" ? [...NEXT_ROUTES.dependencies, ...(sections.some((p) => p.key === "devDependencies") ? [] : NEXT_ROUTES.devDependencies)] : NEXT_ROUTES.devDependencies;
+    const nextAdds = !next || pair.key === "peerDependencies" ? [] : pair.key === "dependencies" ? [...NEXT_ROUTES.dependencies, ...(sections.some((p) => p.key === "devDependencies") ? [] : NEXT_ROUTES.devDependencies)] : NEXT_ROUTES.devDependencies;
     for (const [name, spec] of nextAdds) {
       if (present.has(name)) continue;
       present.add(name);

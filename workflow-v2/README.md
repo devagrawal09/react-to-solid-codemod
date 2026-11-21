@@ -21,8 +21,13 @@ npx codemod@alpha run react-to-solid --param apply=true
 | `apply` | `false` | `true` writes the converted files and lints them; otherwise the run is a preview |
 | `agent` | `false` | `true` (with `apply=true`) asks for approval, then hands the flagged spots to a coding agent. Untested |
 | `nextRoutes` | `false` | `true` moves a Next.js App Router (`src/app`, or `app/` at the package root) to Solid's file routes in `@solidjs/vite-plugin`'s start mode: see [Next.js App Router to file routes](#nextjs-app-router-to-file-routes) |
+| `workspace` | `false` | `true` also converts the workspace packages the converted package depends on that depend on React, transitively, in the same run: see [Workspace packages](#workspace-packages) |
 
-The run's result holds the summary: the plan (which React libraries have a Solid 2 port), the compiler's decisions, the rules applied, the `package.json`, `tsconfig` and Vite config changes, every flag with its file and line, and the lint counts.
+The run's result holds the summary: the plan (which React libraries have a Solid 2 port), the compiler's decisions, the rules applied, the `package.json`, `tsconfig` and Vite config changes, every flag with its file and line, the files skipped as already Solid (`alreadySolid`), and the lint counts.
+
+### Running it again
+
+A file that's already Solid is skipped. That's a file that imports `solid-js`, `@solidjs/*` or a Solid port from the table below (`@lucide/solid`, `@tanstack/solid-query`, ...), or has the `// solid:` notes this workflow writes, and imports nothing from `react` or from a library whose port takes its names (`lucide-react`, `@tanstack/react-query`, `@testing-library/react`, whose imports the conversion moves). Converting such a file again changes working Solid code: `merge({ icon: Check }, props)` became `createMemo(() => merge(...))`, a solid-query result `query.data` became `query().data`, and each note was written twice. What a converted file still imports doesn't count against it: React's `Component` kept for a class R39 leaves, `react-dom` names other than `createPortal`, and React libraries without such a port (`react-router`, `react-hook-form`, ...), all flagged by the first run. A file with neither Solid imports nor notes (a util, or a component the rules had nothing to do in) goes through the rules as before, which leave it as it is. A file that still imports `react` is converted, and its Solid names join its own imports. The summary counts the skipped files ("already Solid: 5 files, skipped"). So a second run on a converted project changes nothing, including `package.json`, `tsconfig` and the Vite config, and a project that already depends on `solid-js` but not `react` is run rather than refused.
 
 ### Troubleshooting
 
@@ -38,11 +43,25 @@ npm view codemod dist-tags.alpha               # what your registry calls alpha
 With `apply=true`, the package that owns the converted directory moves to Solid 2. Nothing is installed; the run ends by printing the install command for your package manager.
 
 - **`package.json`**: `react` and `react-dom` become `solid-js` and `@solidjs/web` (`^2.0.3`); `@types/react`, `@types/react-dom` and `babel-plugin-react-compiler` are removed; `@vitejs/plugin-react` (or `-swc`) becomes `@solidjs/vite-plugin`, and a `vite` range below 8 is raised to `^8.3.8`, which that plugin needs (it also needs Node 22.12 or newer); `@testing-library/jest-dom` 8 goes back to `^7.0.1`, since the plugin takes jest-dom up to 7 (an optional peer) and npm won't install 8 next to it. Each library with a verified Solid 2 port is replaced by it (see below). New names go in alphabetically; the rest of the file keeps its order and indentation.
-- **`tsconfig*.json`** between the package and the converted directory: `"jsx": "preserve"` and `"jsxImportSource": "@solidjs/web"`, and React's entries leave `types`. Comments and trailing commas are kept. A `paths` entry into the source of another workspace package that depends on React is flagged: that source now compiles as Solid JSX, so convert the package too or point the path at its built output.
+- **`tsconfig*.json`** between the package and the converted directory: `"jsx": "preserve"` and `"jsxImportSource": "@solidjs/web"`, and React's entries leave `types`. Comments and trailing commas are kept. A `paths` entry into the source of another workspace package that depends on React is flagged: that source now compiles as Solid JSX, so convert the package too (`--param workspace=true`) or point the path at its built output.
 - **`vite.config.{ts,js,mts,mjs}`** and **`vitest.config.*`**: `import react from "@vitejs/plugin-react"` and `plugins: [react()]` become `import solid from "@solidjs/vite-plugin"` and `solid()`. React-only options (a `babel` setup that only runs the React Compiler, `jsxRuntime`, `jsxImportSource`, `fastRefresh`) are dropped; any other shape is flagged with what to write. See [Test files](#test-files) for the `test` block.
 - **Entry**: `createRoot(el).render(<StrictMode><App /></StrictMode>)` becomes `render(() => <App />, el)` from `@solidjs/web`.
 
+A library's `peerDependencies` move too (`react` → `solid-js`, `react-dom` → `@solidjs/web`), and a package that peers on React doesn't get `solid-js` added to its `dependencies`, so the app's copy is the only one.
+
 It flags rather than changes: a `catalog:` or `workspace:` range (change it where the catalog defines it; for a library imported by name, below, the flag says the converted files already import the port), a `package.json` or `tsconfig` above the package (shared with the rest of a monorepo), the React lint plugins (`eslint-plugin-react-hooks` and the like, which your lint config loads), a `next.config.*`, a `jest.config.*` (see [Test files](#test-files)), and every React library without a Solid 2 port. A library counts as a React library when the lockfile (`pnpm-lock.yaml`, `package-lock.json`, or yarn berry's `yarn.lock`) says it peers on `react` or `react-dom`, directly or through another peer (`nuqs` peers on `next`); without such a lockfile, when its name contains "react".
+
+### Workspace packages
+
+In a monorepo, an app usually imports internal packages that are still React: a shared `ui` package through `workspace:*`, often with a tsconfig `paths` entry into its source. Converting only the app leaves it compiling their React source as Solid JSX. With `--param workspace=true`, the run follows the converted package's `workspace:` and `link:` dependencies (in an npm or yarn workspace, a dependency named after a workspace member too), and theirs in turn, and converts each one that depends on React in the same run, as it converts the app:
+
+- **Source**: every `.ts`/`.tsx` file in the package but `*.d.ts`, its `*.config.*` files, `dist/`, `build/`, `.next/` and `.turbo/`.
+- **`package.json`, the `tsconfig*.json` files at its root, and its Vite config**, the same way as the app's. A library's `peerDependencies` on React become Solid's.
+- **Hook contracts across packages**: an import by package name (`@repo/hooks`, `@repo/ui/toggle`) resolves to the package's source, through its `package.json`'s `exports` (each condition's target; a built file, `dist/index.js`, stands for `src/index`), or else its `source`, `types`, `module` and `main`, then `src/index`; a deep import goes to `src/` or the package root. A hook from another package then hands back what it returns there, as a hook from another file does.
+
+The workspace's packages come from `pnpm-workspace.yaml`, or from the root `package.json`'s `workspaces` (an array or `{ packages }`); `!` excludes. The tsconfig `paths` flag no longer fires for a package that's converted. A converted package that another, unconverted package also depends on is flagged (`workspace`) with that package's name: converting it changes it for that app too, which then needs converting as well, or a React copy of the package. Without the param, each React workspace package the app depends on is flagged on the app's `package.json`, with the other packages that use it, and nothing outside the app changes. The result's `workspace` lists the converted packages and their other users.
+
+It's off by default because it changes packages other apps share: the default run touches only the app's directory, its `package.json`, tsconfig and Vite config, and says which packages it leaves.
 
 ### Next.js
 
@@ -184,10 +203,11 @@ On create-vite's React TypeScript template with Vitest 5.1.1, `@testing-library/
 | Find the App Router | `forEachFile` | Only with `nextRoutes` and no `include`: whether the App Router is `app/` at the root (then the run converts from the root) or `src/app` |
 | Read package.json files | `forEachFile` | Collects dependencies from every package.json |
 | Read the lockfile | `forEachFile` | Which packages peer on React, and the install command |
-| Check React libraries for Solid ports | function | Fails if nothing on the way to the converted directory depends on `react`; lists React libraries with and without a Solid 2 port, and which package.json owns the directory |
+| Read the workspace definition | `forEachFile` | `pnpm-workspace.yaml`'s packages (npm and yarn list theirs in the root `package.json`) |
+| Check React libraries for Solid ports | function | Fails if nothing on the way to the converted directory depends on `react` or `solid-js`; lists React libraries with and without a Solid 2 port, which package.json owns the directory, and the React workspace packages it depends on (`src/workspaces.mjs`) |
 | branch / commit | `branch`, `commit` | Only with `--param apply=true` and `--managed-git` |
-| Run the React Compiler on each file | `forEachFile` | `babel-plugin-react-compiler@1.0.0` decides what each component-body value becomes; each file's result is a step output |
-| Resolve hook contracts across files | function | The whole-program hook-contract pass, over every file's result |
+| Run the React Compiler on each file | `forEachFile` | Skips a file that's already Solid; `babel-plugin-react-compiler@1.0.0` decides what each component-body value becomes; each file's result is a step output |
+| Resolve hook contracts across files | function | The whole-program hook-contract pass, over every file's result, with imports of converted workspace packages resolved to their source |
 | Plan the Next.js routes | function | Only with `--param nextRoutes=true`: where each App Router file goes (`src/nextjs.mjs`) |
 | Convert each file to Solid 2 (preview: Preview the conversion of each file) | `forEachFile` | Writes each decision with a `// solid:` note, then runs the rule pass (`src/rules/mechanical.mjs`, R1-R54) on that text; applied rules and flags are step outputs. With `nextRoutes`, a route file is renamed where the plan says, its relative imports re-pointed. A preview writes nothing |
 | Move package.json, tsconfig and the Vite config to Solid 2 (preview: Preview the package.json, tsconfig and Vite config changes) | `forEachFile` | `src/manifests.mjs`, as above, with `vitest.config.*`; `next.config.*` and `jest.config.*` are flagged. A preview writes nothing |
@@ -217,6 +237,7 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 | `src/lib/reactivity.mjs` | `src/reactivity/` with Babel and the React Compiler, bundled by `pnpm build`; committed, so the workflow runs without a build step |
 | `src/rules/mechanical.mjs` | The rule pass, R1-R54 (R1-R10 from the root `gate/mechanical.js`, R11-R34 from hand-converted screens, R35-R40 from later runs on apps, R41 effects, R42 render-only class components, R43 zustand stores, R44 ported libraries' imports, R45 `createPortal`, R46 Testing Library, R47-R54 and the route files' rules for `nextRoutes`), as `transform(src, { parse, Lang, ports, next })`, so it runs under `@ast-grep/napi` and `codemod/ast-grep` |
 | `src/manifests.mjs` | The port table, the lockfile's React peers, and the `package.json`, `tsconfig` and Vite config edits |
+| `src/workspaces.mjs` | `workspace`: the workspace packages a package depends on, and what an import of one by name resolves to |
 | `src/nextjs.mjs` | `nextRoutes`: where each App Router file goes, a moved file's imports, `next.config`'s keys, and the files start mode needs |
 | `src/lint/` | ESLint 9 with `eslint-plugin-solid/configs/v2`; the workflow finds it through `import.meta.dirname` |
 | `workflow.yaml` | A stub: codemod 2.0.0-alpha.4 won't start a registry package without one. `codemod.yaml` runs `src/workflow.ts` |
@@ -225,8 +246,8 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 ## Tests
 
 ```sh
-pnpm test                                       # reactivity (54), rule (185), project file (33), Next.js route (15) and Solid behavior (12) specs
-CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (40, tagged slow), which run the CLI on copies of tests/fixtures/todo-app and on Next.js apps the specs write
+pnpm test                                       # reactivity (55), rule (188), project file (34), workspace (8), Next.js route (15) and Solid behavior (12) specs
+CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (47, tagged slow), which run the CLI on copies of tests/fixtures/todo-app and tests/fixtures/pnpm-monorepo, and on Next.js apps the specs write
 ```
 
 ### Release corpus

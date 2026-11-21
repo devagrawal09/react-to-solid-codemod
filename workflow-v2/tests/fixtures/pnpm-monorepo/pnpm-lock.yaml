@@ -1,0 +1,7 @@
+lockfileVersion: '9.0'
+
+packages:
+
+  lucide-react@1.0.0:
+    peerDependencies:
+      react: ^19.0.0
