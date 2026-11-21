@@ -18,14 +18,14 @@
 // becomes src/Document.tsx, and start mode's files (src/App.tsx, vite.config.ts, ...) are written.
 import { step, forEachFile, shell, agent, approval, branch, commit } from "codemod/workflow";
 import { parse } from "codemod/ast-grep";
-import { applyContracts, decide, extract, rewrite } from "./lib/reactivity.mjs";
+import { CACHE_KEY, applyContracts, decide, extract, rewrite } from "./lib/reactivity.mjs";
 import { transform } from "./rules/mechanical.mjs";
 import { NO_PORT, PORTS, migratePackageJson, migrateTsconfig, migrateViteConfig, reactPeers } from "./manifests.mjs";
 import { moveImports, nextAppFiles, nextConfigKeys, planNextRoutes } from "./nextjs.mjs";
 
 const NOT_SHIPPED = /^(@types\/|babel-plugin-react-compiler$|eslint-plugin-react|typescript$)/;
 
-export default async function main({ params }: { params: { include?: string; apply?: boolean | string; agent?: boolean | string; nextRoutes?: boolean | string } }) {
+export default async function main({ params }: { params: { include?: string; apply?: boolean | string; agent?: boolean | string; nextRoutes?: boolean | string; cache?: boolean | string } }) {
   // --param values arrive as JSON when they parse as JSON, so true is a boolean.
   const apply = params.apply === true || params.apply === "true";
   const nextRoutes = params.nextRoutes === true || params.nextRoutes === "true";
@@ -85,11 +85,42 @@ export default async function main({ params }: { params: { include?: string; app
   const ports = Object.fromEntries(plan.byName.map((name) => [name, PORTS[name]]));
 
   if (apply) await step(branch("react-to-solid-2"));
+  // With --allow-fs, the compiler's result for each file is cached in $XDG_CACHE_HOME/react-to-solid
+  // (~/.cache/react-to-solid), keyed by the file's path and text and the pass's build (CACHE_KEY: the
+  // compiler's version and the bundle's hash), so a rerun (a preview, then apply) skips the files
+  // that didn't change. Only what one file decides on its own is cached: the hook contracts, which
+  // read every file, are worked out on every run. --param cache=false turns it off.
+  const cache = params.cache !== false && params.cache !== "false";
   // Each step returns its per-file results; nothing goes through state.
-  const analyzed = await step("Run the React Compiler on each file", forEachFile(sources, (file) =>
+  const analyzed = await step("Run the React Compiler on each file", forEachFile(sources, async (file) => {
+    const fs = cache ? await import("fs").catch(() => null) : null;
+    const home = process.env.XDG_CACHE_HOME ?? (process.env.HOME ? `${process.env.HOME}/.cache` : null);
+    const key = fs && home ? (await import("crypto")).createHash("sha256").update(`${CACHE_KEY}\n${file.path}\n${file.text}`).digest("hex") : null;
+    const entry = key ? `${home}/react-to-solid/${key.slice(0, 2)}/${key}.json` : null;
+    if (fs && entry) {
+      try {
+        const hit = JSON.parse(fs.readFileSync(entry, "utf8"));
+        if (hit.key === key) return { file: file.path, result: hit.result, cache: "hit" };
+      } catch {
+        // Not cached yet, or unreadable: computed below.
+      }
+    }
     // contracts.mjs finds `~/` imports by an absolute-looking path. The round trip drops the
     // `undefined` fields the pass leaves, which step outputs reject.
-    ({ file: file.path, result: JSON.parse(JSON.stringify(decide(extract(file.text, `/${file.path}`)))) })));
+    const result = JSON.parse(JSON.stringify(decide(extract(file.text, `/${file.path}`))));
+    if (fs && entry) {
+      try {
+        // Written whole, then renamed, so a worker reading it never sees half of it.
+        const partial = `${entry}.${Math.random().toString(36).slice(2)}.tmp`;
+        fs.mkdirSync(entry.replace(/\/[^/]+$/, ""), { recursive: true });
+        fs.writeFileSync(partial, JSON.stringify({ key, result }));
+        fs.renameSync(partial, entry);
+      } catch {
+        // A cache that can't be written only costs the next run time.
+      }
+    }
+    return { file: file.path, result, cache: entry ? "miss" : "off" };
+  }));
   const files = analyzed.outputs.map((o) => o.file);
   if (files.length === 0) return { plan, files: 0, note: `no .ts/.tsx files under ${root}` };
   const decided = await step("Resolve hook contracts across files", () => {
@@ -221,7 +252,10 @@ export default async function main({ params }: { params: { include?: string; app
   });
   // nextRoutes: which App Router files moved where, and the files written for start mode.
   const nextjs = routes ? { moved: moves, created: created.map((f) => f.path).filter((path) => !kept.includes(path)) } : undefined;
-  const result = { plan, analyzed: files.length, failures: [...analyzed.failures, ...converted.failures, ...configs.failures], ...report, config: configChanges, ...(nextjs ? { nextjs } : {}) };
+  // How many files the compiler skipped, thanks to the cache; "off" without --allow-fs or with cache=false.
+  const hits = analyzed.outputs.filter((o) => o.cache === "hit").length;
+  const compilerCache = analyzed.outputs.some((o) => o.cache !== "off") ? { hits, misses: files.length - hits } : "off";
+  const result = { plan, analyzed: files.length, compilerCache, failures: [...analyzed.failures, ...converted.failures, ...configs.failures], ...report, config: configChanges, ...(nextjs ? { nextjs } : {}) };
 
   if (!apply) {
     console.log(`Preview: ${changed.length} of ${files.length} files would change, and ${configChanges.length} package.json, tsconfig or Vite config files, with ${report.flags.length} flagged spots to finish by hand. Nothing was written; run again with --param apply=true to convert them, then ${plan.install}${plan.installNote ? ` (${plan.installNote})` : ""}.`);

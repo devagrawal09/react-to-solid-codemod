@@ -22,10 +22,11 @@ function givenApp(edit = () => {}) {
   return dir;
 }
 
-function migrate(dir, params = ["apply=true"], workflowFile = workflow) {
+// `flags`: more CLI options (`--allow-fs`); `env`: more environment variables.
+function migrate(dir, params = ["apply=true"], workflowFile = workflow, { flags = [], env = {} } = {}) {
   const store = fs.mkdtempSync(path.join(os.tmpdir(), "r2s-runs-"));
-  const cli = spawnSync(bin, ["workflow", "run", "-w", workflowFile, "-t", dir, ...params.flatMap((p) => ["--param", p]), "--no-interactive", "--approve", "--disable-analytics", "--no-color"], {
-    env: { ...process.env, CODEMOD_RUN_STORE_DIR: store },
+  const cli = spawnSync(bin, ["workflow", "run", "-w", workflowFile, "-t", dir, ...params.flatMap((p) => ["--param", p]), "--no-interactive", "--approve", "--disable-analytics", "--no-color", ...flags], {
+    env: { ...process.env, CODEMOD_RUN_STORE_DIR: store, ...env },
     encoding: "utf8",
   });
   const id = `${cli.stdout}${cli.stderr}`.match(/^Run (\S+)/m)[1];
@@ -457,6 +458,32 @@ describe.skipIf(!bin)("react-to-solid workflow on a project without React", { ta
     const app = givenApp((dir) => fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "not-react" })));
     expect(migrate(app).error).toContain("No package.json here depends on react");
   });
+});
+
+// With --allow-fs, each file's compiler result is cached in $XDG_CACHE_HOME/react-to-solid, keyed by
+// the file's path and text and the pass's build.
+describe.skipIf(!bin)("react-to-solid workflow's compiler cache", { tags: ["slow"] }, () => {
+  // Every file of a converted app but git's, by path.
+  const tree = (dir) => Object.fromEntries(fs.readdirSync(dir, { recursive: true }).filter((f) => !f.split(path.sep).includes(".git") && fs.statSync(path.join(dir, f)).isFile()).sort().map((f) => [f, read(dir, f)]));
+  const comment = (dir) => fs.appendFileSync(path.join(dir, "src/hooks/useFilter.ts"), "// edited\n");
+
+  it("reads every unchanged file's result from the cache on a rerun, and writes the same files as a run without it", () => {
+    const xdg = fs.mkdtempSync(path.join(os.tmpdir(), "r2s-cache-"));
+    const cached = { flags: ["--allow-fs"], env: { XDG_CACHE_HOME: xdg } };
+    const [plain, cold, warm, off] = [givenApp(), givenApp(), givenApp(), givenApp()];
+    // Without --allow-fs there is no fs to cache in, and nothing is written.
+    expect(migrate(plain, ["apply=true"], workflow, { env: { XDG_CACHE_HOME: xdg } }).output.compilerCache).toBe("off");
+    expect(fs.readdirSync(xdg)).toEqual([]);
+    expect(migrate(cold, ["apply=true"], workflow, cached).output.compilerCache).toEqual({ hits: 0, misses: 6 });
+    expect(migrate(warm, ["apply=true"], workflow, cached).output.compilerCache).toEqual({ hits: 6, misses: 0 });
+    expect(migrate(off, ["apply=true", "cache=false"], workflow, cached).output.compilerCache).toBe("off");
+    for (const dir of [cold, warm, off]) expect(tree(dir)).toEqual(tree(plain));
+    // An edited file misses; the others still hit.
+    const [edited, plainEdited] = [givenApp(comment), givenApp(comment)];
+    expect(migrate(edited, ["apply=true"], workflow, cached).output.compilerCache).toEqual({ hits: 5, misses: 1 });
+    migrate(plainEdited);
+    expect(tree(edited)).toEqual(tree(plainEdited));
+  }, 360_000);
 });
 
 // `codemod publish` replaces src/workflow.ts with a Rolldown bundle of it and everything it imports

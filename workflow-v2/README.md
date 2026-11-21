@@ -21,8 +21,9 @@ npx codemod@alpha run react-to-solid --param apply=true
 | `apply` | `false` | `true` writes the converted files and lints them; otherwise the run is a preview |
 | `agent` | `false` | `true` (with `apply=true`) asks for approval, then hands the flagged spots to a coding agent. Untested |
 | `nextRoutes` | `false` | `true` moves a Next.js App Router (`src/app`, or `app/` at the package root) to Solid's file routes in `@solidjs/vite-plugin`'s start mode: see [Next.js App Router to file routes](#nextjs-app-router-to-file-routes) |
+| `cache` | `true` | With `--allow-fs`, each file's React Compiler result is kept in `$XDG_CACHE_HOME/react-to-solid` (`~/.cache/react-to-solid`), so a rerun (a preview, then apply, or a run after a few edits) compiles only the files that changed; `false` neither reads nor writes it. See [The compiler cache](#the-compiler-cache) |
 
-The run's result holds the summary: the plan (which React libraries have a Solid 2 port), the compiler's decisions, the rules applied, the `package.json`, `tsconfig` and Vite config changes, every flag with its file and line, and the lint counts.
+The run's result holds the summary: the plan (which React libraries have a Solid 2 port), how many files the compiler cache answered (`compilerCache`), the compiler's decisions, the rules applied, the `package.json`, `tsconfig` and Vite config changes, every flag with its file and line, and the lint counts.
 
 ### Troubleshooting
 
@@ -32,6 +33,19 @@ If the run fails with `YAML error: invalid type: string "import { agent, approva
 npx codemod@2.0.0-alpha.4 run react-to-solid   # or: pnpm dlx codemod@alpha run react-to-solid
 npm view codemod dist-tags.alpha               # what your registry calls alpha
 ```
+
+### The compiler cache
+
+Running the React Compiler on each file is most of a run: on t3code's `apps/web/src` (1,965 files with its tests, 2 CPUs, `apply=true`), 522 of 702 seconds. With `--allow-fs`, the run keeps each file's result (what the compiler and the per-file pass decided) in `$XDG_CACHE_HOME/react-to-solid`, or `~/.cache/react-to-solid`, so the next run on the same files, a preview and then `apply=true`, or a run after a few edits, skips them:
+
+```sh
+npx codemod@alpha run react-to-solid --allow-fs                    # preview, fills the cache
+npx codemod@alpha run react-to-solid --allow-fs --param apply=true  # compiles only what changed since
+```
+
+An entry is keyed by the SHA-256 of the file's path, its text and the pass's build (`CACHE_KEY` in `src/lib/reactivity.mjs`: the compiler's version and a hash of the bundle, so any change to the pass, Babel or the compiler misses every entry); the stored key is checked when it's read, and an entry that can't be read is computed again. Only what a file decides on its own is cached: the hook contracts, which depend on every other file, are worked out on every run, so editing one file still updates its callers. Without `--allow-fs` the workflow has no file system to keep it in (a workflow callback can't import `fs`, and `capabilities` in `codemod.yaml` doesn't grant it under `codemod workflow run`), so every run compiles every file and `compilerCache` is `"off"`; `--param cache=false` does the same with `--allow-fs`. It's outside the project, so it never shows in `git status`, and the run never deletes it: `rm -rf ~/.cache/react-to-solid` clears it (t3code's entries take 29 MB).
+
+On that t3code run, the compiler step took 488 s with an empty cache and 2.7 s with a full one (the whole run: 657 s, then 168 s; the hook contracts, the rule pass and the lint still run); after appending a line to 3 files, 3.2 s (157 s). On bulletproof-react (127 files, 6 CPUs) the step went from 2.0 s to 0.6 s. In each case the converted tree was byte-identical to a run without the cache.
 
 ### What it changes in the project
 
@@ -187,7 +201,7 @@ On create-vite's React TypeScript template with Vitest 5.1.1, `@testing-library/
 | Read the lockfile | `forEachFile` | Which packages peer on React, and the install command |
 | Check React libraries for Solid ports | function | Fails if nothing on the way to the converted directory depends on `react`; lists React libraries with and without a Solid 2 port, and which package.json owns the directory |
 | branch / commit | `branch`, `commit` | Only with `--param apply=true` and `--managed-git` |
-| Run the React Compiler on each file | `forEachFile` | `babel-plugin-react-compiler@1.0.0` decides what each component-body value becomes; each file's result is a step output |
+| Run the React Compiler on each file | `forEachFile` | `babel-plugin-react-compiler@1.0.0` decides what each component-body value becomes; each file's result is a step output, read from the [compiler cache](#the-compiler-cache) when it has it |
 | Resolve hook contracts across files | function | The whole-program hook-contract pass, over every file's result: what each hook returns, and which of its params callers pass as accessors |
 | Plan the Next.js routes | function | Only with `--param nextRoutes=true`: where each App Router file goes (`src/nextjs.mjs`) |
 | Convert each file to Solid 2 (preview: Preview the conversion of each file) | `forEachFile` | Writes each decision with a `// solid:` note, then runs the rule pass (`src/rules/mechanical.mjs`, R1-R55) on that text; applied rules and flags are step outputs. With `nextRoutes`, a route file is renamed where the plan says, its relative imports re-pointed. A preview writes nothing |
@@ -227,7 +241,7 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 
 ```sh
 pnpm test                                       # reactivity (55), rule (196), project file (33), Next.js route (15) and Solid behavior (12) specs
-CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (40, tagged slow), which run the CLI on copies of tests/fixtures/todo-app and on Next.js apps the specs write
+CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (41, tagged slow), which run the CLI on copies of tests/fixtures/todo-app and on Next.js apps the specs write
 ```
 
 ### Release corpus

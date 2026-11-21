@@ -180284,3 +180284,4 @@ export const decide = reactivity.decide;
 export const applyContracts = reactivity.applyContracts;
 export const rewrite = reactivity.rewrite;
 export const report = reactivity.report;
+export const CACHE_KEY = "babel-plugin-react-compiler@1.0.0:00dd152a819e818b";
