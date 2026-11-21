@@ -921,8 +921,16 @@ export function transform(input, { parse, Lang, ports = {}, next = null, hooks =
       // this.props becomes `props` (or `merged`), so the body can't have a name of its own like it.
       const holder = defaults ? freeName("merged") : "props";
       if (/(^|[^.\w$])props\b/.test(body.text())) return [];
-      const typeArg = kids(heritage.find({ rule: { kind: "type_arguments" } }))[0]?.text();
-      const param = `${pattern ?? "props"}${typeArg ? `: ${typeArg}` : ""}`;
+      const typeNode = kids(heritage.find({ rule: { kind: "type_arguments" } }))[0];
+      const typeArg = typeNode?.text();
+      // React's JSX types made a defaultProps key optional where the class is used
+      // (LibraryManagedAttributes); a function's props type says so itself, unless it's an object
+      // type that already marks each one optional.
+      const defaulted = defaults ? kids(defaults.field("value")).filter((p) => p.kind() === "pair" || p.kind() === "shorthand_property_identifier").map((p) => (p.kind() === "pair" ? p.field("key").text().replace(/^(["'])(.*)\1$/, "$2") : p.text())) : [];
+      const optional = typeNode?.kind() === "object_type" && defaulted.every((key) => kids(typeNode).some((m) => m.kind() === "property_signature" && m.field("name")?.text().replace(/^(["'])(.*)\1$/, "$2") === key && m.text().slice(m.field("name").text().length).trimStart().startsWith("?")));
+      const keys = defaulted.map((key) => JSON.stringify(key)).join(" | ");
+      const type = typeArg && defaulted.length && !optional ? `Omit<${typeArg}, ${keys}> & Partial<Pick<${typeArg}, ${keys}>>` : typeArg;
+      const param = `${pattern ?? "props"}${type ? `: ${type}` : ""}`;
       const edits = [...thisReads.map((t) => rep(t.parent(), holder)), ...(destructure ? [dropLine(first, src)] : [])];
       // The body moves out of the class: one level of indentation less.
       const column = (cls.parent()?.kind() === "export_statement" ? cls.parent() : cls).range().start.column;

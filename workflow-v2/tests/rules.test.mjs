@@ -424,8 +424,15 @@ it("R42 moves `const { ... } = this.props` into the parameter, where R8 converts
 it("R42 gives destructured props their defaultProps as defaults, which R8 turns into merge", () => {
   const code = `import { Component } from 'react'\n\ntype GreetingProps = { name: string; punctuation?: string; tone?: string }\n\nexport class Greeting extends Component<GreetingProps> {\n  static defaultProps = { punctuation: '!', tone: 'plain' }\n\n  render() {\n    const { name, punctuation: mark } = this.props\n    return (\n      <p>\n        Hello, {name}\n        {mark}\n      </p>\n    )\n  }\n}\n`;
   const { code: out, flags } = run(code);
-  expect(out).toBe(`import { merge } from "solid-js";\n\ntype GreetingProps = { name: string; punctuation?: string; tone?: string }\n\nexport function Greeting(props: GreetingProps) {\n  const merged = merge({ punctuation: '!' as const }, props);\n  return (\n    <p>\n      Hello, {merged.name}\n      {merged.punctuation}\n    </p>\n  )\n}\n`);
+  expect(out).toBe(`import { merge } from "solid-js";\n\ntype GreetingProps = { name: string; punctuation?: string; tone?: string }\n\nexport function Greeting(props: Omit<GreetingProps, "punctuation" | "tone"> & Partial<Pick<GreetingProps, "punctuation" | "tone">>) {\n  const merged = merge({ punctuation: '!' as const }, props);\n  return (\n    <p>\n      Hello, {merged.name}\n      {merged.punctuation}\n    </p>\n  )\n}\n`);
   expect(flags).toEqual([]);
+});
+
+it("R42 keeps a defaultProps key optional for the class's callers, as React's JSX types did", () => {
+  const code = convert(`import { Component } from "react";\ntype BadgeProps = { label: string; tone: string };\nexport class Badge extends Component<BadgeProps> {\n  static defaultProps = { tone: "info" };\n  render() { return <span className={this.props.tone}>{this.props.label}</span>; }\n}\nexport const New = () => <Badge label="new" />;\n`);
+  expect(code).toContain(`export function Badge(props: Omit<BadgeProps, "tone"> & Partial<Pick<BadgeProps, "tone">>) {`);
+  // An inline type whose defaulted key is required gets the same.
+  expect(convert(`import { Component } from "react";\nexport class B extends Component<{ label: string; tone: string }> {\n  static defaultProps = { tone: "info" };\n  render() { return <i>{this.props.tone}{this.props.label}</i>; }\n}\n`)).toContain(`export function B(props: Omit<{ label: string; tone: string }, "tone"> & Partial<Pick<{ label: string; tone: string }, "tone">>) {`);
 });
 
 it("R42 reads this.props in a nested arrow, which keeps render's this", () => {
