@@ -1092,14 +1092,24 @@ export function transform(input, { parse, Lang, ports = {}, next = null, hooks =
         const type = kids(param.field("type"))[0];
         const value = param.field("value");
         const optional = param.kind() === "optional_parameter";
-        if (type) introduced["solid-js"].add("Accessor");
-        const declared = `${optional ? "?" : ""}${type ? `: Accessor<${type.text()}>` : ""}${value ? ` = () => ${value.kind() === "object" ? `(${value.text()})` : value.text()}` : ""}`;
+        // Callers pass `() => props.x`, which returns undefined where React's caller passed
+        // undefined: an optional param's accessor can return it, and a default (typed, or a literal)
+        // applies where the param is read, as React's applied to an undefined argument.
+        const literal = value && { true: "boolean", false: "boolean", number: "number", string: "string" }[value.kind()];
+        const defaulted = pattern.kind() === "identifier" && value && (type || literal) ? value.text() : null;
+        const typed = type?.text() ?? (defaulted ? literal : null);
+        if (typed) introduced["solid-js"].add("Accessor");
+        // `?` only where no required param follows (TS1016).
+        const trailing = params.slice(index + 1).every((p) => p.kind() === "optional_parameter" || p.field("value") || p.field("pattern")?.kind() === "rest_pattern");
+        const declared = optional || defaulted
+          ? `${trailing ? "?" : ""}${typed ? `: Accessor<${typed} | undefined>` : ""}`
+          : `${typed ? `: Accessor<${typed}>` : ""}${value ? ` = () => ${value.kind() === "object" ? `(${value.text()})` : value.text()}` : ""}`;
         // [local name, its read through the accessor, its piece of a destructuring] for each name
         // the param bound.
         const fields = [];
         let accessor = pattern.text();
         if (pattern.kind() === "identifier") {
-          fields.push([pattern.text(), optional ? `${pattern.text()}?.()` : `${pattern.text()}()`, null]);
+          fields.push([pattern.text(), defaulted ? `(${pattern.text()}?.() ?? ${defaulted})` : optional ? `${pattern.text()}?.()` : `${pattern.text()}()`, null]);
           note("hook param -> accessor");
         } else if (pattern.kind() === "object_pattern") {
           accessor = freeName("options", taken);
@@ -1119,18 +1129,31 @@ export function transform(input, { parse, Lang, ports = {}, next = null, hooks =
         // A closure in the hook that reads the param more than once reads the accessor once, at its
         // start: TypeScript doesn't narrow a call (`if (!ref) return; ref.id` can't become
         // `ref().id`), and each call sees one value, as each render's closure did in React.
-        const snapshots = new Map(); // outermost closure in the body -> the reads in it
+        // So does the hook's own body for its reads while it runs (setup): they ran once per render
+        // in React, and run once in Solid. Not a read that stays live: in JSX, or in what a later
+        // rule makes a function (an accessor argument of a local hook, TanStack Query's options, an
+        // effect's deps), as rewriteReads defers them.
+        const snapshots = new Map(); // outermost closure in the body, or fn for setup reads -> the reads in it
         for (const [l] of fields) {
           for (const id of readsOf(body, l)) {
             let closure = null;
-            for (let a = id.parent(); a && !same(a, body); a = a.parent()) if (FN_KINDS.has(a.kind())) closure = a;
-            if (!closure?.field("body")) continue;
-            const at = [...snapshots.keys()].find((c) => same(c, closure)) ?? closure;
-            snapshots.set(at, [...(snapshots.get(at) ?? []), [l, id]]);
+            let live = false;
+            for (let a = id.parent(), c = id; a && !same(a, body); c = a, a = a.parent()) {
+              if (FN_KINDS.has(a.kind())) closure = a;
+              if (a.kind() === "jsx_expression" || accessorArg(a, c)) live = true;
+              if (a.kind() === "arguments" && same(arg(a), c) && QUERY_HOOKS.test(a.parent()?.field("function")?.text() ?? "") && /from ["']@tanstack\/(react|solid)-query["']/.test(src)) live = true;
+              if (a.kind() === "array" && a.parent()?.kind() === "arguments" && EFFECT_HOOKS.test(a.parent().parent()?.field("function")?.text() ?? "")) live = true;
+            }
+            const at = closure ?? (live ? null : fn);
+            if (!at?.field("body")) continue;
+            const key = [...snapshots.keys()].find((c) => same(c, at)) ?? at;
+            snapshots.set(key, [...(snapshots.get(key) ?? []), [l, id]]);
           }
         }
         for (const [closure, reads] of snapshots) if (reads.length < 2) snapshots.delete(closure);
-        const snapshotted = (e) => [...snapshots.keys()].some((c) => (e.startPos ?? e.start) >= c.range().start.index && (e.endPos ?? e.end) <= c.range().end.index);
+        const snapshotted = (e) => [...snapshots].some(([c, reads]) => (same(c, fn)
+          ? reads.some(([, id]) => id.range().start.index === (e.startPos ?? e.start))
+          : (e.startPos ?? e.start) >= c.range().start.index && (e.endPos ?? e.end) <= c.range().end.index));
         for (const [l, read] of fields) edits.push(...rewriteReads(body, null, l, read, body, "parameter").filter((e) => !snapshotted(e)));
         // Outermost closures don't nest, so they share one name for the value.
         const local = pattern.kind() === "identifier" && snapshots.size ? freeName(`${pattern.text()}Value`, taken) : null;
@@ -1390,12 +1413,45 @@ export function transform(input, { parse, Lang, ports = {}, next = null, hooks =
         flag("hook param", call, `${name} takes parameter${accessors.length > 1 ? "s" : ""} ${accessors.map((i) => i + 1).join(", ")} as an accessor, and this call spreads its arguments: pass each as () => value`);
         return [];
       }
+      // In a local hook, the accessor params it reads: an argument that reads one twice
+      // (`id() === null ? null : f(id())`) reads it once, so TypeScript narrows it as it did `id`.
+      let owner = call.parent();
+      while (owner && !(FN_KINDS.has(owner.kind()) && Object.hasOwn(hooks.defs, owner.field("name")?.text() ?? owner.parent()?.field("name")?.text() ?? ""))) owner = owner.parent();
+      const ownParams = owner ? (owner.field("parameter") ? [owner.field("parameter")] : kids(owner.field("parameters")).filter((p) => p.kind() !== "comment")) : [];
+      const own = owner ? hooks.defs[owner.field("name")?.text() ?? owner.parent().field("name").text()].accessors.map((i) => ownParams[i] && (ownParams[i].field("pattern") ?? ownParams[i]).text()).filter((p) => /^[A-Za-z_$][\w$]*$/.test(p ?? "")) : [];
       return accessors.filter((i) => args[i]).map((i) => {
         const a = args[i];
         note("hook argument -> accessor");
         const read = a.kind() === "call_expression" && a.field("function")?.kind() === "identifier" && !/^use[A-Z]/.test(a.field("function").text()) && !kids(a.field("arguments")).length;
-        return rep(a, read ? a.field("function").text() : a.kind() === "object" ? `() => (${a.text()})` : `() => ${a.text()}`);
+        if (read) return rep(a, a.field("function").text());
+        const reads = new Map(); // `id()` or `id?.()` -> its calls in the argument, outside functions in it
+        for (const c of own.length ? a.findAll({ rule: { kind: "call_expression", has: { field: "function", kind: "identifier", regex: `^(${own.join("|")})$` } } }) : []) {
+          if (kids(c.field("arguments")).length || c.ancestors().some((x) => inside(x, a) && !same(x, a) && FN_KINDS.has(x.kind()))) continue;
+          reads.set(c.text(), [...(reads.get(c.text()) ?? []), c]);
+        }
+        const once = [...reads].filter(([, calls]) => calls.length > 1);
+        if (!once.length) return rep(a, a.kind() === "object" ? `() => (${a.text()})` : `() => ${a.text()}`);
+        const taken = [];
+        const declarations = once.map(([text, calls]) => {
+          const local = freeName(`${calls[0].field("function").text()}Value`, taken);
+          taken.push(local);
+          return [`const ${local} = ${text};`, calls.map((c) => rep(c, local))];
+        });
+        note("hook param read once in a hook argument");
+        return rep(a, `() => { ${declarations.map(([d]) => d).join(" ")} return ${textWith(a, declarations.flatMap(([, edits]) => edits))}; }`);
       });
+    }),
+  );
+  // A type taken from such a param (`Parameters<typeof useThing>[0]`, a test's input or a component's
+  // props) meant the value, and the param is now its accessor: `ReturnType<Parameters<typeof useThing>[0]>`.
+  pass((root) =>
+    root.findAll({ rule: { kind: "lookup_type", has: { kind: "generic_type", has: { kind: "type_identifier", regex: "^Parameters$" } } } }).flatMap((lookup) => {
+      const [generic, index] = kids(lookup);
+      const query = kids(kids(generic)[1]).filter((k) => k.kind() === "type_query");
+      const name = query.length === 1 ? kids(query[0]).find((k) => k.kind() === "identifier")?.text() : null;
+      if (!name || !Object.hasOwn(hooks.calls, name) || index?.kind() !== "literal_type" || !hooks.calls[name].includes(Number(index.text()))) return [];
+      note("hook param type -> its value");
+      return [rep(lookup, `ReturnType<${lookup.text()}>`)];
     }),
   );
 

@@ -1183,6 +1183,71 @@ it("R55 leaves a param the hook reads once, or calls, a plain value, and reads a
   expect(out["src/A.tsx"].code).toContain("const w = useOnce(sorted(), props.onDone);");
 });
 
+it("R55 types a value taken from an accessor param's type as the accessor's value", () => {
+  const out = project({
+    "src/useFind.ts": `import { useMemo } from "react";\nexport function useFind(options: { query: string }, limit: number) {\n  return useMemo(() => options.query.slice(0, limit), [options, limit]);\n}\n`,
+    "src/useFind.test.tsx": `import { renderHook } from "@testing-library/react";\nimport { useFind } from "./useFind";\ntype Input = Parameters<typeof useFind>[0];\nconst input: Input = { query: "a" };\nconst query: Parameters<typeof useFind>[0]["query"] = "b";\nconst limit: Parameters<typeof useFind>[1] = 2;\nrenderHook(() => useFind(input, limit));\n`,
+    "src/Find.tsx": `import { useFind } from "./useFind";\nexport function Find(props: Parameters<typeof useFind>[0] & { label: string }) {\n  const found = useFind(props, 3);\n  return <p>{props.label}{found}</p>;\n}\n`,
+  });
+  expect(out["src/useFind.ts"].code).toContain("export function useFind(options: Accessor<{ query: string }>, limit: Accessor<number>) {");
+  expect(out["src/useFind.test.tsx"].code).toContain("type Input = ReturnType<Parameters<typeof useFind>[0]>;");
+  expect(out["src/useFind.test.tsx"].code).toContain(`const query: ReturnType<Parameters<typeof useFind>[0]>["query"] = "b";`);
+  expect(out["src/useFind.test.tsx"].code).toContain("const limit: ReturnType<Parameters<typeof useFind>[1]> = 2;");
+  expect(out["src/Find.tsx"].code).toContain("export function Find(props: ReturnType<Parameters<typeof useFind>[0]> & { label: string }) {");
+});
+
+it("R55 lets an optional or defaulted param's accessor return undefined, and applies the default where it's read", () => {
+  const out = project({
+    "src/useMenu.ts": `import { useMemo } from "react";\nexport function useMenu(hidden = false, size: number = 2, path: string, cwd?: string) {\n  return useMemo(() => (hidden ? null : \`\${cwd ?? "."}/\${path}:\${size}\`), [hidden, size, path, cwd]);\n}\n`,
+    "src/Menu.tsx": `import { useMenu } from "./useMenu";\nexport function Menu(props: { hidden?: boolean; path: string; cwd?: string }) {\n  const label = useMenu(props.hidden, undefined, props.path, props.cwd);\n  return <p>{label}</p>;\n}\n`,
+  });
+  // A required param follows the defaulted ones, so they take no `?` (TS1016).
+  expect(out["src/useMenu.ts"].code).toContain("export function useMenu(hidden: Accessor<boolean | undefined>, size: Accessor<number | undefined>, path: Accessor<string>, cwd?: Accessor<string | undefined>) {");
+  expect(out["src/useMenu.ts"].code).toContain("return createMemo(() => ((hidden?.() ?? false) ? null : `${cwd?.() ?? \".\"}/${path()}:${(size?.() ?? 2)}`));");
+  expect(out["src/Menu.tsx"].code).toContain("const label = useMenu(() => props.hidden, () => undefined, () => props.path, () => props.cwd);");
+  const trailing = project({
+    "src/useOpen.ts": `import { useMemo } from "react";\nexport function useOpen(hidden = false) {\n  return useMemo(() => !hidden, [hidden]);\n}\n`,
+    "src/A.tsx": `import { useOpen } from "./useOpen";\nexport function A(props: { hidden?: boolean }) {\n  const open = useOpen(props.hidden);\n  const always = useOpen();\n  return <p>{open()}{always()}</p>;\n}\n`,
+  });
+  expect(trailing["src/useOpen.ts"].code).toContain("export function useOpen(hidden?: Accessor<boolean | undefined>) {");
+  expect(trailing["src/useOpen.ts"].code).toContain("return createMemo(() => !(hidden?.() ?? false));");
+  expect(trailing["src/A.tsx"].code).toContain("const always = useOpen();");
+});
+
+it("R55 reads an accessor param once while the hook runs, where it reads it more than once outside closures", () => {
+  const out = project({
+    "src/useNav.ts": `import { useState } from "react";\nexport function useNav({ request, label }: { request: { key: string } | null; label: string }) {\n  const [nav, setNav] = useState<string | null>(null);\n  if (request && request.key !== nav) {\n    setNav(request.key);\n  }\n  return <p title={label}>{nav}{request ? request.key : ""}</p>;\n}\nexport function useKey(id: string | null) {\n  const [k, setK] = useState(0);\n  if (id && id.length !== k) setK(id.length);\n  return <b>{id}{k}</b>;\n}\n`,
+    "src/A.tsx": `import { useNav, useKey } from "./useNav";\nexport function A(props: { request: { key: string } | null }) {\n  const r = useNav({ request: props.request, label: "x" });\n  const k = useKey(props.request ? props.request.key : null);\n  return <p>{r}{k}</p>;\n}\n`,
+  });
+  const code = out["src/useNav.ts"].code;
+  // The `if` runs once, when the hook does: TypeScript narrows `request` as it did the param.
+  expect(code).toContain(`export function useNav(options: Accessor<{ request: { key: string } | null; label: string }>) {\n  const { request } = options();\n`);
+  expect(code).toContain("  if (request && request.key !== nav()) {\n    setNav(request.key);\n  }\n");
+  // JSX stays live: its closure reads the accessor itself.
+  expect(code).toContain(`return () => { const { request, label } = options(); return (<p title={label}>{nav()}{request ? request.key : ""}</p>); };`);
+  expect(code).toContain(`export function useKey(id: Accessor<string | null>) {\n  const idValue = id();\n`);
+  expect(code).toContain("  if (idValue && idValue.length !== k()) setK(idValue.length);\n  // solid: return: jsx-fn (1 uses)\n  return () => (<b>{id()}{k()}</b>);");
+});
+
+it("R55 reads an accessor param once in an argument it wraps for another hook's accessor param", () => {
+  const out = project({
+    "src/useAtom.ts": `import { useEffect, useMemo, useState } from "react";\nexport function useAtom(atom: string | null) {\n  const [v, setV] = useState(atom);\n  useEffect(() => { setV(atom); }, [atom]);\n  return v;\n}\nexport function useFs(environmentId: string | null) {\n  const session = useAtom(environmentId === null ? null : make(environmentId));\n  const other = useAtom(environmentId);\n  return useMemo(() => [session, other], [session, other]);\n}\nfunction make(id: string) { return id; }\n`,
+    "src/A.tsx": `import { useFs } from "./useAtom";\nexport function A(props: { id: string | null }) {\n  const s = useFs(props.id);\n  return <p>{s}</p>;\n}\n`,
+  });
+  expect(out["src/useAtom.ts"].code).toContain("const session = useAtom(() => { const environmentIdValue = environmentId(); return environmentIdValue === null ? null : make(environmentIdValue); });");
+  expect(out["src/useAtom.ts"].code).toContain("const other = useAtom(environmentId);");
+  // A caller's own values aren't the hook's params: wrapped as they are.
+  expect(out["src/A.tsx"].code).toContain("const s = useFs(() => props.id);");
+});
+
+it("R55 leaves a type taken from a plain param as it is", () => {
+  const out = project({
+    "src/useOnce.ts": `import { useState } from "react";\nexport function useOnce(seed: number) {\n  const [v] = useState(seed);\n  return v;\n}\n`,
+    "src/A.tsx": `import { useOnce } from "./useOnce";\nexport function A(props: { seed: Parameters<typeof useOnce>[0] }) {\n  const v = useOnce(props.seed);\n  return <p>{v}</p>;\n}\n`,
+  });
+  expect(out["src/A.tsx"].code).toContain("export function A(props: { seed: Parameters<typeof useOnce>[0] }) {");
+});
+
 it("R55 flags a hook that now takes accessors when no converted file calls it, and a call that spreads its arguments", () => {
   const out = project({
     "src/useThing.ts": `import { useMemo } from "react";\nexport function useThing(id: string) {\n  return useMemo(() => id.length, [id]);\n}\nexport function useSpread(id: string) {\n  return useMemo(() => id.length, [id]);\n}\nexport function useCaller(args: [string]) {\n  return useSpread(...args);\n}\n`,
