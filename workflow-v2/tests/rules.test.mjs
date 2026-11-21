@@ -188,7 +188,7 @@ it("R27 flags a ref written while the component renders: it keeps the first valu
   const code = `import { useRef } from "react";\nfunction C({ data }) {\n  const latest = useRef(data);\n  latest.current = data;\n  return <button onClick={() => send(latest.current)} />;\n}`;
   const { code: out, flags } = run(code);
   expect(out).toContain(`const latest = { current: props.data };\n  latest.current = props.data;`);
-  expect(flags.filter((f) => f.kind === "ref")).toEqual([{ kind: "ref", line: 4, detail: expect.stringMatching(/^latest\.current is written while the component renders/) }]);
+  expect(flags.filter((f) => f.kind === "ref")).toEqual([{ kind: "ref", line: 3, detail: expect.stringMatching(/^latest\.current is written while the component renders/) }]);
 });
 
 it("R28 passes TanStack Query options as a function", () => {
@@ -337,6 +337,22 @@ it("R38 leaves style props on components alone", () => {
   expect(convert(`export const a = <Box style={{ marginTop: 4 }} />;`)).toContain(`style={{ marginTop: 4 }}`);
 });
 
+it("gives each flag its line in the output, after the later passes add and remove lines", () => {
+  // R10 replaces three lines of React imports with one of Solid's, and R8 and R4 rewrite lines
+  // around the flagged ones.
+  const code = `import {\n  useState,\n  useEffect,\n} from "react";\n\nexport function Search({ query, onPick }) {\n  const [open, setOpen] = useState(false);\n  const results = useResults(query);\n  const label = format(query);\n  useEffect(() => { log(label); }, [label]);\n  return (\n    <ul style={{ marginTop: gap }}>\n      {results.map((r) => <li key={r.id.slug} onClick={() => onPick(r)}>{r.name}</li>)}\n    </ul>\n  );\n}\n`;
+  const { code: out, flags } = run(code);
+  const lines = out.split("\n");
+  expect(lines[0]).toMatch(/^import \{ .* \} from "solid-js";$/);
+  expect(flags.map((f) => [f.kind, lines[f.line - 1].trim()])).toEqual([
+    ["style number", `<ul style={{ "margin-top": gap }}>`],
+    ["render-dependent read", `const results = useResults(props.query);`],
+    ["render-dependent read", `const label = format(props.query);`],
+    ["effect dep", `createEffect(() => label, () => { log(label); });`],
+    ["custom hook call", `const results = useResults(props.query);`],
+  ]);
+});
+
 it("R10 doesn't flag a React event type that becomes the DOM's once its import is gone", () => {
   const { flags } = run(`import { type KeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";\nexport function f(e: KeyboardEvent, m: ReactMouseEvent) { return [e.key, m.button]; }\n`);
   const details = flags.filter((f) => f.kind === "React API").map((f) => f.detail);
@@ -346,7 +362,7 @@ it("R10 doesn't flag a React event type that becomes the DOM's once its import i
 it("R39 notes and flags an error boundary class as Solid 2's <Errored>", () => {
   const { code, flags } = run(`import { Component, type ErrorInfo, type ReactNode } from "react";\n\nexport class Boundary extends Component<{ children: ReactNode }, { error: Error | null }> {\n  state = { error: null };\n  static getDerivedStateFromError(error: Error) { return { error }; }\n  componentDidCatch(error: Error, info: ErrorInfo) { console.error(error, info); }\n  render() { return this.state.error ? <p>Failed</p> : this.props.children; }\n}\n`);
   expect(code).toMatch(/^\/\/ solid: class component: Boundary is an error boundary .*<Errored fallback=\{\(err, reset\) => \.\.\.\}>.*\nexport class Boundary extends Component</m);
-  expect(flags).toContainEqual({ kind: "class component", line: 4, detail: expect.stringContaining("<Errored") });
+  expect(flags).toContainEqual({ kind: "class component", line: 5, detail: expect.stringContaining("<Errored") });
 });
 
 it("R39 maps a class component's lifecycle methods in its note, indented with the class", () => {
@@ -524,7 +540,7 @@ it("R41 renames a parameter that would shadow a name the body uses", () => {
 it("R41 flags a signal or prop read in apply that isn't a dep", () => {
   const code = `function C({ a, b }) { const [n, setN] = useState(0); useEffect(() => { log(a, b, n); props.onChange(a); }, [a]); return null; }`;
   expect(flat(code)).toContain(`createEffect(() => props.a, (a) => {`);
-  expect(effectFlags(code)).toEqual([{ kind: "effect read", line: 1, detail: expect.stringMatching(/^props\.b, n\(\) are read in the effect but not in its deps: Solid warns \(STRICT_READ_UNTRACKED\)/) }]);
+  expect(effectFlags(code)).toEqual([{ kind: "effect read", line: 2, detail: expect.stringMatching(/^props\.b, n\(\) are read in the effect but not in its deps: Solid warns \(STRICT_READ_UNTRACKED\)/) }]);
 });
 
 it.each([
@@ -540,7 +556,7 @@ it.each([
   const code = `function C({ other, deps, handler }) { const [n, setN] = useState(0); const el = useRef(null); ${effect} return <div ref={el} />; }`;
   const { code: out, flags } = run(code);
   expect(out).not.toMatch(/createEffect|onSettled/);
-  expect(flags.filter((f) => f.kind === "effect")).toEqual([{ kind: "effect", line: 1, detail: expect.stringMatching(detail) }]);
+  expect(flags.filter((f) => f.kind === "effect")).toEqual([{ kind: "effect", line: 2, detail: expect.stringMatching(detail) }]);
 });
 
 it("R41 converts effects in a custom hook the same way", () => {
@@ -574,7 +590,7 @@ it("R41 flags only the deps that changed in React: a library hook result stable 
 it("R41 flags a dep that is a plain value or a hook result: tracking it never re-runs the effect", () => {
   const code = `function C() {\n  const pathname = usePathname();\n  const [debounced] = useDebounce(q);\n  const label = format(x);\n  const save = () => post();\n  const [page, setPage] = useQueryState("p");\n  // solid: client: static (useQueryClient hands back a stable value)\n  const client = useQueryClient();\n  useEffect(() => { track(pathname, debounced, label); save(); setPage(1); client.clear(); }, [pathname, debounced, label, save, setPage, client]);\n  return null;\n}`;
   expect(flat(code)).toContain(`createEffect(() => [pathname, debounced, label, save, setPage, client], () => {`);
-  expect(run(code).flags.filter((f) => f.kind === "effect dep")).toEqual([{ kind: "effect dep", line: 9, detail: expect.stringMatching(/^pathname, debounced, label are plain values here \(the component body runs once\), so tracking them never re-runs the effect/) }]);
+  expect(run(code).flags.filter((f) => f.kind === "effect dep")).toEqual([{ kind: "effect dep", line: 10, detail: expect.stringMatching(/^pathname, debounced, label are plain values here \(the component body runs once\), so tracking them never re-runs the effect/) }]);
 });
 
 it.each([
@@ -803,9 +819,9 @@ it("R46 flags an element made before render runs, React-only render options and 
   const { code: out, flags } = tested(code);
   expect(out).toContain(`render(() => ui, { reactStrictMode: true })`);
   expect(flags.map((f) => [f.kind, f.line, f.detail.slice(0, 40)])).toEqual([
-    ["render", 2, "reactStrictMode: React-only render optio"],
-    ["render", 2, "ui is an element made before render() ru"],
-    ["render", 3, "asFragment() returns the container's inn"],
+    ["render", 3, "reactStrictMode: React-only render optio"],
+    ["render", 3, "ui is an element made before render() ru"],
+    ["render", 4, "asFragment() returns the container's inn"],
   ]);
 });
 
@@ -918,14 +934,14 @@ it("R48 keeps an <Image> it can't write as an <img> (fill), flagged", () => {
 it("R49 turns next/dynamic's dynamic(() => import(...)) into lazy from solid-js, and flags one with options", () => {
   const { code, flags } = runNext(`import dynamic from "next/dynamic";\nconst Chart = dynamic(() => import("./chart"));\nconst Map = dynamic(() => import("./map"), { ssr: false });\n`);
   expect(code).toBe(`import { lazy } from "solid-js";\nimport dynamic from "next/dynamic";\nconst Chart = lazy(() => import("./chart"));\nconst Map = dynamic(() => import("./map"), { ssr: false });\n`);
-  expect(flags.filter((f) => f.kind === "Next.js").map((f) => f.line)).toEqual([3, 1]);
+  expect(flags.filter((f) => f.kind === "Next.js").map((f) => f.line)).toEqual([4, 2]);
   expect(runNext(`import dynamic from "next/dynamic";\nconst Chart = dynamic(() => import("./chart"));\n`).code).toBe(`import { lazy } from "solid-js";\nconst Chart = lazy(() => import("./chart"));\n`);
 });
 
 it("R50 leaves a next/font loader's class names empty, flagged with the custom property it set", () => {
   const { code, flags } = runNext(`import { Geist } from "next/font/google";\n\nconst sans = Geist({ variable: "--font-sans", subsets: ["latin"] });\nexport const cls = sans.variable;\n`);
   expect(code).toBe(`const sans = { className: "", variable: "", style: {} };\nexport const cls = sans.variable;\n`);
-  expect(flags).toEqual([{ kind: "Next.js", line: 3, detail: expect.stringContaining(`set the "--font-sans" custom property it defined`) }]);
+  expect(flags).toEqual([{ kind: "Next.js", line: 1, detail: expect.stringContaining(`set the "--font-sans" custom property it defined`) }]);
 });
 
 it("R51 turns Next.js's PageProps into the route's RouteProps and LayoutProps into ParentProps", () => {
@@ -1021,7 +1037,7 @@ it("R54 adds to the root layout's own <head>, and flags a body that renders more
   const code = `export default function RootLayout({ children }) {\n  return (\n    <html>\n      <head>\n        <meta charSet="utf-8" />\n      </head>\n      <body>\n        <Providers>{children}</Providers>\n      </body>\n    </html>\n  );\n}\n`;
   const { code: out, flags } = runNext(code, { kind: "document", pattern: "/", key: "k" });
   expect(out).toContain(`      <head>\n        <meta charset="utf-8" />\n        <meta name="viewport" content="width=device-width, initial-scale=1" />\n        <HydrationScript />\n      </head>`);
-  expect(flags).toEqual([{ kind: "Next.js", line: 7, detail: expect.stringMatching(/^the root layout renders more than \{children\} in <body>: src\/Document.tsx is server-only/) }]);
+  expect(flags).toEqual([{ kind: "Next.js", line: 10, detail: expect.stringMatching(/^the root layout renders more than \{children\} in <body>: src\/Document.tsx is server-only/) }]);
 });
 
 it("a layout whose segment has loading.tsx and error.tsx wraps its children in <Errored> and <Loading>", () => {
@@ -1060,7 +1076,7 @@ async function nextPOST(request: Request, { params }: { params: Promise<{ id: st
 
 export const POST: APIHandler = (event) => nextPOST(event.request, { params: Promise.resolve(event.params ?? {}) });
 `);
-  expect(flags).toEqual([{ kind: "Next.js", line: 7, detail: expect.stringMatching(/^POST takes the route's params: they come from event.params/) }]);
+  expect(flags).toEqual([{ kind: "Next.js", line: 9, detail: expect.stringMatching(/^POST takes the route's params: they come from event.params/) }]);
 });
 
 it("R10 doesn't take loading=\"lazy\" for a use of lazy", () => {

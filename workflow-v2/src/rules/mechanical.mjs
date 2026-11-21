@@ -140,9 +140,15 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
 
   let src = input;
   const flags = [];
+  // The text each flag's line was counted in: the passes after it add and remove lines, so the
+  // lines are moved to the output's at the end.
+  const flaggedIn = [];
   const applied = {};
   const note = (rule, n = 1) => (applied[rule] = (applied[rule] || 0) + n);
-  const flag = (kind, node, detail) => flags.push({ kind, line: node ? node.range().start.line + 1 : 0, detail });
+  const flag = (kind, node, detail) => {
+    flags.push({ kind, line: node ? node.range().start.line + 1 : 0, detail });
+    flaggedIn.push(src);
+  };
   // Solid types the rules write, by module, for R10 to import (a bare `Component` has no `<` to find it by).
   const introduced = { "solid-js": new Set(), "@solidjs/web": new Set() };
 
@@ -2152,8 +2158,97 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
   }
   // Each at the first line that uses it.
   const sourceLines = src.split("\n");
-  for (const [name, detail] of leftover) flags.push({ kind: "React API", line: sourceLines.findIndex((l) => !/^\s*(import\b|\/\/)/.test(l) && new RegExp(`(^|[^.\\w$])${name}\\b`).test(l)) + 1, detail });
+  for (const [name, detail] of leftover) {
+    flags.push({ kind: "React API", line: sourceLines.findIndex((l) => !/^\s*(import\b|\/\/)/.test(l) && new RegExp(`(^|[^.\\w$])${name}\\b`).test(l)) + 1, detail });
+    flaggedIn.push(src);
+  }
   if (/\bReact\.\w+/.test(src)) flag("React namespace", null, [...new Set(src.match(/\bReact\.\w+/g))].join(", "));
+
+  // Each flag's line, in the output: a line the later passes kept is matched exactly, by Myers' diff
+  // of the text it was counted in and the output (the common head and tail first, so the diff only
+  // walks the middle); a line they rewrote goes where its neighbors went, and one they removed to
+  // the next line kept.
+  const outLines = src.split("\n");
+  for (const text of new Set(flaggedIn)) {
+    if (text === src) continue;
+    const a = text.split("\n");
+    const b = outLines;
+    const moved = new Int32Array(a.length).fill(-1);
+    let head = 0;
+    while (head < a.length && head < b.length && a[head] === b[head]) {
+      moved[head] = head;
+      head++;
+    }
+    let tail = 0;
+    while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) {
+      moved[a.length - 1 - tail] = b.length - 1 - tail;
+      tail++;
+    }
+    const n = a.length - head - tail;
+    const m = b.length - head - tail;
+    const max = n + m;
+    const v = new Int32Array(2 * max + 2);
+    // trace[d] holds diagonals -d..d of v before step d. Past 2000 edits, only the head and tail match.
+    const trace = [];
+    search: for (let d = 0; d <= max; d++) {
+      if (d > 2000) {
+        trace.length = 0;
+        break;
+      }
+      trace.push(v.slice(max - d, max + d + 1));
+      for (let k = -d; k <= d; k += 2) {
+        let x = k === -d || (k !== d && v[max + k - 1] < v[max + k + 1]) ? v[max + k + 1] : v[max + k - 1] + 1;
+        let y = x - k;
+        while (x < n && y < m && a[head + x] === b[head + y]) {
+          x++;
+          y++;
+        }
+        v[max + k] = x;
+        if (x >= n && y >= m) break search;
+      }
+    }
+    for (let d = trace.length - 1, x = n, y = m; d >= 0; d--) {
+      const k = x - y;
+      const prevK = k === -d || (k !== d && (trace[d][k - 1 + d] ?? 0) < (trace[d][k + 1 + d] ?? 0)) ? k + 1 : k - 1;
+      const prevX = trace[d][prevK + d] ?? 0;
+      while (x > prevX && y > prevX - prevK) moved[head + --x] = head + --y;
+      x = prevX;
+      y = prevX - prevK;
+    }
+    flags.forEach((f, j) => {
+      if (flaggedIn[j] !== text || f.line === 0) return;
+      const i = f.line - 1;
+      if (moved[i] >= 0) {
+        f.line = moved[i] + 1;
+        return;
+      }
+      let p = i - 1;
+      while (p >= 0 && moved[p] < 0) p--;
+      let q = i + 1;
+      while (q < a.length && moved[q] < 0) q++;
+      const first = p < 0 ? 0 : moved[p] + 1;
+      const last = q < a.length ? moved[q] - 1 : b.length - 1;
+      if (first > last) {
+        f.line = Math.min(last + 1, b.length - 1) + 1;
+        return;
+      }
+      // In the lines the region became, the one most like it, by the words they share (R10's imports
+      // are new lines above a rewritten one); of equals, or with none alike, the one nearest its offset.
+      const words = new Set(a[i].match(/\w+/g) ?? []);
+      const offset = Math.min(first + (i - p - 1), last);
+      let best = offset;
+      let score = 0;
+      for (let line = first; line <= last && line - first < 400; line++) {
+        const theirs = b[line].match(/\w+/g) ?? [];
+        const alike = (2 * theirs.filter((w) => words.has(w)).length) / (words.size + theirs.length || 1);
+        if (alike > score || (alike === score && alike > 0 && Math.abs(line - offset) < Math.abs(best - offset))) {
+          best = line;
+          score = alike;
+        }
+      }
+      f.line = best + 1;
+    });
+  }
 
   return { code: src, applied, flags, ...(document ? { document } : {}) };
 }
