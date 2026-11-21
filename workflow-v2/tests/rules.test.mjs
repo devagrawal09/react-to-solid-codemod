@@ -1126,7 +1126,8 @@ it("R55 takes a destructured options object as one accessor, as TanStack Query's
     "src/A.tsx": `import { useState } from "react";\nimport { useItem } from "./useItem";\nexport function A() {\n  const [id, setId] = useState("a");\n  const item = useItem({ id, enabled: id !== "" });\n  return <p onClick={() => setId("b")}>{item}</p>;\n}\n`,
   });
   expect(out["src/useItem.ts"].code).toContain("export function useItem(options: Accessor<{ id: string; enabled?: boolean }>) {");
-  expect(out["src/useItem.ts"].code).toContain(`return createMemo(() => ((options().enabled ?? true) ? options().id.toUpperCase() : ""));`);
+  // The memo reads the options twice, so it reads the accessor once (see below).
+  expect(out["src/useItem.ts"].code).toContain(`return createMemo(() => { const { id, enabled = true } = options(); return (enabled ? id.toUpperCase() : ""); });`);
   expect(out["src/A.tsx"].code).toContain(`const item = useItem(() => ({ id: id(), enabled: id() !== "" }));`);
 });
 
@@ -1175,4 +1176,19 @@ it("R55 flags a reactive param whose pattern can't become one accessor, and leav
   expect(out.code).toContain(`export function useRest({ id, ...rest }: { id: string; x: string }) {`);
   expect(out.code).toContain(`return useRest({ id: "a", x: "b" });`);
   expect(out.flags.filter((f) => f.kind === "hook param").map((f) => f.detail)).toEqual(["useRest reads parameter 1 reactively, but its pattern has a rest element, so it stays a plain value and keeps its first value: take it as one accessor (options: Accessor<T>) and read options().x"]);
+});
+
+it("R55 reads the accessor once at the start of a closure that reads the param more than once, so TypeScript still narrows it", () => {
+  const out = project({
+    "src/useActions.ts": `import { useCallback } from "react";\nexport function useActions(ref: { id: string } | null, { scope, limit = 10 }: { scope: string; limit?: number }) {\n  const open = useCallback(() => {\n    if (!ref) return;\n    go(ref.id, scope, limit);\n  }, [ref, scope, limit]);\n  const label = () => scope;\n  const name = () => (ref ? ref.id : "none");\n  const both = () => (ref && scope ? ref.id + scope : scope);\n  return { open, label, name, both };\n}\n`,
+    "src/A.tsx": `import { useActions } from "./useActions";\nexport function A({ target }: { target: { id: string } | null }) {\n  const actions = useActions(target, { scope: "a" });\n  return <button onClick={actions.open}>{actions.label()}</button>;\n}\n`,
+  })["src/useActions.ts"].code;
+  expect(out).toContain("export function useActions(ref: Accessor<{ id: string } | null>, options: Accessor<{ scope: string; limit?: number }>) {");
+  expect(out).toContain("const open = () => {\n    const refValue = ref();\n    const { scope, limit = 10 } = options();\n    if (!refValue) return;\n    go(refValue.id, scope, limit);\n  };");
+  // One read: through the accessor, where it is.
+  expect(out).toContain("const label = () => options().scope;");
+  // An expression body becomes a block that returns it, with every param's read.
+  expect(out).toContain(`const both = () => { const refValue = ref(); const { scope } = options(); return (refValue && scope ? refValue.id + scope : scope); };`);
+  // An expression body becomes a block that returns it.
+  expect(out).toContain(`const name = () => { const refValue = ref(); return (refValue ? refValue.id : "none"); };`);
 });

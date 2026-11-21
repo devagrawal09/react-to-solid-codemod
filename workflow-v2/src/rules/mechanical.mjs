@@ -1074,6 +1074,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null, hooks =
       if (def.accessors.length && !def.callers) flag("hook param", fn, `${name} now takes parameter${def.accessors.length > 1 ? "s" : ""} ${def.accessors.map((i) => i + 1).join(", ")} as an accessor, and no converted file calls it: a caller elsewhere must pass \`() => value\``);
       const edits = [];
       const taken = [];
+      const declarations = new Map(); // closure -> the declarations that read the accessors once
       for (const index of def.accessors) {
         const param = params[index];
         if (!param) continue;
@@ -1083,29 +1084,64 @@ export function transform(input, { parse, Lang, ports = {}, next = null, hooks =
         const optional = param.kind() === "optional_parameter";
         if (type) introduced["solid-js"].add("Accessor");
         const declared = `${optional ? "?" : ""}${type ? `: Accessor<${type.text()}>` : ""}${value ? ` = () => ${value.kind() === "object" ? `(${value.text()})` : value.text()}` : ""}`;
-        if (pattern.kind() === "identifier") {
-          edits.push(rep(param, `${pattern.text()}${declared}`));
-          edits.push(...rewriteReads(body, null, pattern.text(), optional ? `${pattern.text()}?.()` : `${pattern.text()}()`, body, "parameter"));
-          note("hook param -> accessor");
-          continue;
-        }
-        if (pattern.kind() !== "object_pattern") continue;
-        // [local name, read of its key on the object, default]
+        // [local name, its read through the accessor, its piece of a destructuring] for each name
+        // the param bound.
         const fields = [];
-        const key = (k) => (k.kind() === "property_identifier" ? `.${k.text()}` : `[${k.text()}]`);
-        for (const p of kids(pattern)) {
-          if (p.kind() === "shorthand_property_identifier_pattern") fields.push([p.text(), `.${p.text()}`, null]);
-          else if (p.kind() === "object_assignment_pattern") fields.push([p.field("left").text(), `.${p.field("left").text()}`, p.field("right").text()]);
-          else if (p.kind() === "pair_pattern" && p.field("value")?.kind() === "identifier") fields.push([p.field("value").text(), key(p.field("key")), null]);
-          else if (p.kind() === "pair_pattern" && p.field("value")?.kind() === "assignment_pattern" && p.field("value").field("left")?.kind() === "identifier") fields.push([p.field("value").field("left").text(), key(p.field("key")), p.field("value").field("right").text()]);
-          else fields.push(null);
+        let accessor = pattern.text();
+        if (pattern.kind() === "identifier") {
+          fields.push([pattern.text(), optional ? `${pattern.text()}?.()` : `${pattern.text()}()`, null]);
+          note("hook param -> accessor");
+        } else if (pattern.kind() === "object_pattern") {
+          accessor = freeName("options", taken);
+          const key = (k) => (k.kind() === "property_identifier" ? `.${k.text()}` : `[${k.text()}]`);
+          for (const p of kids(pattern)) {
+            if (p.kind() === "shorthand_property_identifier_pattern") fields.push([p.text(), `${accessor}().${p.text()}`, p.text()]);
+            else if (p.kind() === "object_assignment_pattern") fields.push([p.field("left").text(), `(${accessor}().${p.field("left").text()} ?? ${p.field("right").text()})`, p.text()]);
+            else if (p.kind() === "pair_pattern" && p.field("value")?.kind() === "identifier") fields.push([p.field("value").text(), `${accessor}()${key(p.field("key"))}`, p.text()]);
+            else if (p.kind() === "pair_pattern" && p.field("value")?.kind() === "assignment_pattern" && p.field("value").field("left")?.kind() === "identifier") fields.push([p.field("value").field("left").text(), `(${accessor}()${key(p.field("key"))} ?? ${p.field("value").field("right").text()})`, p.text()]);
+            else fields.push(null);
+          }
+          if (fields.includes(null)) { flag("hook param", param, `${name} reads ${pattern.text()} reactively, but this pattern can't be read field by field from one accessor: take it as options: Accessor<T> and read options().x`); continue; }
+          taken.push(accessor);
+          note("hook options -> accessor");
+        } else continue;
+        edits.push(rep(param, `${accessor}${declared}`));
+        // A closure in the hook that reads the param more than once reads the accessor once, at its
+        // start: TypeScript doesn't narrow a call (`if (!ref) return; ref.id` can't become
+        // `ref().id`), and each call sees one value, as each render's closure did in React.
+        const snapshots = new Map(); // outermost closure in the body -> the reads in it
+        for (const [l] of fields) {
+          for (const id of readsOf(body, l)) {
+            let closure = null;
+            for (let a = id.parent(); a && !same(a, body); a = a.parent()) if (FN_KINDS.has(a.kind())) closure = a;
+            if (!closure?.field("body")) continue;
+            const at = [...snapshots.keys()].find((c) => same(c, closure)) ?? closure;
+            snapshots.set(at, [...(snapshots.get(at) ?? []), [l, id]]);
+          }
         }
-        if (fields.includes(null)) { flag("hook param", param, `${name} reads ${pattern.text()} reactively, but this pattern can't be read field by field from one accessor: take it as options: Accessor<T> and read options().x`); continue; }
-        const local = freeName("options", taken);
-        taken.push(local);
-        edits.push(rep(param, `${local}${declared}`));
-        for (const [l, read, d] of fields) edits.push(...rewriteReads(body, null, l, d ? `(${local}()${read} ?? ${d})` : `${local}()${read}`, body, "parameter"));
-        note("hook options -> accessor");
+        for (const [closure, reads] of snapshots) if (reads.length < 2) snapshots.delete(closure);
+        const snapshotted = (e) => [...snapshots.keys()].some((c) => (e.startPos ?? e.start) >= c.range().start.index && (e.endPos ?? e.end) <= c.range().end.index);
+        for (const [l, read] of fields) edits.push(...rewriteReads(body, null, l, read, body, "parameter").filter((e) => !snapshotted(e)));
+        // Outermost closures don't nest, so they share one name for the value.
+        const local = pattern.kind() === "identifier" && snapshots.size ? freeName(`${pattern.text()}Value`, taken) : null;
+        if (local) taken.push(local);
+        for (const [closure, reads] of snapshots) {
+          let declaration;
+          if (local) {
+            declaration = `const ${local} = ${fields[0][1]};`;
+            for (const [, id] of reads) edits.push(readAs(id, local));
+          } else declaration = `const { ${fields.filter(([l]) => reads.some(([r]) => r === l)).map((f) => f[2]).join(", ")} } = ${accessor}();`;
+          const at = [...declarations.keys()].find((c) => same(c, closure)) ?? closure;
+          declarations.set(at, [...(declarations.get(at) ?? []), declaration]);
+        }
+      }
+      // One edit per closure, with every param's declaration. An expression body
+      // (`() => (ref ? ref.id : null)`) becomes a block that returns it.
+      for (const [closure, lines] of declarations) {
+        const block = closure.field("body");
+        if (block.kind() === "statement_block") edits.push({ start: block.range().start.index + 1, end: block.range().start.index + 1, text: lines.map((line) => `\n${" ".repeat(kids(block)[0]?.range().start.column ?? block.range().start.column + 2)}${line}`).join("") });
+        else edits.push(wrapRep(block, (inner) => `{ ${lines.join(" ")} return ${inner}; }`));
+        note("hook param read once in a closure");
       }
       return edits;
     });
