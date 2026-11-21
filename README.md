@@ -18,6 +18,10 @@ npx codemod@alpha run react-to-solid --param apply=true
 
 # Apply, install with the project's package manager, then type-check.
 npx codemod@alpha run react-to-solid --param apply=true --param install=true
+
+# With --allow-fs, the React Compiler's per-file results are cached in ~/.cache/react-to-solid,
+# so the apply after a preview only compiles what changed (--param cache=false turns it off).
+npx codemod@alpha run react-to-solid --allow-fs --param apply=true
 ```
 
 Either way the run ends by writing `.react-to-solid/worklist.md`: every flagged spot and every type error, in fix order, with what to do and the command that re-verifies, for you or a coding agent. The directory ignores itself, so git doesn't see it.
@@ -33,7 +37,7 @@ npx codemod@2.0.0-alpha.4 run react-to-solid   # or: pnpm dlx codemod@alpha run 
 npm view codemod dist-tags.alpha               # what your registry calls alpha
 ```
 
-The converted directory is `src` by default; in a monorepo, point it at one app with `--param include=apps/web/src`. The parameters, the steps and the full list of what changes are in [`workflow-v2/README.md`](workflow-v2/README.md).
+The converted directory is `src` by default; in a monorepo, point it at one app with `--param include=apps/web/src`, and add `--param workspace=true` to convert the React workspace packages it depends on in the same run (`--param workspaceExclude=@repo/email` leaves some as they are). A second run on a converted project changes nothing: files that are already Solid are skipped. The parameters, the steps and the full list of what changes are in [`workflow-v2/README.md`](workflow-v2/README.md).
 
 ## What it does
 
@@ -42,6 +46,7 @@ The converted directory is `src` by default; in a monorepo, point it at one app 
 - Component-body values: each becomes a signal, a memo, an accessor or a plain value, as the React Compiler's analysis says (see below), with a `// solid:` note saying which and why.
 - Hooks and React APIs: `useState` → `createSignal`, `useMemo` → `createMemo`, `useReducer` → a signal and a dispatch, `useCallback` and `memo` dropped, `useRef` → a `let` and a ref callback (or a plain `{ current }` object when it's passed on), `useId` → `createUniqueId`, `<Suspense>` → `<Loading>`, `createRoot(el).render(...)` → `render(() => ..., el)`, `createPortal` → `<Portal mount>`.
 - Effects: `useEffect` and `useLayoutEffect` with a deps array → `createEffect(compute, apply)`, the deps as compute and the ones the body reads handed to apply as parameters (so a cleanup sees its own run's values, as in React); with `[]` → `onSettled`, which keeps the returned cleanup.
+- Custom hooks: a param the hook reads where reading keeps happening (JSX, an effect, a closure, its return) becomes an accessor (`id: Accessor<string>`, read `id()`), and every caller in the converted files passes one (`useThing(() => props.id)`); a returned object hands back getters, and a returned array its items as accessors, so callers that destructure it read `x()`.
 - Props: destructured props → `props.x`, defaults through `merge` (a default that reads another prop becomes a getter), rest through `omit`, a prop used as a JSX tag (`{ icon: Icon }`) → `const Icon = dynamic(() => props.icon)`.
 - Class components that are only `render()` (and optionally `static defaultProps`) and read nothing of `this` but `this.props` → function components, `defaultProps` through `merge`.
 - zustand store hooks: a selected action (`useStore((s) => s.reset)`) is called directly, selected state is read as an accessor, and each store is flagged once with the ~10-line bridge that makes both work in Solid 2.
