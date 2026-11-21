@@ -24,7 +24,9 @@ import { PORTS, reactPeers } from "../src/manifests.mjs";
  * - `tsconfig`: the project's tsconfig, relative to `subdirectory` (default tsconfig.json);
  * - `chunk`: type-check in chunks of this many files, for apps too big to check in one go;
  * - `workflowCpus`: run the workflow on this many CPUs (it starts a worker per CPU);
- * - `compilerOptions`: overrides for both the React and the Solid type-check (say why in notes).
+ * - `compilerOptions`: overrides for both the React and the Solid type-check (say why in notes);
+ * - `params`: more workflow params, as `name=value` (`workspace=true`). With workspace=true, the
+ *   workspace packages the run converts count as converted directories too.
  *
  * For each entry it:
  * 1. clones the repository at the pinned commit (or generates the create-vite app) into the cache;
@@ -57,7 +59,8 @@ import { PORTS, reactPeers } from "../src/manifests.mjs";
  *   with the same baseline; REACT_TO_SOLID_CORPUS_LABEL names its results directory;
  * - REACT_TO_SOLID_CORPUS_PRIVATE_REPO, _PRIVATE_INCLUDE (and _PRIVATE_TSCONFIG, default the
  *   include's parent's tsconfig.json): a local git repository to run as one more entry, at its
- *   HEAD, chunked; its baseline is kept in the cache, never in this repo. Skipped when unset;
+ *   HEAD, chunked; its baseline is kept in the cache, never in this repo. Skipped when unset.
+ *   _PRIVATE_PARAMS: its `params`, comma-separated (workspace=true);
  * - REACT_TO_SOLID_CORPUS_MEMORY (default 3000M), _CPUS (a taskset list), _GOMEMLIMIT (default
  *   2000MiB), _MIN_AVAILABLE_MB (default 4000): each install, workflow run and type-check runs in a
  *   systemd-run scope with that memory cap, when systemd-run is there, and each type-check waits
@@ -104,6 +107,7 @@ if (env.REACT_TO_SOLID_CORPUS_PRIVATE_REPO) {
     include,
     tsconfig: env.REACT_TO_SOLID_CORPUS_PRIVATE_TSCONFIG ?? path.join(path.dirname(include), "tsconfig.json"),
     chunk: 50,
+    params: env.REACT_TO_SOLID_CORPUS_PRIVATE_PARAMS?.split(",").map((param) => param.trim()) ?? [],
     private: true,
   });
 }
@@ -244,20 +248,6 @@ for (const entry of corpus.filter((e) => !only || only.includes(e.name))) {
       lap(`${variant}: reset`);
 
       if (variant === "solid") {
-        // React-only libraries, from the app's package.json files and lockfile before the workflow
-        // moves them: every library that peers on React but react, react-dom and the ports that
-        // export its names (lucide-react, @tanstack/react-query, @testing-library/react), which the
-        // workflow can convert. A converted file whose React source imported one is left out of the
-        // codemod's count; going by the React source keeps that set the same for every version.
-        const deps = new Set(["react", "react-dom"]);
-        for (const dir of [subdirectory, ...entry.include.split("/").map((_, i, parts) => path.posix.join(subdirectory, ...parts.slice(0, i + 1)))]) {
-          const pkg = readJson(path.join(work, dir, "package.json"), {});
-          for (const name of Object.keys({ ...pkg.dependencies, ...pkg.devDependencies, ...pkg.peerDependencies })) deps.add(name);
-        }
-        const lockfile = Object.keys(LOCKFILES).find((name) => fs.existsSync(path.join(target, name)));
-        const peers = lockfile ? reactPeers(lockfile, fs.readFileSync(path.join(target, lockfile), "utf8")) : null;
-        const reactLibraries = new Set([...deps].filter((name) => name !== "react" && name !== "react-dom" && !PORTS[name]?.lacks && (peers ? peers.includes(name) : /react/i.test(name))));
-
         // 3. The workflow, as a user runs it, with its run store in the cache.
         const store = path.join(cache, "runs", label, entry.name);
         fs.rmSync(store, { recursive: true, force: true });
@@ -268,7 +258,7 @@ for (const entry of corpus.filter((e) => !only || only.includes(e.name))) {
           const [from, to = from] = range.split("-").map(Number);
           return Array.from({ length: to - from + 1 }, (_, i) => from + i);
         });
-        const cli = run([tools.codemod, "workflow", "run", "-w", workflow, "-t", target, "--param", `include=${entry.include}`, "--param", "apply=true", "--no-interactive", "--approve", "--disable-analytics", "--no-color"], {
+        const cli = run([tools.codemod, "workflow", "run", "-w", workflow, "-t", target, "--param", `include=${entry.include}`, "--param", "apply=true", ...(entry.params ?? []).flatMap((param) => ["--param", param]), "--no-interactive", "--approve", "--disable-analytics", "--no-color"], {
           cwd: packageDirectory,
           extraEnv: { CODEMOD_RUN_STORE_DIR: store },
           cpus: entry.workflowCpus ? allowed.slice(0, entry.workflowCpus).join(",") : undefined,
@@ -281,8 +271,24 @@ for (const entry of corpus.filter((e) => !only || only.includes(e.name))) {
         const output = runJson.output;
         lap("workflow");
 
+        // React-only libraries, from the React app's package.json files (on the way to the converted
+        // directory, and of the workspace packages converted with it) and lockfile: every library
+        // that peers on React but react, react-dom and the ports that export its names (lucide-react,
+        // @tanstack/react-query, @testing-library/react), which the workflow can convert. A converted
+        // file whose React source imported one is left out of the codemod's count; going by the React
+        // source keeps that set the same for every version.
+        const converted = (output.workspace ?? []).map((p) => path.posix.join(subdirectory, p.dir));
+        const deps = new Set(["react", "react-dom"]);
+        for (const dir of [subdirectory, ...entry.include.split("/").map((_, i, parts) => path.posix.join(subdirectory, ...parts.slice(0, i + 1))), ...converted]) {
+          const pkg = readJson(path.join(pristine, dir, "package.json"), {});
+          for (const name of Object.keys({ ...pkg.dependencies, ...pkg.devDependencies, ...pkg.peerDependencies })) deps.add(name);
+        }
+        const lockfile = Object.keys(LOCKFILES).find((name) => fs.existsSync(path.join(pristine, subdirectory, name)));
+        const peers = lockfile ? reactPeers(lockfile, fs.readFileSync(path.join(pristine, subdirectory, lockfile), "utf8")) : null;
+        const reactLibraries = new Set([...deps].filter((name) => name !== "react" && name !== "react-dom" && !PORTS[name]?.lacks && (peers ? peers.includes(name) : /react/i.test(name))));
+
         // 4. Every converted file parses, and awaits only inside async functions.
-        const changed = git(work, ["status", "--porcelain", "-z", "--untracked-files=all", "--", include])
+        const changed = git(work, ["status", "--porcelain", "-z", "--untracked-files=all", "--", include, ...converted])
           .split("\0")
           .filter(Boolean)
           .map((line) => line.slice(3))

@@ -1,0 +1,8 @@
+{
+  "name": "docs",
+  "private": true,
+  "dependencies": {
+    "@repo/ui": "workspace:*",
+    "react": "19.2.0"
+  }
+}

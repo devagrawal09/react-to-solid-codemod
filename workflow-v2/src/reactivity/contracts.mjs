@@ -70,18 +70,27 @@ export const LIBRARY = {
 // call-time values are reactive reads done later, so a caller gets an accessor, not a plain value.
 const STATIC_DECISIONS = new Set(["static", "function", "unused"]);
 
-function resolveImport(fromFile, source, files) {
-  let base;
+// `modules` maps an import by package name to the files it may be, like tsconfig's `paths`: a key
+// is a name (`@acme/hooks`) or a pattern (`@acme/ui/*`), each value a list of paths without an
+// extension, `*` standing for what the pattern matched. The workflow builds it for the workspace
+// packages it converts in the same run, so a hook imported from one has its contract.
+function resolveImport(fromFile, source, files, modules = {}) {
+  let bases;
   // `~/` and `@/` are the usual tsconfig paths for the app's src directory (t3code, create-t3-app,
   // create-next-app).
-  if ((source.startsWith("~/") || source.startsWith("@/")) && fromFile.includes("/src/")) base = path.join(fromFile.slice(0, fromFile.indexOf("/src/") + "/src/".length), source.slice(2));
-  else if (source.startsWith(".")) base = path.join(path.dirname(fromFile), source);
-  else return null;
-  for (const ext of ["", ".ts", ".tsx", "/index.ts", "/index.tsx"]) if (files.has(base + ext)) return base + ext;
+  if ((source.startsWith("~/") || source.startsWith("@/")) && fromFile.includes("/src/")) bases = [path.join(fromFile.slice(0, fromFile.indexOf("/src/") + "/src/".length), source.slice(2))];
+  else if (source.startsWith(".")) bases = [path.join(path.dirname(fromFile), source)];
+  else if (modules[source]) bases = modules[source];
+  else {
+    const pattern = Object.keys(modules).find((key) => key.endsWith("/*") && source.startsWith(key.slice(0, -1)));
+    if (!pattern) return null;
+    bases = modules[pattern].map((to) => to.replace("*", source.slice(pattern.length - 1)));
+  }
+  for (const base of bases) for (const ext of ["", ".ts", ".tsx", "/index.ts", "/index.tsx"]) if (files.has(base + ext)) return base + ext;
   return null;
 }
 
-export function buildContracts(results) {
+export function buildContracts(results, { modules = {} } = {}) {
   const files = new Map(results.map((r) => [r.file, r]));
   const hooks = new Map(); // `${file}#${name}` -> fn
   for (const r of results) for (const fn of r.functions) if (fn.kind === "hook" && fn.name) hooks.set(`${r.file}#${fn.name}`, fn);
@@ -115,7 +124,7 @@ export function buildContracts(results) {
     if (!callee) return null;
     const imp = files.get(file)?.imports?.[callee];
     if (imp) {
-      const resolved = resolveImport(file, imp.source, files);
+      const resolved = resolveImport(file, imp.source, files, modules);
       if (resolved && imp.imported !== "default" && imp.imported !== "*") return files.get(resolved).stores?.[imp.imported] ? { store: files.get(resolved).stores[imp.imported] } : { key: `${resolved}#${imp.imported}` };
       const library = Object.entries(LIBRARY).find(([source]) => source === imp.source)?.[1];
       if (library?.[imp.imported]) return { library: library[imp.imported] };
@@ -202,7 +211,8 @@ export function at(contract, keys) {
 }
 
 // Sets `contract` on every hook-result value and redecides every function, leaf hooks first.
-export function applyContracts(results) {
-  const { settle } = buildContracts(results);
+// `modules`: imports by package name that resolve to these files (see resolveImport).
+export function applyContracts(results, { modules = {} } = {}) {
+  const { settle } = buildContracts(results, { modules });
   for (const r of results) for (const fn of r.functions) settle(r.file, fn, new Set());
 }

@@ -52,6 +52,12 @@ it("package.json keeps the file's indentation and its own key order", () => {
   expect(text).toBe(`{\n\t"dependencies": {\n\t\t"@solidjs/web": "^2.0.3",\n\t\t"solid-js": "^2.0.3",\n\t\t"zod": "^4.0.0",\n\t\t"clsx": "^2.0.0"\n\t}\n}`);
 });
 
+it("package.json of a library that peers on React peers on Solid instead, keeps its development copy, and gets none in dependencies", () => {
+  const { text, changes } = migratePackageJson(`{\n  "name": "@repo/ui",\n  "dependencies": {\n    "clsx": "^2.0.0",\n    "lucide-react": "1.0.0"\n  },\n  "devDependencies": {\n    "@types/react": "^19.0.0",\n    "react": "19.2.0"\n  },\n  "peerDependencies": {\n    "react": "^19.0.0",\n    "react-dom": "^19.0.0"\n  }\n}\n`);
+  expect(text).toBe(`{\n  "name": "@repo/ui",\n  "dependencies": {\n    "@lucide/solid": "^1.76.0",\n    "clsx": "^2.0.0"\n  },\n  "devDependencies": {\n    "solid-js": "^2.0.3"\n  },\n  "peerDependencies": {\n    "@solidjs/web": "^2.0.3",\n    "solid-js": "^2.0.3"\n  }\n}\n`);
+  expect(changes).toEqual(["lucide-react -> @lucide/solid@^1.76.0", "removed @types/react", "react -> solid-js@^2.0.3", "peer react -> solid-js@^2.0.3", "peer react-dom -> @solidjs/web@^2.0.3"]);
+});
+
 it("package.json bumps Vite below 8 when it adds Solid's plugin, and says so", () => {
   const { text, changes } = migratePackageJson(`{\n  "devDependencies": {\n    "@vitejs/plugin-react-swc": "^3.0.0",\n    "vite": "^7.1.0"\n  }\n}\n`);
   expect(text).toContain(`"vite": "^8.3.8"`);

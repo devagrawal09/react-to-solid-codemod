@@ -10,10 +10,13 @@ import { beforeAll, describe, expect, it } from "vitest";
 const bin = process.env.CODEMOD_BIN;
 const workflow = path.resolve(import.meta.dirname, "../src/workflow.ts");
 const fixture = path.resolve(import.meta.dirname, "fixtures/todo-app");
+// A pnpm monorepo: apps/web uses @repo/ui (workspace:*), which uses @repo/hooks; apps/docs uses
+// @repo/ui too, and @repo/tsconfig doesn't depend on React.
+const monorepo = path.resolve(import.meta.dirname, "fixtures/pnpm-monorepo");
 
-function givenApp(edit = () => {}) {
+function givenApp(edit = () => {}, from = fixture) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "r2s-"));
-  fs.cpSync(fixture, dir, { recursive: true });
+  fs.cpSync(from, dir, { recursive: true });
   edit(dir);
   const git = (...args) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
   git("init", "-q");
@@ -366,6 +369,100 @@ describe.skipIf(!bin)("react-to-solid workflow on one app of a monorepo", { tags
   it("flags a tsconfig path into the source of another package that depends on React, which now compiles as Solid JSX", () => {
     expect(run.output.flags.filter((f) => f.file === "apps/web/tsconfig.json")).toEqual([{ file: "apps/web/tsconfig.json", line: 0, kind: "build config", detail: expect.stringMatching(/^paths maps "@other\/\*" to \.\.\/other\/src\/\*, the source of apps\/other, which depends on React/) }]);
   });
+});
+
+describe.skipIf(!bin)("react-to-solid workflow with workspace=true on a pnpm monorepo", { tags: ["slow"] }, () => {
+  let repo;
+  let run;
+  beforeAll(() => {
+    repo = givenApp(() => {}, monorepo);
+    run = migrate(repo, ["apply=true", "include=apps/web/src", "workspace=true"]);
+  }, 120_000);
+
+  it("converts the workspace packages the app depends on, transitively, with the hook contract across the package boundary", () => {
+    expect(read(repo, "packages/hooks/src/index.ts")).toBe(`import { createSignal } from "solid-js";\n\nexport function useToggle(initial: boolean) {\n  // solid: on: accessor (useState hands back an accessor: read it as \`on()\`); setOn: static (useState hands back a stable value)\n  const [on, setOn] = createSignal(initial);\n  // solid: toggle: function (reads on, setOn when called)\n  const toggle = () => setOn(!on());\n  // solid: return: getter-object (a hook's returned object: callers keep \`r.k\`)\n  return { get on() { return on(); }, get toggle() { return toggle; } };\n}\n`);
+    // @repo/hooks resolves through its package.json (main: ./dist/index.js, so src/index.ts).
+    expect(read(repo, "packages/ui/src/toggle.tsx")).toBe(`import { Check } from "@lucide/solid";\nimport { useToggle } from "@repo/hooks";\n\nexport function Toggle(props: { label: string }) {\n  // solid: on: getter-read (destructured from useToggle's getters: keep the object, read \`r.on\`); toggle: static (useToggle hands back a stable function; calling it reads reactive values)\n  const toggle2 = useToggle(false);\n  return (\n    <button class="toggle" onClick={toggle2.toggle}>\n      {toggle2.on && <Check />}\n      {props.label}\n    </button>\n  );\n}\n`);
+    expect(read(repo, "apps/web/src/App.tsx")).toContain("const [count, setCount] = createSignal(0);");
+    expect(run.output.analyzed).toBe(3);
+  });
+
+  it("moves each converted package's package.json and tsconfig: a library peers on Solid", () => {
+    expect(JSON.parse(read(repo, "packages/ui/package.json"))).toMatchObject({ dependencies: { "@lucide/solid": "^1.76.0", "@repo/hooks": "workspace:*" }, devDependencies: { "solid-js": "^2.0.3" }, peerDependencies: { "solid-js": "^2.0.3" } });
+    expect(JSON.parse(read(repo, "packages/hooks/package.json")).peerDependencies).toEqual({ "solid-js": "^2.0.3" });
+    expect(read(repo, "packages/ui/tsconfig.json")).toContain(`"jsx": "preserve",\n    "jsxImportSource": "@solidjs/web"`);
+    expect(read(repo, "apps/web/vite.config.ts")).toContain("plugins: [solid()]");
+  });
+
+  it("reports the converted packages, and flags the unconverted app that uses one; the tsconfig paths flag is gone", () => {
+    expect(run.output.workspace).toEqual([{ dir: "packages/ui", name: "@repo/ui", usedBy: ["apps/docs"] }, { dir: "packages/hooks", name: "@repo/hooks", usedBy: [] }]);
+    expect(run.output.flags.filter((f) => f.kind === "workspace")).toEqual([{ file: "packages/ui/package.json", line: 0, kind: "workspace", detail: "@repo/ui was converted with apps/web, and apps/docs depends on it too: apps/docs breaks until it's converted as well, or uses a React copy of packages/ui" }]);
+    expect(run.output.flags.filter((f) => f.file === "apps/web/tsconfig.json")).toEqual([]);
+    expect(execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" }).split("\n").filter((line) => /apps\/docs|packages\/tsconfig|^ M package\.json/.test(line))).toEqual([]);
+    expect(run.output.failures).toEqual([]);
+  });
+
+  it("changes nothing when run again", () => {
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["-c", "user.email=spec@example.com", "-c", "user.name=spec", "commit", "-qm", "converted"], { cwd: repo });
+    const again = migrate(repo, ["apply=true", "include=apps/web/src", "workspace=true"]);
+    expect(again.status).toBe("succeeded");
+    expect(execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" })).toBe("");
+    expect(again.output.alreadySolid).toEqual(["apps/web/src/App.tsx"]);
+  });
+});
+
+describe.skipIf(!bin)("react-to-solid workflow on a pnpm monorepo without workspace=true", { tags: ["slow"] }, () => {
+  it("converts only the app, and flags each React workspace package it uses with the param that converts it", () => {
+    const repo = givenApp(() => {}, monorepo);
+    const run = migrate(repo, ["apply=true", "include=apps/web/src"]);
+    expect(execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" }).split("\n").filter(Boolean).map((line) => line.slice(3)).sort()).toEqual(["apps/web/package.json", "apps/web/src/App.tsx", "apps/web/tsconfig.json", "apps/web/vite.config.ts"]);
+    expect(run.output.workspace).toBeUndefined();
+    expect(run.output.flags.filter((f) => f.kind === "workspace")).toEqual([
+      { file: "apps/web/package.json", line: 0, kind: "workspace", detail: "@repo/ui (packages/ui) is a workspace package that depends on React, and this run doesn't convert it, so apps/web still imports React code from it: run with --param workspace=true to convert it in the same run, which changes it for apps/docs too" },
+      { file: "apps/web/package.json", line: 0, kind: "workspace", detail: "@repo/hooks (packages/hooks) is a workspace package that depends on React, and this run doesn't convert it, so apps/web still imports React code from it: run with --param workspace=true to convert it in the same run" },
+    ]);
+    expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "apps/web/tsconfig.json", detail: expect.stringMatching(/^paths maps "@repo\/ui\/\*" to \.\.\/\.\.\/packages\/ui\/src\/\*, the source of packages\/ui, which depends on React/) }));
+  }, 120_000);
+});
+
+describe.skipIf(!bin)("react-to-solid workflow run twice", { tags: ["slow"] }, () => {
+  let app;
+  let first;
+  // Already Solid: converting them again wrapped merge() in a memo and called solid-query's result.
+  const badge = `import { merge } from "solid-js";\nimport { Check } from "@lucide/solid";\n\nexport function Badge(props: { icon?: typeof Check; text: string }) {\n  const merged = merge({ icon: Check }, props);\n  const Icon = merged.icon;\n  return <span><Icon />{merged.text}</span>;\n}\n`;
+  const count = `import { useQuery } from "@tanstack/solid-query";\n\nexport function Count() {\n  const query2 = useQuery(() => ({ queryKey: ["count"], queryFn: () => 1 }));\n  return <p>{query2.data}</p>;\n}\n`;
+  beforeAll(() => {
+    app = givenApp((dir) => {
+      const pkg = JSON.parse(read(dir, "package.json"));
+      pkg.devDependencies = { ...pkg.devDependencies, "@vitejs/plugin-react": "^6.1.2", vite: "^8.3.6" };
+      fs.writeFileSync(path.join(dir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
+      fs.writeFileSync(path.join(dir, "vite.config.ts"), viteConfig);
+      fs.writeFileSync(path.join(dir, "tsconfig.app.json"), tsconfigApp);
+      fs.writeFileSync(path.join(dir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      fs.writeFileSync(path.join(dir, "src/components/Badge.tsx"), badge);
+      fs.writeFileSync(path.join(dir, "src/components/Count.tsx"), count);
+    });
+    first = migrate(app);
+  }, 120_000);
+
+  it("skips files that are already Solid, and says how many", () => {
+    expect(read(app, "src/components/Badge.tsx")).toBe(badge);
+    expect(read(app, "src/components/Count.tsx")).toBe(count);
+    expect(first.output.alreadySolid).toEqual(["src/components/Badge.tsx", "src/components/Count.tsx"]);
+  });
+
+  it("changes nothing the second time: source, package.json, tsconfig and the Vite config", () => {
+    execFileSync("git", ["add", "-A"], { cwd: app });
+    execFileSync("git", ["-c", "user.email=spec@example.com", "-c", "user.name=spec", "commit", "-qm", "converted"], { cwd: app });
+    const again = migrate(app);
+    expect(again.status).toBe("succeeded");
+    expect(execFileSync("git", ["status", "--porcelain"], { cwd: app, encoding: "utf8" })).toBe("");
+    expect(again.output.config).toEqual([]);
+    // App.tsx imports nothing from Solid or React, so it goes through the rules again, unchanged.
+    expect(again.output.alreadySolid).toEqual(["src/components/Badge.tsx", "src/components/Clock.tsx", "src/components/Count.tsx", "src/components/ThemeContext.tsx", "src/components/TodoItem.tsx", "src/components/TodoList.tsx", "src/hooks/useFilter.ts"]);
+    expect(again.output.flags).toEqual([]);
+  }, 120_000);
 });
 
 describe.skipIf(!bin)("react-to-solid workflow on an app with React libraries and a class component", { tags: ["slow"] }, () => {

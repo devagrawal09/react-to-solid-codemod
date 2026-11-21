@@ -155,6 +155,19 @@ describe("hook contracts across files", () => {
   it("a store read through a wrapped selector is an accessor, not a stable value", () => {
     expect(settle(`const open = useStore(useShallow((s) => s.open)); return <p>{open}</p>;`)[0].decision).toBe("accessor");
   });
+
+  it("a hook imported from a workspace package by name takes its contract when modules maps the name to its source", () => {
+    const hooks = `export function useSorted(items) { const sorted = items.toSorted(); return sorted; }`;
+    const decision = (source, modules) => {
+      const results = [decide(extract(hooks, "/repo/packages/hooks/src/sorted.ts")), decide(extract(`import { useSorted } from "${source}";\nfunction C({ items }) { const sorted = useSorted(items); return <p>{sorted.length}</p>; }`, "/repo/apps/web/src/C.tsx"))];
+      applyContracts(results, { modules });
+      return results[1].functions[0].values[0];
+    };
+    expect(decision("@repo/hooks", {})).toMatchObject({ contract: { kind: "opaque", why: "external @repo/hooks:useSorted" } });
+    expect(decision("@repo/hooks", { "@repo/hooks": ["/repo/packages/hooks/dist/index", "/repo/packages/hooks/src/sorted"] }).decision).toBe("accessor");
+    expect(decision("@repo/hooks/sorted", { "@repo/hooks/*": ["/repo/packages/hooks/src/*"] }).decision).toBe("accessor");
+    expect(decision("@repo/hooks/other", { "@repo/hooks/*": ["/repo/packages/hooks/src/*"] })).toMatchObject({ contract: { kind: "opaque" } });
+  });
 });
 
 describe("async components", () => {
