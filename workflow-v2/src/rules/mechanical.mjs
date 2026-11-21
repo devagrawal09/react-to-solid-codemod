@@ -1101,9 +1101,10 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       for (const p of kids(pat)) {
         if (p.kind() === "shorthand_property_identifier_pattern") names.push([p.text(), p.text()]);
         else if (p.kind() === "object_assignment_pattern") { const k = p.field("left").text(); names.push([k, k]); defaults.push([k, p.field("right"), p.field("left")]); }
-        else if (p.kind() === "pair_pattern" && p.field("value")?.kind() === "identifier") { names.push([p.field("value").text(), p.field("key").text()]); note("renamed prop"); }
+        // A quoted key ("aria-label": ariaLabel) is kept without its quotes; see `field` below.
+        else if (p.kind() === "pair_pattern" && p.field("value")?.kind() === "identifier") { names.push([p.field("value").text(), p.field("key").text().replace(/^(["'])(.*)\1$/, "$2")]); note("renamed prop"); }
         else if (p.kind() === "pair_pattern" && p.field("value")?.kind() === "assignment_pattern" && p.field("value").field("left")?.kind() === "identifier") {
-          const k = p.field("key").text();
+          const k = p.field("key").text().replace(/^(["'])(.*)\1$/, "$2");
           names.push([p.field("value").field("left").text(), k]);
           defaults.push([k, p.field("value").field("right"), p.field("value").field("left")]);
           note("renamed prop");
@@ -1113,6 +1114,9 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       }
       if (complex) continue;
       const key = (n) => (n === "className" ? "class" : n);
+      // Each prop's name in an object literal and how it's read: a name that isn't an identifier
+      // (aria-label) is quoted and read with brackets.
+      const field = Object.fromEntries(names.map(([, k]) => [k, /^[A-Za-z_$][\w$]*$/.test(key(k)) ? { name: key(k), at: `.${key(k)}` } : { name: JSON.stringify(key(k)), at: `[${JSON.stringify(key(k))}]` }]));
       // merge() unions a default's type with the prop's, so an empty [] or {} default would make the
       // merged prop never[] | T[]: it's applied where the prop is read instead. A literal keeps its
       // literal type (`as const`). A default that reads a prop before it (destructuring defaults
@@ -1123,16 +1127,16 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       const defaultOf = new Map();
       const entries = [];
       for (const [k, v, own] of defaults) {
-        const reads = names.filter(([local]) => local !== own.text()).flatMap(([local, from]) => readsOf(v.parent(), local, { exclude: [own] }).map((id) => readAs(id, defaultOf.has(from) ? `(props.${key(from)} ?? ${defaultOf.get(from)})` : `props.${key(from)}`)));
+        const reads = names.filter(([local]) => local !== own.text()).flatMap(([local, from]) => readsOf(v.parent(), local, { exclude: [own] }).map((id) => readAs(id, defaultOf.has(from) ? `(props${field[from].at} ?? ${defaultOf.get(from)})` : `props${field[from].at}`)));
         const text = textWith(v, reads);
         defaultOf.set(k, ["identifier", "number", "string", "template_string", "true", "false", "null", "array", "object", "member_expression", "call_expression", "parenthesized_expression"].includes(v.kind()) ? text : `(${text})`);
         if (empty.has(k)) continue;
         const literal = ["string", "number", "true", "false"].includes(v.kind()) || (v.kind() === "unary_expression" && v.field("argument")?.kind() === "number");
-        entries.push(reads.length ? `get ${key(k)}() { return ${text}; }` : `${key(k)}: ${text}${literal ? " as const" : ""}`);
+        entries.push(reads.length ? `get ${field[k].name}() { return ${text}; }` : `${field[k].name}: ${text}${literal ? " as const" : ""}`);
       }
       const propsVar = entries.length ? "merged" : "props";
       const restVar = rest === "props" ? "others" : rest;
-      const read = Object.fromEntries(names.map(([, k]) => [k, empty.has(k) ? `(${propsVar}.${key(k)} ?? ${empty.get(k)})` : `${propsVar}.${key(k)}`]));
+      const read = Object.fromEntries(names.map(([, k]) => [k, empty.has(k) ? `(${propsVar}${field[k].at} ?? ${empty.get(k)})` : `${propsVar}${field[k].at}`]));
       const pre = [];
       if (entries.length) pre.push(`const merged = merge({ ${entries.join(", ")} }, props);`);
       if (rest) pre.push(`const ${restVar} = omit(${propsVar}, ${names.map(([, k]) => JSON.stringify(key(k))).join(", ")});`);
@@ -1213,8 +1217,8 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       const fields = [];
       let ok = true;
       for (const p of kids(decl.field("name"))) {
-        if (p.kind() === "shorthand_property_identifier_pattern") fields.push([p.text(), p.text()]);
-        else if (p.kind() === "pair_pattern" && p.field("value")?.kind() === "identifier") fields.push([p.field("value").text(), p.field("key").text()]);
+        if (p.kind() === "shorthand_property_identifier_pattern") fields.push([p.text(), `.${p.text()}`]);
+        else if (p.kind() === "pair_pattern" && p.field("value")?.kind() === "identifier") fields.push([p.field("value").text(), p.field("key").kind() === "string" ? `[${p.field("key").text()}]` : `.${p.field("key").text()}`]);
         else ok = false;
       }
       if (!ok) { flag("destructured hook result", decl, `${callee}() result has defaults or rest; keep the object and read fields lazily`); continue; }
@@ -1222,7 +1226,7 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       const obj = freeName(lcfirst(ctxArg ? ctxArg.replace(/Context$/, "") : callee.replace(/^use/, "")) || "value", named);
       named.push(obj);
       edits.push(rep(decl.field("name"), obj));
-      for (const [local, k] of fields) for (const id of readsOf(scope, local, { exclude: [statement] })) edits.push(readAs(id, `${obj}.${k}`));
+      for (const [local, at] of fields) for (const id of readsOf(scope, local, { exclude: [statement] })) edits.push(readAs(id, `${obj}${at}`));
       note("destructured hook result -> object reads");
     }
     return edits;

@@ -136,6 +136,16 @@ it("R24 keeps a hook's result as an object instead of destructuring it once", ()
   expect(flat(code)).toContain(`const settingsScope = useSettingsScope(); return <b>{settingsScope.environment.name}{settingsScope.scope}</b>;`);
 });
 
+it("R24 reads a quoted key of a hook's result with brackets", () => {
+  const code = `function C() { const { "data-id": id, open } = useItem(); return <b>{id}{open}</b>; }`;
+  expect(flat(code)).toContain(`const item = useItem(); return <b>{item["data-id"]}{item.open}</b>;`);
+});
+
+it("R8 reads a quoted prop (\"aria-label\": ariaLabel) with brackets, in merge and omit too", () => {
+  const code = `function Tile({ className = "", "aria-label": ariaLabel, "data-tone": tone = "muted", ...rest }: P) { return <div className={className} aria-label={ariaLabel} data-tone={tone} {...rest} />; }`;
+  expect(flat(code)).toContain(`const merged = merge({ class: "" as const, "data-tone": "muted" as const }, props); const rest = omit(merged, "class", "aria-label", "data-tone"); return <div class={merged.class} aria-label={merged["aria-label"]} data-tone={merged["data-tone"]} {...rest} />;`);
+});
+
 it("R25 calls a library hook's accessor where the compiler pass said to", () => {
   const code = `function C() {\n  // solid: canEdit: accessor (useAtomValue hands back an accessor: read it as \`canEdit()\`)\n  const canEdit = useAtomValue(canEditAtom);\n  return <button disabled={!canEdit} />;\n}`;
   expect(convert(code)).toContain(`disabled={!canEdit()}`);
