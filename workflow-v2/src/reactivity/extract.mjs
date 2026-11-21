@@ -321,10 +321,13 @@ function analyzeFunction(fnPath, code) {
   const returns = bodyStatements.filter((s) => s.type === "ReturnStatement" && s.argument);
   // An expression-bodied arrow (`() => useContext(Ctx)`) returns its body.
   const lastReturn = returns.at(-1) ?? (node.body.type === "BlockStatement" ? undefined : { argument: node.body, loc: node.body.loc, start: node.body.start, end: node.body.end });
+  // `[a, b] as const` hands back an array, as returnShape reads it.
+  let returned = lastReturn?.argument;
+  while (/^(TSAsExpression|TSSatisfiesExpression)$/.test(returned?.type ?? "")) returned = returned.expression;
   if (!isComponent && lastReturn && !["Identifier", "NullLiteral", "BooleanLiteral", "StringLiteral", "NumericLiteral"].includes(lastReturn.argument.type)) {
     values.push({
       name: "(return)", loc: posKey(lastReturn.loc), line: lastReturn.loc.start.line, declarationKind: "return",
-      initKind: initKind(lastReturn.argument), destructured: false, text: code.slice(lastReturn.start, lastReturn.end).split("\n")[0].slice(0, 120),
+      initKind: returned.type === "ArrayExpression" ? "array" : initKind(lastReturn.argument), destructured: false, text: code.slice(lastReturn.start, lastReturn.end).split("\n")[0].slice(0, 120),
       range: { statement: [lastReturn.start, lastReturn.end], init: [lastReturn.argument.start, lastReturn.argument.end] }, uses: [{ kind: "return" }],
       ...(initKind(lastReturn.argument) === "hook" && lastReturn.argument.type === "CallExpression" ? { hookCall: { callee: calleeName(lastReturn.argument.callee), path: [], selector: isSelector(lastReturn.argument.arguments[0]), selects: selectedKey(lastReturn.argument.arguments[0]) } } : {}),
     });

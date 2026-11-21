@@ -12,6 +12,7 @@ export const DECISIONS = {
   inline: "inline the JSX at its one use",
   "jsx-fn": "JSX used in more than one place or passed on: `() => <...>`",
   "getter-object": "object of getters: it is a context value, so consumers keep `ctx.x`",
+  tuple: "a hook's returned array: each item handed back as an accessor (a signal or memo as itself, an expression as `() => expr`), as callers destructure it",
   unused: "never read: drop it",
   hook: "hook result whose contract is unknown (an external hook, or a tuple to destructure)",
   "getter-read": "destructured from a hook's object of getters: keep the object and read `r.k`",
@@ -91,6 +92,10 @@ function decideValue(value, fn, byName) {
   if (value.uses.some((u) => u.kind === "mutated")) return out("flag", "mutated during render");
   if (value.compiler.filledBy) return out("flag", `filled after creation by ${value.compiler.filledBy}; the AST fallback can't follow that`);
   if (value.nestedHook) return out("flag", `hook call inside the expression (${value.nestedHook}): hoist it first`);
+  // The contract pass gives callers of a hook that returns an array literal a tuple contract, an
+  // accessor for each item that isn't a function or a plain value, so the hook hands back the
+  // array with its items as accessors rather than one accessor of the whole array.
+  if (fn.kind === "hook" && value.name === "(return)" && value.initKind === "array") return out("tuple", "a hook's returned array: callers destructure it and read each item as an accessor");
   if (!value.compiler.reactive) {
     if (value.compiler.demoted) return out("static", `only reads stable hook results (${value.compiler.demoted.join(", ")})`);
     return out("static", value.initKind === "function" ? "captures nothing reactive; can hoist" : "no reactive inputs");

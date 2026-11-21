@@ -3,7 +3,7 @@
 // are left for the codemod and agent phases, so the output is a partial conversion by design.
 import { parseExpression } from "@babel/parser";
 
-const WRAPS = new Set(["memo", "accessor", "call-time", "jsx-fn", "inline", "getter-object"]);
+const WRAPS = new Set(["memo", "accessor", "call-time", "jsx-fn", "inline", "getter-object", "tuple"]);
 
 function getterObject(text, render, offset) {
   let node;
@@ -20,6 +20,27 @@ function getterObject(text, render, offset) {
     parts.push(`get ${prop.key.name}() { return ${prop.shorthand ? read.replace(`${prop.key.name}: `, "") : read}; }`);
   }
   return `{ ${parts.join(", ")} }`;
+}
+
+// A hook's returned array (`[on, toggle] as const`) with each item as the contract pass tells callers:
+// a name as itself (a signal, memo or function is already what they read), a function as it is,
+// anything else as an accessor, `() => (expr)`. Holes and spreads aren't followed.
+function tupleItems(text, render, offset) {
+  let node;
+  try {
+    node = parseExpression(text, { plugins: ["typescript", "jsx"] });
+  } catch {
+    return null;
+  }
+  let array = node;
+  while (/^(TSAsExpression|TSSatisfiesExpression|ParenthesizedExpression)$/.test(array.type)) array = array.expression;
+  if (array.type !== "ArrayExpression" || array.elements.some((e) => !e || e.type === "SpreadElement")) return null;
+  const items = array.elements.map((e) => {
+    if (e.type === "Identifier") return e.name;
+    const read = render(offset + e.start, offset + e.end);
+    return /Function/.test(e.type) ? read : `() => (${read})`;
+  });
+  return `${text.slice(0, array.start)}[${items.join(", ")}]${text.slice(array.end)}`;
 }
 
 export function rewrite(code, extracted) {
@@ -39,7 +60,7 @@ export function rewrite(code, extracted) {
     if (flagged.length || blocked.length) continue;
     safeFunctions.push(fn);
     for (const v of [...rewritable, ...hookReads]) {
-      if (v.decision === "inline" || v.decision === "getter-object") continue;
+      if (v.decision === "inline" || v.decision === "getter-object" || v.decision === "tuple") continue;
       for (const u of v.uses) {
         if (u.start == null) continue;
         // A direct argument to a library hook gets the accessor itself. A local hook's is read here:
@@ -86,6 +107,9 @@ export function rewrite(code, extracted) {
       } else if (v.decision === "getter-object") {
         const getters = getterObject(code.slice(is, ie), render, is);
         if (getters) edits.push({ start: is, end: ie, text: getters });
+      } else if (v.decision === "tuple") {
+        const items = tupleItems(code.slice(is, ie), render, is);
+        if (items) edits.push({ start: is, end: ie, text: items });
       } else if (v.decision !== "inline") {
         edits.push({ start: is, end: ie, text: `() => (${init})` });
       }

@@ -1240,6 +1240,17 @@ it("R55 reads an accessor param once in an argument it wraps for another hook's 
   expect(out["src/A.tsx"].code).toContain("const s = useFs(() => props.id);");
 });
 
+it("a hook that returns a tuple hands back accessors, and callers that destructure it read them", () => {
+  const out = project({
+    "src/useToggle.ts": `import { useCallback, useState } from "react";\nexport function useToggle(initial = false) {\n  const [on, setOn] = useState(initial);\n  const toggle = useCallback(() => setOn((v) => !v), []);\n  return [on, toggle] as const;\n}\nexport function useLen(items: string[]) {\n  const [q, setQ] = useState("");\n  const shown = items.filter((i) => i.includes(q));\n  return [shown, setQ, shown.length > 0];\n}\n`,
+    "src/A.tsx": `import { useToggle, useLen } from "./useToggle";\nexport function A(props: { items: string[] }) {\n  const [on, toggle] = useToggle();\n  const [shown, setQ, any] = useLen(props.items);\n  return <button onClick={toggle} onInput={() => setQ("x")}>{on ? "on" : "off"}{shown.length}{any ? "y" : "n"}</button>;\n}\n`,
+  });
+  // The signal and the memo as themselves, the expression as an accessor: not one accessor of the array.
+  expect(out["src/useToggle.ts"].code).toContain("  return [on, toggle] as const;\n");
+  expect(out["src/useToggle.ts"].code).toContain("  return [shown, setQ, () => (shown().length > 0)];\n");
+  expect(out["src/A.tsx"].code).toContain(`return <button onClick={toggle} onInput={() => setQ("x")}>{on() ? "on" : "off"}{shown().length}{any() ? "y" : "n"}</button>;`);
+});
+
 it("R55 leaves a type taken from a plain param as it is", () => {
   const out = project({
     "src/useOnce.ts": `import { useState } from "react";\nexport function useOnce(seed: number) {\n  const [v] = useState(seed);\n  return v;\n}\n`,

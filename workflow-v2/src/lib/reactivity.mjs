@@ -179314,13 +179314,15 @@ ${printAliasingSignature(signature)}`
     }
     const returns = bodyStatements.filter((s) => s.type === "ReturnStatement" && s.argument);
     const lastReturn = returns.at(-1) ?? (node.body.type === "BlockStatement" ? void 0 : { argument: node.body, loc: node.body.loc, start: node.body.start, end: node.body.end });
+    let returned = lastReturn?.argument;
+    while (/^(TSAsExpression|TSSatisfiesExpression)$/.test(returned?.type ?? "")) returned = returned.expression;
     if (!isComponent && lastReturn && !["Identifier", "NullLiteral", "BooleanLiteral", "StringLiteral", "NumericLiteral"].includes(lastReturn.argument.type)) {
       values.push({
         name: "(return)",
         loc: posKey(lastReturn.loc),
         line: lastReturn.loc.start.line,
         declarationKind: "return",
-        initKind: initKind(lastReturn.argument),
+        initKind: returned.type === "ArrayExpression" ? "array" : initKind(lastReturn.argument),
         destructured: false,
         text: code.slice(lastReturn.start, lastReturn.end).split("\n")[0].slice(0, 120),
         range: { statement: [lastReturn.start, lastReturn.end], init: [lastReturn.argument.start, lastReturn.argument.end] },
@@ -179790,6 +179792,7 @@ ${printAliasingSignature(signature)}`
     if (value2.uses.some((u) => u.kind === "mutated")) return out("flag", "mutated during render");
     if (value2.compiler.filledBy) return out("flag", `filled after creation by ${value2.compiler.filledBy}; the AST fallback can't follow that`);
     if (value2.nestedHook) return out("flag", `hook call inside the expression (${value2.nestedHook}): hoist it first`);
+    if (fn.kind === "hook" && value2.name === "(return)" && value2.initKind === "array") return out("tuple", "a hook's returned array: callers destructure it and read each item as an accessor");
     if (!value2.compiler.reactive) {
       if (value2.compiler.demoted) return out("static", `only reads stable hook results (${value2.compiler.demoted.join(", ")})`);
       return out("static", value2.initKind === "function" ? "captures nothing reactive; can hoist" : "no reactive inputs");
@@ -180114,7 +180117,7 @@ ${printAliasingSignature(signature)}`
 
   // src/reactivity/rewrite.mjs
   var import_parser = __toESM(require_lib4(), 1);
-  var WRAPS = /* @__PURE__ */ new Set(["memo", "accessor", "call-time", "jsx-fn", "inline", "getter-object"]);
+  var WRAPS = /* @__PURE__ */ new Set(["memo", "accessor", "call-time", "jsx-fn", "inline", "getter-object", "tuple"]);
   function getterObject(text, render, offset) {
     let node;
     try {
@@ -180131,6 +180134,23 @@ ${printAliasingSignature(signature)}`
     }
     return `{ ${parts.join(", ")} }`;
   }
+  function tupleItems(text, render, offset) {
+    let node;
+    try {
+      node = (0, import_parser.parseExpression)(text, { plugins: ["typescript", "jsx"] });
+    } catch {
+      return null;
+    }
+    let array = node;
+    while (/^(TSAsExpression|TSSatisfiesExpression|ParenthesizedExpression)$/.test(array.type)) array = array.expression;
+    if (array.type !== "ArrayExpression" || array.elements.some((e) => !e || e.type === "SpreadElement")) return null;
+    const items = array.elements.map((e) => {
+      if (e.type === "Identifier") return e.name;
+      const read = render(offset + e.start, offset + e.end);
+      return /Function/.test(e.type) ? read : `() => (${read})`;
+    });
+    return `${text.slice(0, array.start)}[${items.join(", ")}]${text.slice(array.end)}`;
+  }
   function rewrite(code, extracted) {
     const refEdits = [];
     const edits = [];
@@ -180145,7 +180165,7 @@ ${printAliasingSignature(signature)}`
       if (flagged.length || blocked.length) continue;
       safeFunctions.push(fn);
       for (const v of [...rewritable, ...hookReads]) {
-        if (v.decision === "inline" || v.decision === "getter-object") continue;
+        if (v.decision === "inline" || v.decision === "getter-object" || v.decision === "tuple") continue;
         for (const u of v.uses) {
           if (u.start == null) continue;
           const read = u.argOf && /^use/.test(u.argOf) && !u.localHook ? v.name : `${v.name}()`;
@@ -180189,6 +180209,9 @@ ${indent}}`;
         } else if (v.decision === "getter-object") {
           const getters = getterObject(code.slice(is, ie), render, is);
           if (getters) edits.push({ start: is, end: ie, text: getters });
+        } else if (v.decision === "tuple") {
+          const items = tupleItems(code.slice(is, ie), render, is);
+          if (items) edits.push({ start: is, end: ie, text: items });
         } else if (v.decision !== "inline") {
           edits.push({ start: is, end: ie, text: `() => (${init})` });
         }
@@ -180301,4 +180324,4 @@ export const decide = reactivity.decide;
 export const applyContracts = reactivity.applyContracts;
 export const rewrite = reactivity.rewrite;
 export const report = reactivity.report;
-export const CACHE_KEY = "babel-plugin-react-compiler@1.0.0:0421cf7590adc6d9";
+export const CACHE_KEY = "babel-plugin-react-compiler@1.0.0:8a5eb06dc8e541c5";

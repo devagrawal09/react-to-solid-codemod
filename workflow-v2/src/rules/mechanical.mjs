@@ -211,9 +211,12 @@ export function transform(input, { parse, Lang, ports = {}, next = null, hooks =
       }
       if (shadowed) continue;
       // A hook that returns its signal or memo hands back the accessor, which is what the compiler
-      // pass tells its callers (`x()`).
+      // pass tells its callers (`x()`); so does an item of the array it returns (`[on, toggle] as const`),
+      // which callers destructure and read as `on()`.
       const owner = bodyNode?.parent();
-      if (parent?.kind() === "return_statement" && toRead === `${name}()` && same(parent.parent(), bodyNode) && /^use[A-Z]/.test(owner?.field("name")?.text() ?? owner?.parent()?.field("name")?.text() ?? "")) continue;
+      let returned = parent?.kind() === "array" ? parent.parent() : parent;
+      while (["as_expression", "satisfies_expression", "parenthesized_expression"].includes(returned?.kind())) returned = returned.parent();
+      if (returned?.kind() === "return_statement" && toRead === `${name}()` && same(returned.parent(), bodyNode) && /^use[A-Z]/.test(owner?.field("name")?.text() ?? owner?.parent()?.field("name")?.text() ?? "")) continue;
       // deferred if any ancestor below the component body is a function or JSX expression/attribute
       // An effect's deps array becomes its compute function (R41).
       // So is an argument a local hook takes as an accessor (R55 wraps it), and TanStack Query's

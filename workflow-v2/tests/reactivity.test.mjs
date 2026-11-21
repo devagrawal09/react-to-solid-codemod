@@ -148,6 +148,15 @@ describe("hook contracts across files", () => {
     expect(rewrite(source, results[0]).code).toContain("return { get filter() { return filter; }, get setFilter() { return setFilter; }, get label() { return label(); } };");
   });
 
+  it("a hook that returns an array literal hands back each item as the accessor its callers read", () => {
+    const source = `export function useLen(items) {\n  const [q, setQ] = useState("");\n  const shown = items.filter((i) => i.includes(q));\n  return [shown, setQ, shown.length > 0, () => setQ("")] as const;\n}\n`;
+    const results = [decide(extract(source, "/repo/apps/web/src/useLen.ts")), decide(extract(`import { useLen } from "./useLen";\nfunction C({ items }) { const [shown, setQ, any, reset] = useLen(items); return <p onClick={reset}>{shown.length}{any}</p>; }`, "/repo/apps/web/src/C.tsx"))];
+    applyContracts(results);
+    expect(results[0].functions[0].values.find((v) => v.name === "(return)").decision).toBe("tuple");
+    expect(rewrite(source, results[0]).code).toContain("return [shown, setQ, () => (shown().length > 0), () => setQ(\"\")] as const;");
+    expect(Object.fromEntries(results[1].functions[0].values.map((v) => [v.name, v.decision]))).toMatchObject({ shown: "accessor", setQ: "static", any: "accessor", reset: "static" });
+  });
+
   it("an arrow hook that returns its body expression takes that expression's contract", () => {
     expect(settle(`const ctx = useCtx(); return <p>{ctx.open}</p>;`)[0].decision).toBe("getter-object");
   });
