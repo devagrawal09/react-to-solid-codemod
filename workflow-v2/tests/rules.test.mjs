@@ -1258,6 +1258,12 @@ it("a hook that returns a tuple hands back accessors, and callers that destructu
   expect(out["src/A.tsx"].code).toContain(`return <button onClick={toggle} onInput={() => setQ("x")}>{on() ? "on" : "off"}{shown().length}{any() ? "y" : "n"}</button>;`);
 });
 
+it("doesn't flag a state or prop named only in useMemo's or useCallback's deps, which go away", () => {
+  const { code, flags } = run(`import { useCallback, useMemo, useState } from "react";\nexport function List({ items }: { items: string[] }) {\n  const [query, setQuery] = useState("");\n  const shown = useMemo(() => items.filter((i) => i.includes(query)), [items, query]);\n  const reset = useCallback(() => setQuery(""), [setQuery, query]);\n  return <ul onClick={reset}>{shown.length}</ul>;\n}\n`);
+  expect(code).not.toContain("[items, query]");
+  expect(flags.filter((f) => f.kind === "render-dependent read")).toEqual([]);
+});
+
 it("R55 leaves a type taken from a plain param as it is", () => {
   const out = project({
     "src/useOnce.ts": `import { useState } from "react";\nexport function useOnce(seed: number) {\n  const [v] = useState(seed);\n  return v;\n}\n`,

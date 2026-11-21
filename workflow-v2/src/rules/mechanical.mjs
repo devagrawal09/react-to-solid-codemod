@@ -226,6 +226,8 @@ export function transform(input, { parse, Lang, ports = {}, next = null, hooks =
         if (FN_KINDS.has(a.kind()) || a.kind() === "jsx_expression" || accessorArg(a, c)) { deferred = true; break; }
         if (a.kind() === "arguments" && same(arg(a), c) && QUERY_HOOKS.test(a.parent()?.field("function")?.text() ?? "") && /from ["']@tanstack\/(react|solid)-query["']/.test(src)) { deferred = true; break; }
         if (a.kind() === "array" && a.parent()?.kind() === "arguments" && EFFECT_HOOKS.test(a.parent().parent()?.field("function")?.text() ?? "")) { deferred = true; break; }
+        // useMemo's and useCallback's deps go away (R6, R4): not a read at all.
+        if (a.kind() === "array" && a.parent()?.kind() === "arguments" && /^(React\.)?(useMemo|useCallback)$/.test(a.parent().parent()?.field("function")?.text() ?? "")) { deferred = true; break; }
       }
       if (!deferred && bodyNode) flag("render-dependent read", id, `${label} '${name}' is read in the component body; it runs once in Solid (needs createMemo/<Show>)`);
       edits.push(id.kind() === "shorthand_property_identifier" ? id.replace(`${name}: ${toRead}`) : id.replace(toRead));
