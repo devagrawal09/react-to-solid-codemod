@@ -145,8 +145,11 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
   const flaggedIn = [];
   const applied = {};
   const note = (rule, n = 1) => (applied[rule] = (applied[rule] || 0) + n);
+  // `end`, when the flagged code spans more than one line, is its last line.
   const flag = (kind, node, detail) => {
-    flags.push({ kind, line: node ? node.range().start.line + 1 : 0, detail });
+    const line = node ? node.range().start.line + 1 : 0;
+    const end = node ? node.range().end.line + 1 : 0;
+    flags.push({ kind, line, ...(end > line ? { end } : {}), detail });
     flaggedIn.push(src);
   };
   // Solid types the rules write, by module, for R10 to import (a bare `Component` has no `<` to find it by).
@@ -2217,36 +2220,39 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
     }
     flags.forEach((f, j) => {
       if (flaggedIn[j] !== text || f.line === 0) return;
-      const i = f.line - 1;
-      if (moved[i] >= 0) {
-        f.line = moved[i] + 1;
-        return;
-      }
-      let p = i - 1;
-      while (p >= 0 && moved[p] < 0) p--;
-      let q = i + 1;
-      while (q < a.length && moved[q] < 0) q++;
-      const first = p < 0 ? 0 : moved[p] + 1;
-      const last = q < a.length ? moved[q] - 1 : b.length - 1;
-      if (first > last) {
-        f.line = Math.min(last + 1, b.length - 1) + 1;
-        return;
-      }
-      // In the lines the region became, the one most like it, by the words they share (R10's imports
-      // are new lines above a rewritten one); of equals, or with none alike, the one nearest its offset.
-      const words = new Set(a[i].match(/\w+/g) ?? []);
-      const offset = Math.min(first + (i - p - 1), last);
-      let best = offset;
-      let score = 0;
-      for (let line = first; line <= last && line - first < 400; line++) {
-        const theirs = b[line].match(/\w+/g) ?? [];
-        const alike = (2 * theirs.filter((w) => words.has(w)).length) / (words.size + theirs.length || 1);
-        if (alike > score || (alike === score && alike > 0 && Math.abs(line - offset) < Math.abs(best - offset))) {
-          best = line;
-          score = alike;
+      for (const key of f.end ? ["line", "end"] : ["line"]) {
+        const i = f[key] - 1;
+        if (moved[i] >= 0) {
+          f[key] = moved[i] + 1;
+          continue;
         }
+        let p = i - 1;
+        while (p >= 0 && moved[p] < 0) p--;
+        let q = i + 1;
+        while (q < a.length && moved[q] < 0) q++;
+        const first = p < 0 ? 0 : moved[p] + 1;
+        const last = q < a.length ? moved[q] - 1 : b.length - 1;
+        if (first > last) {
+          f[key] = Math.min(last + 1, b.length - 1) + 1;
+          continue;
+        }
+        // In the lines the region became, the one most like it, by the words they share (R10's imports
+        // are new lines above a rewritten one); of equals, or with none alike, the one nearest its offset.
+        const words = new Set(a[i].match(/\w+/g) ?? []);
+        const offset = Math.min(first + (i - p - 1), last);
+        let best = offset;
+        let score = 0;
+        for (let line = first; line <= last && line - first < 400; line++) {
+          const theirs = b[line].match(/\w+/g) ?? [];
+          const alike = (2 * theirs.filter((w) => words.has(w)).length) / (words.size + theirs.length || 1);
+          if (alike > score || (alike === score && alike > 0 && Math.abs(line - offset) < Math.abs(best - offset))) {
+            best = line;
+            score = alike;
+          }
+        }
+        f[key] = best + 1;
       }
-      f.line = best + 1;
+      if (f.end !== undefined && f.end <= f.line) delete f.end;
     });
   }
 

@@ -11,9 +11,9 @@ const bin = process.env.CODEMOD_BIN;
 const workflow = path.resolve(import.meta.dirname, "../src/workflow.ts");
 const fixture = path.resolve(import.meta.dirname, "fixtures/todo-app");
 
-function givenApp(edit = () => {}) {
+function givenApp(edit = () => {}, from = fixture) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "r2s-"));
-  fs.cpSync(fixture, dir, { recursive: true });
+  fs.cpSync(from, dir, { recursive: true });
   edit(dir);
   const git = (...args) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
   git("init", "-q");
@@ -22,10 +22,10 @@ function givenApp(edit = () => {}) {
   return dir;
 }
 
-function migrate(dir, params = ["apply=true"], workflowFile = workflow) {
+function migrate(dir, params = ["apply=true"], workflowFile = workflow, env = {}) {
   const store = fs.mkdtempSync(path.join(os.tmpdir(), "r2s-runs-"));
   const cli = spawnSync(bin, ["workflow", "run", "-w", workflowFile, "-t", dir, ...params.flatMap((p) => ["--param", p]), "--no-interactive", "--approve", "--disable-analytics", "--no-color"], {
-    env: { ...process.env, CODEMOD_RUN_STORE_DIR: store },
+    env: { ...process.env, CODEMOD_RUN_STORE_DIR: store, ...env },
     encoding: "utf8",
   });
   const id = `${cli.stdout}${cli.stderr}`.match(/^Run (\S+)/m)[1];
@@ -72,14 +72,87 @@ describe.skipIf(!bin)("react-to-solid workflow on a small todo app", { tags: ["s
 });
 
 describe.skipIf(!bin)("react-to-solid workflow without apply=true", { tags: ["slow"] }, () => {
-  it("previews the conversion and writes nothing", () => {
+  it("previews the conversion and writes nothing but the work list, in a directory that ignores itself", () => {
     const app = givenApp();
     const run = migrate(app, []);
     expect(run.output.preview).toBe(true);
+    expect(run.output.worklist).toBe(".react-to-solid/worklist.md");
+    const worklist = read(app, ".react-to-solid/worklist.md");
+    expect(worklist).toMatch(/^# React to Solid 2: work list\n\nA preview: nothing was converted\.[\s\S]*Type-check: only after an apply\./);
+    expect(worklist).toContain("- [ ] `src/components/TodoList.tsx:14` **custom hook call**: Behaves differently\n  ```tsx\n  // solid: filter: getter-read");
+    expect(worklist).toMatch(/## Re-verify\n\n```sh\nnpx codemod@alpha run react-to-solid --param apply=true\nnpm install\n/);
+    expect(read(app, ".react-to-solid/.gitignore")).toBe("*\n");
     expect(run.output.wouldChange).toContain("src/components/TodoList.tsx");
     expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "src/components/TodoList.tsx", line: 14, kind: "custom hook call" }));
     expect(run.output.config).toContainEqual({ file: "package.json", changes: expect.arrayContaining(["react -> solid-js@^2.0.3"]) });
     expect(execFileSync("git", ["status", "--porcelain"], { cwd: app, encoding: "utf8" })).toBe("");
+  });
+});
+
+// tests/fixtures/worklist-app: a hook, a component and a plain module, with flags of each severity
+// and type errors on flagged lines, inside a flagged effect, and on no flag. Solid 2 and TypeScript
+// 6.0.3 are linked from this package's node_modules, as an install would leave them.
+const worklistApp = path.resolve(import.meta.dirname, "fixtures/worklist-app");
+function givenInstalledApp(link = ["solid-js", "@solidjs/web", "typescript"]) {
+  return givenApp((dir) => {
+    fs.writeFileSync(path.join(dir, ".gitignore"), "node_modules\n");
+    for (const name of link) {
+      fs.mkdirSync(path.dirname(path.join(dir, "node_modules", name)), { recursive: true });
+      fs.symlinkSync(path.resolve(import.meta.dirname, "../node_modules", name), path.join(dir, "node_modules", name));
+    }
+  }, worklistApp);
+}
+
+describe.skipIf(!bin)("react-to-solid workflow's work list after apply", { tags: ["slow"] }, () => {
+  let app;
+  let run;
+  beforeAll(() => {
+    app = givenInstalledApp();
+    run = migrate(app);
+  }, 120_000);
+
+  it("type-checks the converted package with its own TypeScript, once Solid 2 resolves", () => {
+    expect(run.output.typecheck).toEqual({ status: "checked", typescript: "6.0.3", configs: ["tsconfig.app.json"], chunks: 1, unchecked: [], install: null, errors: 4 });
+  });
+
+  it("writes every flag and type error to .react-to-solid/worklist.md: files leaf first, tasks in line order, the commands that re-verify last", () => {
+    expect(run.output.worklist).toBe(".react-to-solid/worklist.md");
+    expect(read(app, ".react-to-solid/worklist.md")).toBe(fs.readFileSync(path.resolve(import.meta.dirname, "fixtures/worklist.expected.md"), "utf8"));
+  });
+
+  it("quotes each flag's converted line and the note above it in the run's flags", () => {
+    expect(run.output.flags).toContainEqual({ file: "src/components/Counter.tsx", line: 11, kind: "React API", detail: expect.stringMatching(/^useTransition was imported from react/), excerpt: "const [pending, startTransition] = useTransition();", note: expect.stringMatching(/^\/\/ solid: pending: accessor/) });
+  });
+
+  it("leaves the work list out of git: the directory ignores itself, and the commit doesn't add it", () => {
+    expect(execFileSync("git", ["status", "--porcelain"], { cwd: app, encoding: "utf8" })).not.toContain(".react-to-solid");
+  });
+});
+
+describe.skipIf(!bin)("react-to-solid workflow's type-check without Solid 2 installed", { tags: ["slow"] }, () => {
+  it("skips the type-check, says why in the work list, and names the install", () => {
+    const app = givenInstalledApp(["typescript"]);
+    const run = migrate(app);
+    expect(run.output.typecheck).toEqual({ status: "skipped", reason: "solid-js isn't installed where . resolves it (run the install, or pass --param install=true)", install: null, errors: 0 });
+    expect(read(app, ".react-to-solid/worklist.md")).toContain("Type-check: skipped, solid-js isn't installed where . resolves it (run the install, or pass --param install=true).");
+  });
+
+  it("with typecheck=false, doesn't run it", () => {
+    const run = migrate(givenInstalledApp(), ["apply=true", "typecheck=false"]);
+    expect(run.output.typecheck).toEqual({ status: "skipped", detail: "typecheck=false" });
+  });
+
+  it("with install=true, runs the printed install, then type-checks what it installed", () => {
+    const app = givenInstalledApp(["typescript"]);
+    // An npm that installs by linking Solid 2 from this package, and says how it was run; anything
+    // else (the lint's npm ci) goes to the real one.
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), "r2s-npm-"));
+    const modules = path.resolve(import.meta.dirname, "../node_modules");
+    fs.writeFileSync(path.join(bin, "npm"), `#!/bin/sh\n[ "$*" = install ] || PATH='${process.env.PATH}' exec npm "$@"\necho "npm $*" > npm.log\nmkdir -p node_modules/@solidjs\nln -s ${modules}/solid-js node_modules/solid-js\nln -s ${modules}/@solidjs/web node_modules/@solidjs/web\n`);
+    fs.chmodSync(path.join(bin, "npm"), 0o755);
+    const run = migrate(app, ["apply=true", "install=true"], workflow, { PATH: `${bin}:${process.env.PATH}` });
+    expect(read(app, "npm.log")).toBe("npm install\n");
+    expect(run.output.typecheck).toMatchObject({ status: "checked", install: { command: "npm install", directory: ".", ok: true }, errors: 4 });
   });
 });
 
@@ -393,7 +466,7 @@ describe.skipIf(!bin)("react-to-solid workflow on an app with React libraries an
     const thread = read(app, "src/components/Thread.tsx");
     expect(thread).toContain("createEffect(() => threadId(), (threadId) => {");
     expect(thread).toContain("<button onClick={() => setThreadId(props.id)}>{threadId()}</button>");
-    expect(run.output.flags.filter((f) => f.kind === "zustand store")).toEqual([{ file: "src/chat-store.ts", line: 3, kind: "zustand store", detail: expect.stringContaining("export const useChat = Object.assign((selector) =>") }]);
+    expect(run.output.flags.filter((f) => f.kind === "zustand store")).toEqual([{ file: "src/chat-store.ts", line: 3, end: 6, kind: "zustand store", excerpt: "export const useChat = create<{ threadId: string | null; setThreadId: (id: string) => void }>()((set) => ({", note: null, detail: expect.stringContaining("export const useChat = Object.assign((selector) =>") }]);
     expect(run.output.flags.filter((f) => f.kind === "effect dep")).toEqual([]);
   });
 
@@ -403,7 +476,7 @@ describe.skipIf(!bin)("react-to-solid workflow on an app with React libraries an
 
   it("imports a ported library from its port, flagging a name the port doesn't have", () => {
     expect(read(app, "src/components/Done.tsx")).toContain(`import { Check, createLucideIcon } from "@lucide/solid";`);
-    expect(run.output.flags.filter((f) => f.kind === "ported library")).toEqual([{ file: "src/components/Done.tsx", line: 1, kind: "ported library", detail: expect.stringMatching(/^createLucideIcon from @lucide\/solid: @lucide\/solid has no createLucideIcon/) }]);
+    expect(run.output.flags.filter((f) => f.kind === "ported library")).toEqual([{ file: "src/components/Done.tsx", line: 1, kind: "ported library", excerpt: `import { Check, createLucideIcon } from "@lucide/solid";`, note: null, detail: expect.stringMatching(/^createLucideIcon from @lucide\/solid: @lucide\/solid has no createLucideIcon/) }]);
   });
 
   it("lists libraries without a Solid 2 port, with what to do when the table knows", () => {
@@ -476,7 +549,7 @@ describe.skipIf(!bin)("react-to-solid workflow as codemod publish bundles it", {
     migrate(unbundled);
     const run = migrate(bundled, ["apply=true"], path.join(pkg, "src/workflow.ts"));
     expect(run.status).toBe("succeeded");
-    for (const file of ["src/App.tsx", "src/components/TodoList.tsx", "src/components/ThemeContext.tsx", "src/hooks/useFilter.ts"]) {
+    for (const file of ["src/App.tsx", "src/components/TodoList.tsx", "src/components/ThemeContext.tsx", "src/hooks/useFilter.ts", ".react-to-solid/worklist.md"]) {
       expect(read(bundled, file)).toBe(read(unbundled, file));
     }
     // nextRoutes runs src/nextjs.mjs in its steps and callbacks too.

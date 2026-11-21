@@ -362,7 +362,7 @@ it("R10 doesn't flag a React event type that becomes the DOM's once its import i
 it("R39 notes and flags an error boundary class as Solid 2's <Errored>", () => {
   const { code, flags } = run(`import { Component, type ErrorInfo, type ReactNode } from "react";\n\nexport class Boundary extends Component<{ children: ReactNode }, { error: Error | null }> {\n  state = { error: null };\n  static getDerivedStateFromError(error: Error) { return { error }; }\n  componentDidCatch(error: Error, info: ErrorInfo) { console.error(error, info); }\n  render() { return this.state.error ? <p>Failed</p> : this.props.children; }\n}\n`);
   expect(code).toMatch(/^\/\/ solid: class component: Boundary is an error boundary .*<Errored fallback=\{\(err, reset\) => \.\.\.\}>.*\nexport class Boundary extends Component</m);
-  expect(flags).toContainEqual({ kind: "class component", line: 5, detail: expect.stringContaining("<Errored") });
+  expect(flags).toContainEqual({ kind: "class component", line: 5, end: 10, detail: expect.stringContaining("<Errored") });
 });
 
 it("R39 maps a class component's lifecycle methods in its note, indented with the class", () => {
@@ -452,7 +452,7 @@ it("an async component is flagged as a server component, and its props and body 
   const { code: out, flags } = run(code);
   expect(out).toBe(code.replace(`className="results"`, `class="results"`));
   expect(flags.filter((f) => f.kind === "server component")).toEqual([
-    { kind: "server component", line: 1, detail: expect.stringMatching(/^Page is async, a React Server Component, and a Solid component can't be async.*async createMemo/) },
+    { kind: "server component", line: 1, end: 5, detail: expect.stringMatching(/^Page is async, a React Server Component, and a Solid component can't be async.*async createMemo/) },
     { kind: "server component", line: 6, detail: expect.stringMatching(/^Side is async/) },
   ]);
 });
@@ -715,7 +715,7 @@ it("R8 flags a prop used as a JSX tag in a file with a dynamic of its own", () =
   const code = `import dynamic from "next/dynamic";\nconst Chart = dynamic(() => import("./chart"));\nexport function Item({ icon: Icon }: { icon: Comp }) {\n  return <Icon />;\n}\n`;
   const { code: out, flags } = run(code);
   expect(out).not.toContain("const Icon =");
-  expect(flags.filter((f) => f.kind === "prop as tag")).toEqual([{ kind: "prop as tag", line: 3, detail: "<Icon> renders the icon prop: write const Icon = dynamic(() => props.icon) with dynamic from @solidjs/web (this file has a dynamic of its own)" }]);
+  expect(flags.filter((f) => f.kind === "prop as tag")).toEqual([{ kind: "prop as tag", line: 3, end: 5, detail: "<Icon> renders the icon prop: write const Icon = dynamic(() => props.icon) with dynamic from @solidjs/web (this file has a dynamic of its own)" }]);
 });
 
 it("R5 makes a member tag on state (<activeTeam.logo>) a component with dynamic(), since a call can't be a tag name", () => {
@@ -1037,7 +1037,7 @@ it("R54 adds to the root layout's own <head>, and flags a body that renders more
   const code = `export default function RootLayout({ children }) {\n  return (\n    <html>\n      <head>\n        <meta charSet="utf-8" />\n      </head>\n      <body>\n        <Providers>{children}</Providers>\n      </body>\n    </html>\n  );\n}\n`;
   const { code: out, flags } = runNext(code, { kind: "document", pattern: "/", key: "k" });
   expect(out).toContain(`      <head>\n        <meta charset="utf-8" />\n        <meta name="viewport" content="width=device-width, initial-scale=1" />\n        <HydrationScript />\n      </head>`);
-  expect(flags).toEqual([{ kind: "Next.js", line: 10, detail: expect.stringMatching(/^the root layout renders more than \{children\} in <body>: src\/Document.tsx is server-only/) }]);
+  expect(flags).toEqual([{ kind: "Next.js", line: 10, end: 12, detail: expect.stringMatching(/^the root layout renders more than \{children\} in <body>: src\/Document.tsx is server-only/) }]);
 });
 
 it("a layout whose segment has loading.tsx and error.tsx wraps its children in <Errored> and <Loading>", () => {
@@ -1076,7 +1076,7 @@ async function nextPOST(request: Request, { params }: { params: Promise<{ id: st
 
 export const POST: APIHandler = (event) => nextPOST(event.request, { params: Promise.resolve(event.params ?? {}) });
 `);
-  expect(flags).toEqual([{ kind: "Next.js", line: 9, detail: expect.stringMatching(/^POST takes the route's params: they come from event.params/) }]);
+  expect(flags).toEqual([{ kind: "Next.js", line: 9, end: 11, detail: expect.stringMatching(/^POST takes the route's params: they come from event.params/) }]);
 });
 
 it("R10 doesn't take loading=\"lazy\" for a use of lazy", () => {

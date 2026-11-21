@@ -1,6 +1,6 @@
 # React to Solid 2
 
-**Status: public preview.** Converts a React app to Solid 2 (`solid-js@2.0.3`). The React Compiler decides what each component-body value becomes (a signal, a memo, an accessor or a plain value), deterministic rules rewrite props, hooks, JSX and imports, the project's `package.json`, `tsconfig` and Vite config move to Solid 2, and eslint-plugin-solid's Solid 2 config checks the result. It converts most of a component; what it can't convert safely, it flags with a file and line for you or an agent to finish.
+**Status: public preview.** Converts a React app to Solid 2 (`solid-js@2.0.3`). The React Compiler decides what each component-body value becomes (a signal, a memo, an accessor or a plain value), deterministic rules rewrite props, hooks, JSX and imports, the project's `package.json`, `tsconfig` and Vite config move to Solid 2, and eslint-plugin-solid's Solid 2 config checks the result. It converts most of a component; what it can't convert safely, it flags with a file and line, and lists in a work list with every type error left, in fix order, for you or an agent to finish.
 
 ## Run it
 
@@ -8,21 +8,27 @@ This is a Codemod workflow v2 package. Workflow v2 needs the 2.0 alpha of the Co
 
 ```sh
 # Preview (default): converts every file in memory and reports what would change,
-# with the flagged spots. Nothing is written.
+# with the flagged spots. Nothing is written but the work list.
 npx codemod@alpha run react-to-solid
 
-# Apply: rewrites the files, then lints them with eslint-plugin-solid.
+# Apply: rewrites the files, lints them with eslint-plugin-solid, and type-checks them
+# once Solid 2 is installed.
 npx codemod@alpha run react-to-solid --param apply=true
+
+# Apply, then install with the project's package manager and type-check.
+npx codemod@alpha run react-to-solid --param apply=true --param install=true
 ```
 
 | Param | Default | What it does |
 |---|---|---|
 | `include` | `src` | Directory whose `.ts`/`.tsx` files are converted, tests included (`.d.ts` files are skipped); `.` is the package root. In a monorepo, point it at one app: `--param include=apps/web/src`. With `nextRoutes` and no `include`, a Next.js app with `app/` at its root is converted from the root |
-| `apply` | `false` | `true` writes the converted files and lints them; otherwise the run is a preview |
-| `agent` | `false` | `true` (with `apply=true`) asks for approval, then hands the flagged spots to a coding agent. Untested |
+| `apply` | `false` | `true` writes the converted files, lints them, and type-checks them when Solid 2 is installed; otherwise the run is a preview |
+| `install` | `false` | `true` (with `apply=true`) runs the install before the type-check: see [Type-check after apply](#type-check-after-apply) |
+| `typecheck` | `true` | `false` skips the type-check after apply |
+| `agent` | `false` | `true` (with `apply=true`) asks for approval, then hands the work list to a coding agent. Untested |
 | `nextRoutes` | `false` | `true` moves a Next.js App Router (`src/app`, or `app/` at the package root) to Solid's file routes in `@solidjs/vite-plugin`'s start mode: see [Next.js App Router to file routes](#nextjs-app-router-to-file-routes) |
 
-The run's result holds the summary: the plan (which React libraries have a Solid 2 port), the compiler's decisions, the rules applied, the `package.json`, `tsconfig` and Vite config changes, every flag with its file and line, and the lint counts.
+The run's result holds the summary: the plan (which React libraries have a Solid 2 port), the compiler's decisions, the rules applied, the `package.json`, `tsconfig` and Vite config changes, every flag with its file and line, the lint counts, the type-check's summary, and where the work list is.
 
 ### Troubleshooting
 
@@ -33,9 +39,28 @@ npx codemod@2.0.0-alpha.4 run react-to-solid   # or: pnpm dlx codemod@alpha run 
 npm view codemod dist-tags.alpha               # what your registry calls alpha
 ```
 
+### The work list
+
+Every run ends by writing `.react-to-solid/worklist.md` in the target: one Markdown file for a coding agent or a person, made by `src/worklist.mjs`.
+
+- **Files** in dependency order: `package.json`, the configs and the other files with project flags first, by path, then the converted files, each after the local files it imports (the hook-contract pass's import graph, through relative, `~/` and `@/` imports), so a hook or module comes before the files that call it.
+- **Tasks** in line order, one per flag, each with its severity: **will not build** (a React API whose import was removed, an effect or a class left as React code, a dependency with no port, ...), **behaves differently** (a value read once in a component body, a custom hook's result, an effect dep that is a plain value, a list key, ...) or **cleanup** (an effect that reads a value it doesn't track, which warns in dev). Then the flag's kind and detail, the converted line with the `// solid:` note above it, what to do, and a link to the section of Solid 2's migration guide it needs, pinned to the Solid commit 2.0.3 was released from (`68406c2`). Every kind of flag the run raises has its severity and guidance in `KINDS`; a spec fails when one doesn't.
+- **Type errors** (after an apply, see below) go with the flag on their line, or else with the innermost flagged code around them (a flag on a class, an async component or an effect covers its lines). The others are tasks of their own, "unflagged", one per line, with what that error code usually means after this codemod.
+- **Re-verify** last: the install command, the project's `typecheck` (or `type-check`, `check-types`, `tsc`) script or `tsc --noEmit -p` for each config the type-check read, and its `lint`, `test` and `build` scripts.
+
+A preview writes it too: what would be left after an apply, at the lines the converted files would have, without type errors. It's a file rather than the run's output because a workflow's console output goes to stderr, between the CLI's step lines, where it can't be captured on its own; and it's written by a `forEachFile` step into a file a shell step makes, because a shell step's arguments can't hold a big app's list (128 KB per argument; bulletproof-react's is 260 KB). `.react-to-solid/` holds a `.gitignore` of `*`, so git doesn't see it and the apply commit leaves it out; the next run replaces it. A flag's line is its line in the converted file, and each flag in the run's result also has the line's text (`excerpt`), the `// solid:` note above it (`note`), and, when the flagged code spans lines, its last line (`end`). With `agent=true`, the work list is the agent's prompt.
+
+### Type-check after apply
+
+After the lint, an apply run type-checks the converted package with the project's own TypeScript (`src/verify/typecheck.mjs`, run with Node) and adds the errors to the work list. It runs once Solid 2 is installed: `solid-js` and `@solidjs/web` have to resolve from the package, inside the target, to versions its `package.json` allows. Otherwise `node_modules` still holds React's install (the codemod doesn't install by default), and the work list says the type-check was skipped, and why. `--param install=true` runs the install first, as the printed command would: in the directory with the lockfile, from the package up to the target; in a pnpm or npm workspace, scoped to the package (`pnpm install --filter "{apps/web}..."`, `npm install -w apps/web`); and not in a yarn or bun workspace, whose installs aren't scoped to one package here. Its output goes to `.react-to-solid/install.log`, and a failed install skips the type-check. `--param typecheck=false` turns the type-check off.
+
+It checks the package's `tsconfig.json`, or the configs it references when it lists no files of its own (create-vite's `tsconfig.app.json` and `tsconfig.node.json`), each through a config written next to it for the run (`tsconfig.react-to-solid.json`, removed afterwards) that extends it with `noEmit` and no build info, with `--skipLibCheck`. The files go to tsc in chunks of 50 (`REACT_TO_SOLID_TYPECHECK_CHUNK`), as the release corpus checks big apps; a chunk that runs out of memory or time (15 minutes) is halved, and a file that still does on its own is listed as unchecked. Memory is capped at 2048 MB (`REACT_TO_SOLID_TYPECHECK_MEMORY_MB`): with `--max-old-space-size` for TypeScript 6 and older, and with `GOMEMLIMIT` and `--singleThreaded` for TypeScript 7, a Go binary that ignores `--max-old-space-size`. An error is its file, line, column and code, kept once, since TypeScript 5 words a union differently in different chunks. Every error goes to `.react-to-solid/typecheck.json` (a shell step only returns the last 1 MiB of output); the run's result has the summary.
+
+On the release corpus's create-vite app (TypeScript 7.0.2, npm) and bulletproof-react (TypeScript 5.4.5, yarn 1), Nov 20, `apply=true install=true` installed and type-checked both. create-vite: 4 errors, 2 in the class component's code and 2 unflagged. bulletproof-react: 298 errors in 3 chunks, 102 in flagged code and 196 unflagged; an unchunked `tsc` over the same project found the same 298 places, and each is in the list once.
+
 ### What it changes in the project
 
-With `apply=true`, the package that owns the converted directory moves to Solid 2. Nothing is installed; the run ends by printing the install command for your package manager.
+With `apply=true`, the package that owns the converted directory moves to Solid 2. Nothing is installed unless `install=true`; the run ends by printing the install command for your package manager.
 
 - **`package.json`**: `react` and `react-dom` become `solid-js` and `@solidjs/web` (`^2.0.3`); `@types/react`, `@types/react-dom` and `babel-plugin-react-compiler` are removed; `@vitejs/plugin-react` (or `-swc`) becomes `@solidjs/vite-plugin`, and a `vite` range below 8 is raised to `^8.3.8`, which that plugin needs (it also needs Node 22.12 or newer); `@testing-library/jest-dom` 8 goes back to `^7.0.1`, since the plugin takes jest-dom up to 7 (an optional peer) and npm won't install 8 next to it. Each library with a verified Solid 2 port is replaced by it (see below). New names go in alphabetically; the rest of the file keeps its order and indentation.
 - **`tsconfig*.json`** between the package and the converted directory: `"jsx": "preserve"` and `"jsxImportSource": "@solidjs/web"`, and React's entries leave `types`. Comments and trailing commas are kept. A `paths` entry into the source of another workspace package that depends on React is flagged: that source now compiles as Solid JSX, so convert the package too or point the path at its built output.
@@ -171,8 +196,8 @@ R42 converts a class component that is only `render()` (and optionally `static d
 
 ### After it runs
 
-1. Run the install command it printed.
-2. Finish each flagged spot. The most common are custom hook results, values read in a component body (which runs once in Solid), class components with state or lifecycle methods (Solid has none; an error boundary becomes `<Errored>`), server components, zustand stores (see [zustand stores](#zustand-stores)), Next.js imports, effect deps that are plain values (see [Effects](#effects)), and libraries without a Solid 2 port.
+1. Run the install command it printed (or pass `install=true`), and re-run the type-check the work list names.
+2. Work through `.react-to-solid/worklist.md`. The most common spots are custom hook results, values read in a component body (which runs once in Solid), class components with state or lifecycle methods (Solid has none; an error boundary becomes `<Errored>`), server components, zustand stores (see [zustand stores](#zustand-stores)), Next.js imports, effect deps that are plain values (see [Effects](#effects)), and libraries without a Solid 2 port.
 3. Type-check, build and run the app.
 
 On create-vite's React TypeScript template with Vitest 5.1.1, `@testing-library/react` 16.3.3, user-event, jest-dom 8 and jsdom added, and tests for a component with state and a click (`fireEvent`, user-event, and `act` around a component defined in the test), a `rerender` and two `renderHook`s (Nov 20), `apply=true`, `npm install` and `npx vitest run` pass all 6 converted tests, and `npm run build` type-checks them, with no hand edits; two more tests in the shapes R46 flags (a `rerender` with a value read from a variable, and a hook's tuple read off `result.current[0]`) fail at runtime and in `tsc` at exactly their flagged lines, and pass once the flags' fixes are made. On the same template (create-vite 9.3.4, Nov 19), `apply=true`, then `npm install` and `npm run build`, builds with no hand edits; with two components added that subscribe in an effect and log on mount, it builds too, and a jsdom test shows the effect subscribe, re-subscribe on a prop change and clean up. With 0.1.7 (Nov 20), the template plus a component that uses `lucide-react` icons (one passed as a prop and rendered as a tag), `useQuery` and a `useMemo`, under a `QueryClientProvider`, converts to `@lucide/solid` and `@tanstack/solid-query` and passes `tsc -b && vite build` with no hand edits. On a large Next.js app, type errors went from 13,038 with 0.1.5 to 11,089 with 0.1.7; most of the rest come from workspace packages and libraries that are still React. On t3code's `apps/web/src`, 0.1.3 converted every file and was type-checked against Solid 2.0.1, which is where the 0.1.3 fixes came from; a large app still needs its flagged spots and libraries finished by hand, and t3code hasn't been built.
@@ -194,9 +219,11 @@ On create-vite's React TypeScript template with Vitest 5.1.1, `@testing-library/
 | Plan start mode's files, Write *file*, Move the favicon to public/ | function, `shell` | Only with `nextRoutes`: `src/App.tsx`, `vite.config.ts` and the rest, each written by a shell step (a `forEachFile` step only changes files that exist) unless the path is taken; the shell steps only run with `apply=true` |
 | Summarize the conversion | function | Decision counts, applied rules, flags |
 | Install the Solid 2 lint, Lint | `shell` | Only with `--param apply=true`: `eslint-plugin-solid` 0.19.0, `configs/v2`, on the converted files; the summary is the last line of the lint step's output |
-| Finish flagged spots | `approval`, `agent` | Only with `--param apply=true --param agent=true` |
+| Type-check with the project's TypeScript (with `install`: Install, then type-check with the project's TypeScript), Read the type-check | `shell`, `forEachFile` | Only with `--param apply=true`, unless `typecheck=false`: `src/verify/typecheck.mjs`, then its `.react-to-solid/typecheck.json` (see [Type-check after apply](#type-check-after-apply)) |
+| Write the work list, Make .react-to-solid/, Save the work list | function, `shell`, `forEachFile` | `src/worklist.mjs`, written to `.react-to-solid/worklist.md`; in a preview too |
+| Finish flagged spots | `approval`, `agent` | Only with `--param apply=true --param agent=true`: the work list is the prompt |
 
-The run's result (in `run.json` of the run store) holds the summary, the flags and the lint counts.
+The run's result (in `run.json` of the run store) holds the summary, the flags, the lint counts and the type-check's summary.
 
 ## How the compiler runs without Node
 
@@ -218,6 +245,8 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 | `src/rules/mechanical.mjs` | The rule pass, R1-R54 (R1-R10 from the root `gate/mechanical.js`, R11-R34 from hand-converted screens, R35-R40 from later runs on apps, R41 effects, R42 render-only class components, R43 zustand stores, R44 ported libraries' imports, R45 `createPortal`, R46 Testing Library, R47-R54 and the route files' rules for `nextRoutes`), as `transform(src, { parse, Lang, ports, next })`, so it runs under `@ast-grep/napi` and `codemod/ast-grep` |
 | `src/manifests.mjs` | The port table, the lockfile's React peers, and the `package.json`, `tsconfig` and Vite config edits |
 | `src/nextjs.mjs` | `nextRoutes`: where each App Router file goes, a moved file's imports, `next.config`'s keys, and the files start mode needs |
+| `src/worklist.mjs` | The work list: each flag kind's severity, guidance and guide section, and the Markdown |
+| `src/verify/typecheck.mjs` | The type-check after apply (and the install with `install=true`), run with Node from the target |
 | `src/lint/` | ESLint 9 with `eslint-plugin-solid/configs/v2`; the workflow finds it through `import.meta.dirname` |
 | `workflow.yaml` | A stub: codemod 2.0.0-alpha.4 won't start a registry package without one. `codemod.yaml` runs `src/workflow.ts` |
 | `docs/` | The Nov 16 report on t3code, engine gaps found along the way, and that run's logs |
@@ -225,8 +254,8 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 ## Tests
 
 ```sh
-pnpm test                                       # reactivity (54), rule (185), project file (33), Next.js route (15) and Solid behavior (12) specs
-CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (40, tagged slow), which run the CLI on copies of tests/fixtures/todo-app and on Next.js apps the specs write
+pnpm test                                       # reactivity (55), rule (186), project file (33), Next.js route (15), Solid behavior (12), work list (8) and type-check (9) specs
+CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (47, tagged slow), which run the CLI on copies of tests/fixtures/todo-app and tests/fixtures/worklist-app, and on Next.js apps the specs write
 ```
 
 ### Release corpus
@@ -237,7 +266,7 @@ pnpm corpus:update-baseline    # the same, then rewrites the baseline
 pnpm test:release              # pnpm test, then the corpus
 ```
 
-`pnpm test:corpus` runs the workflow with `apply=true` on the apps in `tests/corpus/corpus.json`, each pinned to a commit: create-vite 9.3.4's `react-ts` template with `tests/corpus/create-vite-overlay/` on top (lucide-react, `useQuery`, `useMemo`, effects with deps, class components, and a lockfile), bulletproof-react's Vite app, shadcn-admin, react-admin-dashboard, shlink-web-client and t3code's `apps/web` (why each is there is in its `notes`). For each app it records the files analyzed and changed, workflow failures, flags by kind, lint problems by rule, converted files that don't parse (TypeScript's parser, and `await` outside an async function), and, after installing the converted app with `--ignore-scripts`, its TypeScript 7 type errors: in all files, in converted files, and the codemod's own (in converted files whose React source imports no React-only library, one without a port that keeps its names, less that file's errors in the React app, which is type-checked once per commit and should have none). It fails on a file that doesn't parse, on more failures or more of the codemod's own type errors than `tests/corpus/baseline.json` has, and on any change in files changed, flags or lint, printing what moved. When the change is intended, run `pnpm corpus:update-baseline` and commit the baseline with the change, listing each moved count in the commit message.
+`pnpm test:corpus` runs the workflow with `apply=true` (and `typecheck=false`: it installs and type-checks each app itself) on the apps in `tests/corpus/corpus.json`, each pinned to a commit: create-vite 9.3.4's `react-ts` template with `tests/corpus/create-vite-overlay/` on top (lucide-react, `useQuery`, `useMemo`, effects with deps, class components, and a lockfile), bulletproof-react's Vite app, shadcn-admin, react-admin-dashboard, shlink-web-client and t3code's `apps/web` (why each is there is in its `notes`). For each app it records the files analyzed and changed, workflow failures, flags by kind, lint problems by rule, converted files that don't parse (TypeScript's parser, and `await` outside an async function), and, after installing the converted app with `--ignore-scripts`, its TypeScript 7 type errors: in all files, in converted files, and the codemod's own (in converted files whose React source imports no React-only library, one without a port that keeps its names, less that file's errors in the React app, which is type-checked once per commit and should have none). It fails on a file that doesn't parse, on more failures or more of the codemod's own type errors than `tests/corpus/baseline.json` has, and on any change in files changed, flags or lint, printing what moved. When the change is intended, run `pnpm corpus:update-baseline` and commit the baseline with the change, listing each moved count in the commit message.
 
 Test files are converted too (since 0.1.8), so they're in the counts: 12 in bulletproof-react, 21 in shadcn-admin and 582 in t3code. A test that renders through a helper the run doesn't convert, because it's outside the converted directory (t3code's `apps/web/test/render.tsx`) or re-exports Testing Library's `render` under another name (bulletproof-react's `rtlRender`), still passes an element where React's types want a `ReactNode`, and those errors count as the codemod's own.
 
