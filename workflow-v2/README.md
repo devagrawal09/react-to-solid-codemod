@@ -17,7 +17,14 @@ npx codemod@alpha run react-to-solid --param apply=true
 
 # Apply, then install with the project's package manager and type-check.
 npx codemod@alpha run react-to-solid --param apply=true --param install=true
+
+# --allow-fs keeps the React Compiler's per-file results in ~/.cache/react-to-solid, so the
+# apply after a preview (or a rerun after edits) only compiles the files that changed.
+npx codemod@alpha run react-to-solid --allow-fs
+npx codemod@alpha run react-to-solid --allow-fs --param apply=true
 ```
+
+For a big app, run with `--allow-fs` (see [The compiler cache](#the-compiler-cache)): it's the only thing the cache needs. Every run writes `.react-to-solid/worklist.md`, the [work list](#the-work-list).
 
 | Param | Default | What it does |
 |---|---|---|
@@ -75,6 +82,8 @@ npx codemod@alpha run react-to-solid --allow-fs --param apply=true  # compiles o
 ```
 
 An entry is keyed by the SHA-256 of the file's path, its text and the pass's build (`CACHE_KEY` in `src/lib/reactivity.mjs`: the compiler's version and a hash of the bundle, so any change to the pass, Babel or the compiler misses every entry); the stored key is checked when it's read, and an entry that can't be read is computed again. Only what a file decides on its own is cached: the hook contracts, which depend on every other file, are worked out on every run, so editing one file still updates its callers. Without `--allow-fs` the workflow has no file system to keep it in (a workflow callback can't import `fs`, and `capabilities` in `codemod.yaml` doesn't grant it under `codemod workflow run`), so every run compiles every file and `compilerCache` is `"off"`; `--param cache=false` does the same with `--allow-fs`. It's outside the project, so it never shows in `git status`, and the run never deletes it: `rm -rf ~/.cache/react-to-solid` clears it (t3code's entries take 29 MB).
+
+`--allow-fs` is all it needs, from the registry as from a local checkout: `codemod run` and `codemod workflow run` both take it, and `codemod.yaml` declares no capabilities. Checked on Nov 20 with codemod 2.0.0-alpha.4, running the package directory with `codemod run <dir>` (the registry's code path) and `codemod workflow run -w src/workflow.ts` on the todo fixture: no entries without the flag, 6 with it (one per file), and none written with `cache=false`. `capabilities: ["fs"]` in `codemod.yaml` doesn't grant it without the flag either, under `codemod workflow run`.
 
 On that t3code run, the compiler step took 488 s with an empty cache and 2.7 s with a full one (the whole run: 657 s, then 168 s; the hook contracts, the rule pass and the lint still run); after appending a line to 3 files, 3.2 s (157 s). On bulletproof-react (127 files, 6 CPUs) the step went from 2.0 s to 0.6 s. In each case the converted tree was byte-identical to a run without the cache.
 
