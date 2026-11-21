@@ -2,6 +2,7 @@
 // ESM file that jssg loads under QuickJS. Node built-ins are stubbed: the pass never reads config
 // files, spawns, or logs, and jssg has no `require` for the compiler's optional lookups.
 import { builtinModules, createRequire } from "node:module";
+import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { build } from "esbuild";
 
@@ -33,4 +34,10 @@ const { outputFiles } = await build({
   logLevel: "error",
 });
 const exports = NAMES.map((name) => `export const ${name} = reactivity.${name};`).join("\n");
-writeFileSync(new URL("../src/lib/reactivity.mjs", import.meta.url), `${outputFiles[0].text.replace(/^var reactivity = /m, "const reactivity = ")}${exports}\n`);
+const text = outputFiles[0].text.replace(/^var reactivity = /m, "const reactivity = ");
+// What the workflow's compiler-result cache is keyed on, with each file's path and text: the
+// compiler's version and this bundle's hash, so any change to the pass, Babel or the compiler
+// misses every entry.
+const compiler = require("babel-plugin-react-compiler/package.json").version;
+const key = `babel-plugin-react-compiler@${compiler}:${createHash("sha256").update(text).digest("hex").slice(0, 16)}`;
+writeFileSync(new URL("../src/lib/reactivity.mjs", import.meta.url), `${text}${exports}\nexport const CACHE_KEY = ${JSON.stringify(key)};\n`);

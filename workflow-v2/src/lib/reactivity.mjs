@@ -179239,7 +179239,7 @@ ${printAliasingSignature(signature)}`
       if (p2.isFunction()) return { kind: "callback" };
       const parent = p2.parentPath;
       if (!inJsx && parent.isCallExpression() && parent.node.arguments.includes(p2.node) && HOOK_NAME.test(calleeName(parent.node.callee) ?? ""))
-        return { kind: "hook-arg" };
+        return { kind: "hook-arg", hook: calleeName(parent.node.callee), arg: p2.isSpreadElement() ? null : parent.node.arguments.indexOf(p2.node) };
       if (parent.node === fnPath.node.body || parent.node === fnPath.node) {
         if (p2.isVariableDeclaration()) {
           const decl = p2.node.declarations.find((d) => d.start <= ref.node.start && d.end >= ref.node.end);
@@ -179281,7 +179281,7 @@ ${printAliasingSignature(signature)}`
           }
         }
       } else {
-        for (const id of boundIdentifiers(pattern)) params.push({ name: id.name, index, plain: true, hasDefault: param.type === "AssignmentPattern", loc: posKey(id.loc) });
+        for (const id of boundIdentifiers(pattern)) params.push({ name: id.name, index, plain: true, ...pattern.type === "RestElement" ? { rest: true } : {}, hasDefault: param.type === "AssignmentPattern", loc: posKey(id.loc) });
       }
     });
     const bodyStatements = node.body.type === "BlockStatement" ? node.body.body : [];
@@ -179364,7 +179364,7 @@ ${printAliasingSignature(signature)}`
     }
     for (const prm of params) {
       const binding = bindingInfo(prm.name);
-      prm.uses = binding ? binding.referencePaths.map((ref) => classifyReference(ref, fnPath, valueByDeclarator).kind) : [];
+      prm.uses = binding ? binding.referencePaths.filter((ref) => !ref.findParent((a) => a.isTSTypeQuery())).map((ref) => ({ ...classifyReference(ref, fnPath, valueByDeclarator), called: ref.parentPath.isCallExpression({ callee: ref.node }) || ref.parentPath.isOptionalCallExpression({ callee: ref.node }) })) : [];
     }
     const valuesByStatement = /* @__PURE__ */ new Map();
     for (const v of values) if (v.range?.statement) valuesByStatement.set(v.range.statement[0], [...valuesByStatement.get(v.range.statement[0]) ?? [], v]);
@@ -180044,9 +180044,60 @@ ${printAliasingSignature(signature)}`
     }
     return c;
   }
+  var QUERY_HOOK = /^@tanstack\/(react|solid)-query:(useQuery|useSuspenseQuery|useInfiniteQuery|useQueries|useMutation)$/;
+  var TRACKED_USES = /* @__PURE__ */ new Set(["jsx", "effect", "effect-deps", "callback", "handler", "return", "provider-value"]);
   function applyContracts(results, { modules = {} } = {}) {
-    const { settle } = buildContracts(results, { modules });
+    const { settle, target, hooks } = buildContracts(results, { modules });
     for (const r of results) for (const fn of r.functions) settle(r.file, fn, /* @__PURE__ */ new Set());
+    const indexes = /* @__PURE__ */ new Map();
+    const blocked = /* @__PURE__ */ new Map();
+    const reactiveIndexes = (key, stack) => {
+      if (indexes.has(key)) return indexes.get(key);
+      if (stack.has(key)) return /* @__PURE__ */ new Set();
+      const fn = hooks.get(key);
+      const file = key.slice(0, key.lastIndexOf("#"));
+      const next = new Set(stack).add(key);
+      const byName = new Map(fn.values.map((v) => [v.name, v]));
+      const reactive = (p2) => !p2.uses.some((u) => u.called) && p2.uses.some((u) => {
+        if (TRACKED_USES.has(u.kind)) return true;
+        if (u.kind === "value" || u.kind === "via-function") return !STATIC_DECISIONS.has(byName.get(u.via)?.decision ?? "static");
+        if (u.kind !== "hook-arg" || !u.hook) return false;
+        const t3 = target(file, u.hook);
+        if (t3?.key && hooks.has(t3.key)) return reactiveIndexes(t3.key, next).has(u.arg);
+        return QUERY_HOOK.test(t3?.external ?? "");
+      });
+      const found = /* @__PURE__ */ new Set();
+      const why = [];
+      for (const index of new Set(fn.params.map((p2) => p2.index))) {
+        const at2 = fn.params.filter((p2) => p2.index === index);
+        if (!at2.some(reactive)) continue;
+        const shape = at2.find((p2) => p2.rest || p2.nested) ?? (at2.length > 1 && at2.some((p2) => p2.plain) ? at2[0] : null);
+        if (shape) why.push({ index, why: shape.rest ? "a rest element" : "nested destructuring" });
+        else found.add(index);
+      }
+      indexes.set(key, found);
+      blocked.set(key, why);
+      return found;
+    };
+    for (const r of results) {
+      const defs = {};
+      for (const fn of r.functions) {
+        if (fn.kind !== "hook" || !fn.name || hooks.get(`${r.file}#${fn.name}`) !== fn) continue;
+        const key = `${r.file}#${fn.name}`;
+        const accessors = reactiveIndexes(key, /* @__PURE__ */ new Set());
+        for (const p2 of fn.params) Object.assign(p2, accessors.has(p2.index) ? { decision: "accessor-param", why: "read where it keeps being read: callers pass an accessor" } : { decision: "static", why: "read once, or called: callers pass it as it is" });
+        if (!accessors.size && !blocked.get(key).length) continue;
+        const callers = results.some((o) => Object.keys(o.imports ?? {}).some((local) => target(o.file, local)?.key === key)) || r.functions.some((g) => g !== fn && (g.values.some((v) => v.hookCall?.callee === fn.name) || [...g.values, ...g.params].some((x) => x.uses?.some((u) => u.hook === fn.name))));
+        defs[fn.name] = { accessors: [...accessors].sort((a, b) => a - b), blocked: blocked.get(key), callers };
+      }
+      const calls = {};
+      for (const local of /* @__PURE__ */ new Set([...Object.keys(r.imports ?? {}), ...r.functions.filter((f) => f.kind === "hook" && f.name).map((f) => f.name)])) {
+        const t3 = target(r.file, local);
+        if (t3?.key && hooks.has(t3.key)) calls[local] = [...reactiveIndexes(t3.key, /* @__PURE__ */ new Set())].sort((a, b) => a - b);
+      }
+      for (const fn of r.functions) for (const v of fn.values) for (const u of v.uses) if (u.argOf && u.argOf in calls) u.localHook = true;
+      r.hooks = { defs, calls };
+    }
     const files = new Map(results.map((r) => [r.file, r]));
     const order = [];
     const seen = /* @__PURE__ */ new Set();
@@ -180097,7 +180148,7 @@ ${printAliasingSignature(signature)}`
         if (v.decision === "inline" || v.decision === "getter-object") continue;
         for (const u of v.uses) {
           if (u.start == null) continue;
-          const read = u.argOf && /^use/.test(u.argOf) ? v.name : `${v.name}()`;
+          const read = u.argOf && /^use/.test(u.argOf) && !u.localHook ? v.name : `${v.name}()`;
           refEdits.push({ start: u.start, end: u.end, text: u.shorthand ? `${v.name}: ${read}` : read });
         }
       }
@@ -180250,3 +180301,4 @@ export const decide = reactivity.decide;
 export const applyContracts = reactivity.applyContracts;
 export const rewrite = reactivity.rewrite;
 export const report = reactivity.report;
+export const CACHE_KEY = "babel-plugin-react-compiler@1.0.0:0421cf7590adc6d9";

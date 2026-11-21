@@ -242,7 +242,7 @@ function classifyRenderPosition(ref, fnPath, valueByDeclarator) {
     if (p.isFunction()) return { kind: "callback" };
     const parent = p.parentPath;
     if (!inJsx && parent.isCallExpression() && parent.node.arguments.includes(p.node) && HOOK_NAME.test(calleeName(parent.node.callee) ?? ""))
-      return { kind: "hook-arg" };
+      return { kind: "hook-arg", hook: calleeName(parent.node.callee), arg: p.isSpreadElement() ? null : parent.node.arguments.indexOf(p.node) };
     if (parent.node === fnPath.node.body || parent.node === fnPath.node) {
       if (p.isVariableDeclaration()) {
         const decl = p.node.declarations.find((d) => d.start <= ref.node.start && d.end >= ref.node.end);
@@ -286,7 +286,7 @@ function analyzeFunction(fnPath, code) {
         }
       }
     } else {
-      for (const id of boundIdentifiers(pattern)) params.push({ name: id.name, index, plain: true, hasDefault: param.type === "AssignmentPattern", loc: posKey(id.loc) });
+      for (const id of boundIdentifiers(pattern)) params.push({ name: id.name, index, plain: true, ...(pattern.type === "RestElement" ? { rest: true } : {}), hasDefault: param.type === "AssignmentPattern", loc: posKey(id.loc) });
     }
   });
 
@@ -364,7 +364,8 @@ function analyzeFunction(fnPath, code) {
   }
   for (const prm of params) {
     const binding = bindingInfo(prm.name);
-    prm.uses = binding ? binding.referencePaths.map((ref) => classifyReference(ref, fnPath, valueByDeclarator).kind) : [];
+    // The contract pass decides from these whether callers pass the param as an accessor.
+    prm.uses = binding ? binding.referencePaths.filter((ref) => !ref.findParent((a) => a.isTSTypeQuery())).map((ref) => ({ ...classifyReference(ref, fnPath, valueByDeclarator), called: ref.parentPath.isCallExpression({ callee: ref.node }) || ref.parentPath.isOptionalCallExpression({ callee: ref.node }) })) : [];
   }
 
   // Which params and values each value's own statement reads, for the AST fallback when the

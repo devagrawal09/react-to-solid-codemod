@@ -27,7 +27,7 @@
 // changes nothing.
 import { step, forEachFile, shell, agent, approval, branch, commit } from "codemod/workflow";
 import { parse } from "codemod/ast-grep";
-import { applyContracts, decide, extract, rewrite } from "./lib/reactivity.mjs";
+import { CACHE_KEY, applyContracts, decide, extract, rewrite } from "./lib/reactivity.mjs";
 import { transform } from "./rules/mechanical.mjs";
 import { NO_PORT, PORTS, migratePackageJson, migrateTsconfig, migrateViteConfig, reactPeers } from "./manifests.mjs";
 import { moveImports, nextAppFiles, nextConfigKeys, planNextRoutes } from "./nextjs.mjs";
@@ -36,7 +36,7 @@ import { renderWorklist } from "./worklist.mjs";
 
 const NOT_SHIPPED = /^(@types\/|babel-plugin-react-compiler$|eslint-plugin-react|typescript$)/;
 
-export default async function main({ params }: { params: { include?: string; apply?: boolean | string; install?: boolean | string; typecheck?: boolean | string; agent?: boolean | string; nextRoutes?: boolean | string; workspace?: boolean | string } }) {
+export default async function main({ params }: { params: { include?: string; apply?: boolean | string; install?: boolean | string; typecheck?: boolean | string; agent?: boolean | string; nextRoutes?: boolean | string; workspace?: boolean | string; cache?: boolean | string } }) {
   // --param values arrive as JSON when they parse as JSON, so true is a boolean.
   const apply = params.apply === true || params.apply === "true";
   const install = params.install === true || params.install === "true";
@@ -130,8 +130,14 @@ export default async function main({ params }: { params: { include?: string; app
   const solidPorts = Object.values(PORTS).map((port) => port.to).filter((name) => !(name in PORTS));
 
   if (apply) await step(branch("react-to-solid-2"));
+  // With --allow-fs, the compiler's result for each file is cached in $XDG_CACHE_HOME/react-to-solid
+  // (~/.cache/react-to-solid), keyed by the file's path and text and the pass's build (CACHE_KEY: the
+  // compiler's version and the bundle's hash), so a rerun (a preview, then apply) skips the files
+  // that didn't change. Only what one file decides on its own is cached: the hook contracts, which
+  // read every file, are worked out on every run. --param cache=false turns it off.
+  const cache = params.cache !== false && params.cache !== "false";
   // Each step returns its per-file results; nothing goes through state.
-  const analyzed = await step("Run the React Compiler on each file", forEachFile(sources, (file) => {
+  const analyzed = await step("Run the React Compiler on each file", forEachFile(sources, async (file) => {
     // Already Solid (a second run, or a file a person converted): it imports solid-js, @solidjs/* or
     // a Solid port, or has the `// solid:` notes this workflow writes (a converted file that needs
     // no Solid import, such as one whose hooks come from react-router), and it imports nothing from
@@ -156,10 +162,34 @@ export default async function main({ params }: { params: { include?: string; app
       }
       return i.source === "react" || i.source.startsWith("react/") || movedByName.includes(i.name);
     });
-    if (solid && !react) return { file: file.path, solid: true, result: null };
+    if (solid && !react) return { file: file.path, solid: true, result: null, cache: null };
+    const fs = cache ? await import("fs").catch(() => null) : null;
+    const home = process.env.XDG_CACHE_HOME ?? (process.env.HOME ? `${process.env.HOME}/.cache` : null);
+    const key = fs && home ? (await import("crypto")).createHash("sha256").update(`${CACHE_KEY}\n${file.path}\n${file.text}`).digest("hex") : null;
+    const entry = key ? `${home}/react-to-solid/${key.slice(0, 2)}/${key}.json` : null;
+    if (fs && entry) {
+      try {
+        const hit = JSON.parse(fs.readFileSync(entry, "utf8"));
+        if (hit.key === key) return { file: file.path, solid: false, result: hit.result, cache: "hit" };
+      } catch {
+        // Not cached yet, or unreadable: computed below.
+      }
+    }
     // contracts.mjs finds `~/` imports by an absolute-looking path. The round trip drops the
     // `undefined` fields the pass leaves, which step outputs reject.
-    return { file: file.path, solid: false, result: JSON.parse(JSON.stringify(decide(extract(file.text, `/${file.path}`)))) };
+    const result = JSON.parse(JSON.stringify(decide(extract(file.text, `/${file.path}`))));
+    if (fs && entry) {
+      try {
+        // Written whole, then renamed, so a worker reading it never sees half of it.
+        const partial = `${entry}.${Math.random().toString(36).slice(2)}.tmp`;
+        fs.mkdirSync(entry.replace(/\/[^/]+$/, ""), { recursive: true });
+        fs.writeFileSync(partial, JSON.stringify({ key, result }));
+        fs.renameSync(partial, entry);
+      } catch {
+        // A cache that can't be written only costs the next run time.
+      }
+    }
+    return { file: file.path, solid: false, result, cache: entry ? "miss" : "off" };
   }));
   const files = analyzed.outputs.map((o) => o.file);
   const alreadySolid = analyzed.outputs.filter((o) => o.solid).map((o) => o.file);
@@ -205,7 +235,8 @@ export default async function main({ params }: { params: { include?: string; app
     }
     if (route) code = moveImports(code, file.path, route.to, moves);
     const next = !routes ? null : { kind: route?.kind ?? null, pattern: route?.pattern ?? null, key: route?.key ?? null, wrap: route?.wrap ?? null };
-    const { code: out, applied, flags, document } = transform(code, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" }, ports, next });
+    const hooks = result?.hooks ?? { defs: {}, calls: {} };
+    const { code: out, applied, flags, document } = transform(code, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" }, ports, next, hooks });
     const changed = out !== file.text;
     if (apply && changed) file.write(out);
     if (apply && route) file.rename(route.to);
@@ -316,8 +347,12 @@ export default async function main({ params }: { params: { include?: string; app
   });
   // nextRoutes: which App Router files moved where, and the files written for start mode.
   const nextjs = routes ? { moved: moves, created: created.map((f) => f.path).filter((path) => !kept.includes(path)) } : undefined;
+  // How many files the compiler skipped, thanks to the cache; "off" without --allow-fs or with cache=false.
+  const hits = analyzed.outputs.filter((o) => o.cache === "hit").length;
+  const misses = analyzed.outputs.filter((o) => o.cache === "miss").length;
+  const compilerCache = hits + misses ? { hits, misses } : "off";
   // workspace=true: the workspace packages converted with the app.
-  const result = { plan, analyzed: files.length, alreadySolid, failures: [...analyzed.failures, ...converted.failures, ...configs.failures], ...report, config: configChanges, ...(workspace ? { workspace: plan.workspace } : {}), ...(nextjs ? { nextjs } : {}) };
+  const result = { plan, analyzed: files.length, alreadySolid, compilerCache, failures: [...analyzed.failures, ...converted.failures, ...configs.failures], ...report, config: configChanges, ...(workspace ? { workspace: plan.workspace } : {}), ...(nextjs ? { nextjs } : {}) };
   const extra = `${packages.length ? `, ${packages.length} workspace package${packages.length > 1 ? "s" : ""} included` : ""}${alreadySolid.length ? ` (already Solid: ${alreadySolid.length} file${alreadySolid.length > 1 ? "s" : ""}, skipped)` : ""}`;
 
   let lint = {};

@@ -42,8 +42,9 @@ export function rewrite(code, extracted) {
       if (v.decision === "inline" || v.decision === "getter-object") continue;
       for (const u of v.uses) {
         if (u.start == null) continue;
-        // A direct hook argument gets the accessor itself, since converted hooks take accessors.
-        const read = u.argOf && /^use/.test(u.argOf) ? v.name : `${v.name}()`;
+        // A direct argument to a library hook gets the accessor itself. A local hook's is read here:
+        // the rule pass passes the accessor itself where the hook's param is one.
+        const read = u.argOf && /^use/.test(u.argOf) && !u.localHook ? v.name : `${v.name}()`;
         refEdits.push({ start: u.start, end: u.end, text: u.shorthand ? `${v.name}: ${read}` : read });
       }
     }

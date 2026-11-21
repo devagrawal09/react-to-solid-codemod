@@ -327,3 +327,15 @@ it("inlining JSX used once leaves no line of indentation behind", () => {
   const code = `function C({ a }) {\n  const badge = <b>{a}</b>;\n\n  return <p>{badge}</p>;\n}\n`;
   expect(rewrite(code, run(code)).code).toBe(`function C({ a }) {\n  // solid: badge: inline (one JSX use)\n\n  return <p>{(<b>{a}</b>)}</p>;\n}\n`);
 });
+
+it("the contract pass decides which params of a local hook callers pass as accessors", () => {
+  const hooks = `import { useEffect, useState } from "react";\nexport function useInner(id, label, onDone, seed) {\n  const [n] = useState(seed);\n  useEffect(() => { onDone(); }, [onDone]);\n  if (!label) log("no label");\n  return <p>{id}{n}</p>;\n}\nexport function useOuter(id, label) {\n  return useInner(id, label, done, 0);\n}\n`;
+  const results = [decide(extract(hooks, "/repo/src/hooks.tsx"))];
+  applyContracts(results);
+  const params = (name) => results[0].functions.find((f) => f.name === name).params.map((p) => [p.name, p.decision]);
+  // id is read in JSX; label only once at the top; onDone is called; seed only seeds state.
+  expect(params("useInner")).toEqual([["id", "accessor-param"], ["label", "static"], ["onDone", "static"], ["seed", "static"]]);
+  // useOuter forwards id to useInner's reactive param, and label to a plain one.
+  expect(params("useOuter")).toEqual([["id", "accessor-param"], ["label", "static"]]);
+  expect(results[0].hooks.calls).toEqual({ useInner: [0], useOuter: [0] });
+});
