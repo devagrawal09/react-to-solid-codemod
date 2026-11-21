@@ -6,8 +6,7 @@
     "failures": 0,
     "flags": {
       "class component": 1,
-      "custom hook call": 1,
-      "render-dependent read": 1
+      "custom hook call": 1
     },
     "lint": {
       "problems": 9,
@@ -105,7 +104,7 @@
       "list key": 4,
       "React API": 2,
       "React namespace": 5,
-      "render-dependent read": 35,
+      "render-dependent read": 33,
       "style number": 1,
       "zustand store": 1
     },
@@ -165,7 +164,7 @@
       "list key": 2,
       "React API": 1,
       "React namespace": 1,
-      "render-dependent read": 25,
+      "render-dependent read": 19,
       "style number": 8,
       "zustand store": 2
     },
@@ -212,7 +211,7 @@
       "expression-bodied component": 8,
       "hook param": 1,
       "React API": 1,
-      "render-dependent read": 11
+      "render-dependent read": 9
     },
     "lint": {
       "problems": 14,
