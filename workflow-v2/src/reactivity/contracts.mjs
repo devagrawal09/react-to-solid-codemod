@@ -201,8 +201,79 @@ export function at(contract, keys) {
   return c;
 }
 
+// TanStack Query's Solid port takes its options as a function (R28), so what goes into them stays reactive.
+const QUERY_HOOK = /^@tanstack\/(react|solid)-query:(useQuery|useSuspenseQuery|useInfiniteQuery|useQueries|useMutation)$/;
+// Where a param read keeps reading after the body ran once: JSX, effects, closures, the hook's return.
+const TRACKED_USES = new Set(["jsx", "effect", "effect-deps", "callback", "handler", "return", "provider-value"]);
+
 // Sets `contract` on every hook-result value and redecides every function, leaf hooks first.
+// Then decides which params of each local hook callers pass as accessors (`id: Accessor<T>`, read
+// `id()`, called as `useThing(() => props.id)`), and leaves the rule pass, per file, `hooks`:
+//   defs:  { [hook]: { accessors: [param index], blocked: [{ index, why }], callers } }
+//          hooks defined here with a reactive param: the ones that become accessors, the ones whose
+//          pattern can't, and whether any converted file calls the hook
+//   calls: { [local name]: [param index] }  every local hook called here, with its accessor indexes
 export function applyContracts(results) {
-  const { settle } = buildContracts(results);
+  const { settle, target, hooks } = buildContracts(results);
   for (const r of results) for (const fn of r.functions) settle(r.file, fn, new Set());
+
+  // A param is reactive when the hook reads it where reading keeps happening after the body ran
+  // once (JSX, an effect, a closure, a memo or accessor it feeds, its return), or forwards it to a
+  // hook param that is. A param the hook calls is a function: callers keep passing it as it is.
+  const indexes = new Map(); // hook key -> Set of reactive param indexes
+  const blocked = new Map(); // hook key -> [{ index, why }]
+  const reactiveIndexes = (key, stack) => {
+    if (indexes.has(key)) return indexes.get(key);
+    if (stack.has(key)) return new Set();
+    const fn = hooks.get(key);
+    const file = key.slice(0, key.lastIndexOf("#"));
+    const next = new Set(stack).add(key);
+    const byName = new Map(fn.values.map((v) => [v.name, v]));
+    const reactive = (p) => !p.uses.some((u) => u.called) && p.uses.some((u) => {
+      if (TRACKED_USES.has(u.kind)) return true;
+      if (u.kind === "value" || u.kind === "via-function") return !STATIC_DECISIONS.has(byName.get(u.via)?.decision ?? "static");
+      if (u.kind !== "hook-arg" || !u.hook) return false;
+      const t = target(file, u.hook);
+      if (t?.key && hooks.has(t.key)) return reactiveIndexes(t.key, next).has(u.arg);
+      return QUERY_HOOK.test(t?.external ?? "");
+    });
+    const found = new Set();
+    const why = [];
+    for (const index of new Set(fn.params.map((p) => p.index))) {
+      const at = fn.params.filter((p) => p.index === index);
+      if (!at.some(reactive)) continue;
+      // `{ id, ...rest }`, `{ a: { b } }` and `[a, b]` can't become one accessor read field by field.
+      const shape = at.find((p) => p.rest || p.nested) ?? (at.length > 1 && at.some((p) => p.plain) ? at[0] : null);
+      if (shape) why.push({ index, why: shape.rest ? "a rest element" : "nested destructuring" });
+      else found.add(index);
+    }
+    indexes.set(key, found);
+    blocked.set(key, why);
+    return found;
+  };
+
+  for (const r of results) {
+    const defs = {};
+    for (const fn of r.functions) {
+      if (fn.kind !== "hook" || !fn.name || hooks.get(`${r.file}#${fn.name}`) !== fn) continue;
+      const key = `${r.file}#${fn.name}`;
+      const accessors = reactiveIndexes(key, new Set());
+      for (const p of fn.params) Object.assign(p, accessors.has(p.index) ? { decision: "accessor-param", why: "read where it keeps being read: callers pass an accessor" } : { decision: "static", why: "read once, or called: callers pass it as it is" });
+      if (!accessors.size && !blocked.get(key).length) continue;
+      // Callers this pass can't see (another package, files outside the converted directory) still pass plain values.
+      const callers = results.some((o) => Object.keys(o.imports ?? {}).some((local) => target(o.file, local)?.key === key))
+        || r.functions.some((g) => g !== fn && (g.values.some((v) => v.hookCall?.callee === fn.name) || [...g.values, ...g.params].some((x) => x.uses?.some((u) => u.hook === fn.name))));
+      defs[fn.name] = { accessors: [...accessors].sort((a, b) => a - b), blocked: blocked.get(key), callers };
+    }
+    // Every local hook called here, so the rule pass knows which arguments to pass as accessors.
+    const calls = {};
+    for (const local of new Set([...Object.keys(r.imports ?? {}), ...r.functions.filter((f) => f.kind === "hook" && f.name).map((f) => f.name)])) {
+      const t = target(r.file, local);
+      if (t?.key && hooks.has(t.key)) calls[local] = [...reactiveIndexes(t.key, new Set())].sort((a, b) => a - b);
+    }
+    // A memo or accessor passed straight to a local hook is read here (`x()`); the rule pass passes
+    // the accessor itself where the param is one.
+    for (const fn of r.functions) for (const v of fn.values) for (const u of v.uses) if (u.argOf && u.argOf in calls) u.localHook = true;
+    r.hooks = { defs, calls };
+  }
 }

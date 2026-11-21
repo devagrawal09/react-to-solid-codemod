@@ -7,7 +7,7 @@
     "flags": {
       "class component": 1,
       "custom hook call": 1,
-      "render-dependent read": 2
+      "render-dependent read": 1
     },
     "lint": {
       "problems": 9,
@@ -51,18 +51,18 @@
       "list key": 4,
       "React namespace": 11,
       "render": 1,
-      "render-dependent read": 19,
+      "render-dependent read": 20,
       "zustand store": 1
     },
     "lint": {
-      "problems": 40,
+      "problems": 34,
       "parseErrors": 0,
       "byRule": {
         "solid/no-destructure": 16,
         "solid/no-innerhtml": 1,
         "solid/prefer-for": 1,
         "solid/prefer-structured-class": 1,
-        "solid/reactivity": 20,
+        "solid/reactivity": 14,
         "solid/self-closing-comp": 1
       }
     },
@@ -77,8 +77,8 @@
         "TS2322": 41,
         "TS2339": 15,
         "TS2686": 8,
-        "TS2353": 7,
-        "TS2345": 2
+        "TS2345": 7,
+        "TS2353": 2
       }
     },
     "resolved": {
@@ -211,6 +211,7 @@
       "dependency": 7,
       "effect dep": 2,
       "expression-bodied component": 8,
+      "hook param": 1,
       "React API": 1,
       "render-dependent read": 11
     },

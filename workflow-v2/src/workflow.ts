@@ -128,7 +128,8 @@ export default async function main({ params }: { params: { include?: string; app
     }
     if (route) code = moveImports(code, file.path, route.to, moves);
     const next = !routes ? null : { kind: route?.kind ?? null, pattern: route?.pattern ?? null, key: route?.key ?? null, wrap: route?.wrap ?? null };
-    const { code: out, applied, flags, document } = transform(code, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" }, ports, next });
+    const hooks = result?.hooks ?? { defs: {}, calls: {} };
+    const { code: out, applied, flags, document } = transform(code, { parse: (language: string, text: string) => parse(text, { language }), Lang: { Tsx: "tsx" }, ports, next, hooks });
     const changed = out !== file.text;
     if (apply && changed) file.write(out);
     if (apply && route) file.rename(route.to);

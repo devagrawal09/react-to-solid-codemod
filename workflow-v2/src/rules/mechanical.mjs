@@ -75,8 +75,11 @@ const ucfirst = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 // `ports`: the React libraries the project moves to their Solid 2 port, by name, each with its
 // PORTS entry (src/manifests.mjs); R44 points their imports at the port. `next`: set when Next.js's
 // App Router moves to Solid's file routes (R47-R54); see there. For the root layout, the result's
-// `document` holds the stylesheets and head tags that move to src/App.tsx.
-export function transform(input, { parse, Lang, ports = {}, next = null }) {
+// `document` holds the stylesheets and head tags that move to src/App.tsx. `hooks`: the contract
+// pass's verdict on local hooks' params (`applyContracts` in src/reactivity/contracts.mjs): which
+// hooks defined here take accessors, and, for each local hook called here, which arguments are
+// accessors; see R55.
+export function transform(input, { parse, Lang, ports = {}, next = null, hooks = { defs: {}, calls: {} } }) {
   // Offsets are per file, so the helpers that read them live in here: a module-level binding
   // that changes can't be copied into a workflow callback once the package is bundled.
   // Edits are { start, end, text } or { start, end, wrap(innerText) }. Nested edits are applied
@@ -143,6 +146,9 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
   const applied = {};
   const note = (rule, n = 1) => (applied[rule] = (applied[rule] || 0) + n);
   const flag = (kind, node, detail) => flags.push({ kind, line: node ? node.range().start.line + 1 : 0, detail });
+  // An argument a local hook now takes as an accessor (R55), by its call's arguments node and the
+  // argument in it: a read there isn't a render-time read.
+  const accessorArg = (args, node) => args?.kind() === "arguments" && Object.hasOwn(hooks.calls, args.parent()?.field("function")?.text() ?? "") && hooks.calls[args.parent().field("function").text()].includes(kids(args).filter((a) => a.kind() !== "comment").findIndex((a) => same(a, node)));
   // Solid types the rules write, by module, for R10 to import (a bare `Component` has no `<` to find it by).
   const introduced = { "solid-js": new Set(), "@solidjs/web": new Set() };
 
@@ -198,12 +204,15 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       // A hook that returns its signal or memo hands back the accessor, which is what the compiler
       // pass tells its callers (`x()`).
       const owner = bodyNode?.parent();
-      if (parent?.kind() === "return_statement" && same(parent.parent(), bodyNode) && /^use[A-Z]/.test(owner?.field("name")?.text() ?? owner?.parent()?.field("name")?.text() ?? "")) continue;
+      if (parent?.kind() === "return_statement" && toRead === `${name}()` && same(parent.parent(), bodyNode) && /^use[A-Z]/.test(owner?.field("name")?.text() ?? owner?.parent()?.field("name")?.text() ?? "")) continue;
       // deferred if any ancestor below the component body is a function or JSX expression/attribute
       // An effect's deps array becomes its compute function (R41).
+      // So is an argument a local hook takes as an accessor (R55 wraps it), and TanStack Query's
+      // options (R28 wraps them).
       let deferred = false;
-      for (let a = id.parent(); a && !same(a, bodyNode); a = a.parent()) {
-        if (FN_KINDS.has(a.kind()) || a.kind() === "jsx_expression") { deferred = true; break; }
+      for (let a = id.parent(), c = id; a && !same(a, bodyNode); c = a, a = a.parent()) {
+        if (FN_KINDS.has(a.kind()) || a.kind() === "jsx_expression" || accessorArg(a, c)) { deferred = true; break; }
+        if (a.kind() === "arguments" && same(arg(a), c) && QUERY_HOOKS.test(a.parent()?.field("function")?.text() ?? "") && /from ["']@tanstack\/(react|solid)-query["']/.test(src)) { deferred = true; break; }
         if (a.kind() === "array" && a.parent()?.kind() === "arguments" && EFFECT_HOOKS.test(a.parent().parent()?.field("function")?.text() ?? "")) { deferred = true; break; }
       }
       if (!deferred && bodyNode) flag("render-dependent read", id, `${label} '${name}' is read in the component body; it runs once in Solid (needs createMemo/<Show>)`);
@@ -231,7 +240,8 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       if ((pk === "required_parameter" || pk === "optional_parameter") && same(parent.field("pattern"), id)) continue;
       if (id.ancestors().some((a) => a.kind() === "type_query" || a.kind() === "type_annotation")) continue;
       if (skipCallee && pk === "call_expression" && same(parent.field("function"), id)) continue;
-      if (skipHookArgs && pk === "arguments" && /^use[A-Z]/.test(parent.parent()?.field("function")?.text() ?? "")) continue;
+      // A local hook's argument is read like any other; R55 passes the accessor where the param is one.
+      if (skipHookArgs && pk === "arguments" && /^use[A-Z]/.test(parent.parent()?.field("function")?.text() ?? "") && !Object.hasOwn(hooks.calls, parent.parent().field("function").text())) continue;
       let shadowed = false;
       for (let a = parent; a && a.range().start.index > scope.range().start.index; a = a.parent()) {
         if (a.kind() === "catch_clause" && a.field("parameter")?.text() === name) shadowed = true;
@@ -1043,6 +1053,64 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
     }),
   );
 
+  // R55 a local hook's params that the contract pass found reactive (read in JSX, an effect, a
+  // closure, a memo or accessor, its return, or forwarded to such a param of another hook) become
+  // accessors: `id: string` -> `id: Accessor<string>`, read `id()`. A destructured options object
+  // becomes one accessor, as TanStack Query's Solid port takes its options (`useQuery(() => options)`):
+  // `{ id, enabled = true }: Options` -> `options: Accessor<Options>`, read `options().id` and
+  // `(options().enabled ?? true)`. Before R41, so an effect tracks `id()` as it tracks a signal.
+  // Callers pass accessors (below, after R28).
+  for (const [name, def] of Object.entries(hooks.defs)) {
+    pass((root) => {
+      const fn = root.find({ rule: { any: [
+        { kind: "function_declaration", has: { field: "name", regex: `^${name}$` } },
+        { any: [{ kind: "arrow_function" }, { kind: "function_expression" }], inside: { kind: "variable_declarator", has: { field: "name", regex: `^${name}$` } } },
+      ] } });
+      const body = fn?.field("body");
+      if (!body) return [];
+      const params = fn.field("parameter") ? [fn.field("parameter")] : kids(fn.field("parameters")).filter((p) => p.kind() !== "comment");
+      for (const b of def.blocked) flag("hook param", fn, `${name} reads parameter ${b.index + 1} reactively, but its pattern has ${b.why}, so it stays a plain value and keeps its first value: take it as one accessor (options: Accessor<T>) and read options().x`);
+      // Callers this run can't see (another package, files outside the converted directory) still pass plain values.
+      if (def.accessors.length && !def.callers) flag("hook param", fn, `${name} now takes parameter${def.accessors.length > 1 ? "s" : ""} ${def.accessors.map((i) => i + 1).join(", ")} as an accessor, and no converted file calls it: a caller elsewhere must pass \`() => value\``);
+      const edits = [];
+      const taken = [];
+      for (const index of def.accessors) {
+        const param = params[index];
+        if (!param) continue;
+        const pattern = param.field("pattern") ?? param;
+        const type = kids(param.field("type"))[0];
+        const value = param.field("value");
+        const optional = param.kind() === "optional_parameter";
+        if (type) introduced["solid-js"].add("Accessor");
+        const declared = `${optional ? "?" : ""}${type ? `: Accessor<${type.text()}>` : ""}${value ? ` = () => ${value.kind() === "object" ? `(${value.text()})` : value.text()}` : ""}`;
+        if (pattern.kind() === "identifier") {
+          edits.push(rep(param, `${pattern.text()}${declared}`));
+          edits.push(...rewriteReads(body, null, pattern.text(), optional ? `${pattern.text()}?.()` : `${pattern.text()}()`, body, "parameter"));
+          note("hook param -> accessor");
+          continue;
+        }
+        if (pattern.kind() !== "object_pattern") continue;
+        // [local name, read of its key on the object, default]
+        const fields = [];
+        const key = (k) => (k.kind() === "property_identifier" ? `.${k.text()}` : `[${k.text()}]`);
+        for (const p of kids(pattern)) {
+          if (p.kind() === "shorthand_property_identifier_pattern") fields.push([p.text(), `.${p.text()}`, null]);
+          else if (p.kind() === "object_assignment_pattern") fields.push([p.field("left").text(), `.${p.field("left").text()}`, p.field("right").text()]);
+          else if (p.kind() === "pair_pattern" && p.field("value")?.kind() === "identifier") fields.push([p.field("value").text(), key(p.field("key")), null]);
+          else if (p.kind() === "pair_pattern" && p.field("value")?.kind() === "assignment_pattern" && p.field("value").field("left")?.kind() === "identifier") fields.push([p.field("value").field("left").text(), key(p.field("key")), p.field("value").field("right").text()]);
+          else fields.push(null);
+        }
+        if (fields.includes(null)) { flag("hook param", param, `${name} reads ${pattern.text()} reactively, but this pattern can't be read field by field from one accessor: take it as options: Accessor<T> and read options().x`); continue; }
+        const local = freeName("options", taken);
+        taken.push(local);
+        edits.push(rep(param, `${local}${declared}`));
+        for (const [l, read, d] of fields) edits.push(...rewriteReads(body, null, l, d ? `(${local}()${read} ?? ${d})` : `${local}()${read}`, body, "parameter"));
+        note("hook options -> accessor");
+      }
+      return edits;
+    });
+  }
+
   // R27 useRef used only as `x.current` and `ref={x}` -> a plain `let` and a ref callback. A ref
   // passed on as a value (to a hook, or returned) or written while the component renders becomes
   // a plain `{ current }` object: the body runs once, so that is what useRef was. A render-time
@@ -1258,6 +1326,28 @@ export function transform(input, { parse, Lang, ports = {}, next = null }) {
       }),
     );
   }
+
+  // R55 callers: every argument a local hook now takes as an accessor is passed as one, whatever it
+  // is (`() => props.id`, `() => 5`, `() => ({ id: id(), enabled })`); an accessor read (`id()`)
+  // passes the accessor itself. A call that spreads its arguments is flagged.
+  pass((root) =>
+    root.findAll({ rule: { kind: "call_expression", has: { field: "function", kind: "identifier" } } }).flatMap((call) => {
+      const name = call.field("function").text();
+      const accessors = Object.hasOwn(hooks.calls, name) ? hooks.calls[name] : [];
+      if (!accessors.length) return [];
+      const args = kids(call.field("arguments")).filter((a) => a.kind() !== "comment");
+      if (args.some((a) => a.kind() === "spread_element")) {
+        flag("hook param", call, `${name} takes parameter${accessors.length > 1 ? "s" : ""} ${accessors.map((i) => i + 1).join(", ")} as an accessor, and this call spreads its arguments: pass each as () => value`);
+        return [];
+      }
+      return accessors.filter((i) => args[i]).map((i) => {
+        const a = args[i];
+        note("hook argument -> accessor");
+        const read = a.kind() === "call_expression" && a.field("function")?.kind() === "identifier" && !/^use[A-Z]/.test(a.field("function").text()) && !kids(a.field("arguments")).length;
+        return rep(a, read ? a.field("function").text() : a.kind() === "object" ? `() => (${a.text()})` : `() => ${a.text()}`);
+      });
+    }),
+  );
 
   // R11 early returns in a component -> <Show> (one) or <Switch>/<Match> (several). The body runs
   // once in Solid, so a guard that returns early would never re-check its condition.

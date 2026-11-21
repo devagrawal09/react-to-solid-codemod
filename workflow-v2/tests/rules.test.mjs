@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { parse, Lang } from "@ast-grep/napi";
 import { transform } from "../src/rules/mechanical.mjs";
 import { extract } from "../src/reactivity/extract.mjs";
@@ -1065,4 +1065,114 @@ export const POST: APIHandler = (event) => nextPOST(event.request, { params: Pro
 
 it("R10 doesn't take loading=\"lazy\" for a use of lazy", () => {
   expect(convert(`export function A() { return <img src="a" loading="lazy" />; }\n`)).not.toContain("import");
+});
+
+// R55 runs on what the contract pass decided across files, so these convert a small project the way
+// the workflow does: every file's compiler result, the contracts, then each file's rewrite and rules.
+const project = (files) => {
+  const results = Object.entries(files).map(([file, code]) => decide(extract(code, `/repo/${file}`)));
+  applyContracts(results);
+  return Object.fromEntries(Object.entries(files).map(([file, code], i) => [file, transform(rewrite(code, results[i]).code, { parse, Lang, hooks: results[i].hooks })]));
+};
+
+describe("R55 hook params that are read reactively become accessors, and every caller passes one", () => {
+  const hook = `import { useMemo } from "react";\nexport function useThing(id: string) {\n  const url = useMemo(() => \`/things/\${id}\`, [id]);\n  return url;\n}\n`;
+  const out = project({
+    "src/hooks/useThing.ts": hook,
+    "src/A.tsx": `import { useMemo, useState } from "react";\nimport { useThing } from "./hooks/useThing";\nexport function A({ items }: { items: string[] }) {\n  const [id, setId] = useState("a");\n  const first = useMemo(() => items[0], [items]);\n  const url = useThing(id);\n  const other = useThing(first);\n  return <p onClick={() => setId("b")}>{url}{other}</p>;\n}\n`,
+    "src/B.tsx": `import { useThing } from "./hooks/useThing";\nexport function B({ id }: { id: string }) {\n  const url = useThing(id);\n  return <p>{url}</p>;\n}\n`,
+    "src/C.tsx": `import { useThing } from "./hooks/useThing";\nconst FIXED = "c";\nexport function C() {\n  const url = useThing(FIXED);\n  const other = useThing("lit");\n  return <p>{url}{other}</p>;\n}\n`,
+  });
+
+  it("types the param Accessor<T> and reads it as a call", () => {
+    expect(out["src/hooks/useThing.ts"].code).toContain("export function useThing(id: Accessor<string>) {");
+    expect(out["src/hooks/useThing.ts"].code).toContain("const url = createMemo(() => `/things/${id()}`);");
+    expect(out["src/hooks/useThing.ts"].code).toContain(`import type { Accessor } from "solid-js";`);
+  });
+
+  it("passes a signal or a memo as it is", () => {
+    expect(out["src/A.tsx"].code).toContain("const url = useThing(id);");
+    expect(out["src/A.tsx"].code).toContain("const other = useThing(first);");
+  });
+
+  it("passes a prop as a function that reads it, and doesn't flag it as read once", () => {
+    expect(out["src/B.tsx"].code).toContain("const url = useThing(() => props.id);");
+    expect(out["src/B.tsx"].flags.filter((f) => f.kind === "render-dependent read")).toEqual([]);
+  });
+
+  it("passes a constant or a literal as a function too: one convention for every caller", () => {
+    expect(out["src/C.tsx"].code).toContain("const url = useThing(() => FIXED);");
+    expect(out["src/C.tsx"].code).toContain(`const other = useThing(() => "lit");`);
+  });
+});
+
+it("R55 follows a hook that forwards its param to another hook's reactive param", () => {
+  const out = project({
+    "src/hooks.ts": `import { useEffect, useState } from "react";\nexport function useInner(id: number) {\n  const [n, setN] = useState(0);\n  useEffect(() => {\n    const sub = subscribe(id, setN);\n    return () => sub.close();\n  }, [id]);\n  return n;\n}\nexport function useOuter(id: number) {\n  return useInner(id);\n}\n`,
+    "src/Page.tsx": `import { useOuter } from "./hooks";\nexport function Page({ id }: { id: number }) {\n  const n = useOuter(id);\n  return <p>{n}</p>;\n}\n`,
+  });
+  const hooks = out["src/hooks.ts"].code;
+  // The effect tracks the accessor as it tracks a signal (R41).
+  expect(hooks).toContain("export function useInner(id: Accessor<number>) {");
+  expect(hooks).toContain("createEffect(() => id(), (id) => {\n    const sub = subscribe(id, setN);");
+  expect(hooks).toContain("export function useOuter(id: Accessor<number>) {");
+  expect(hooks).toContain("return useInner(id);");
+  expect(out["src/Page.tsx"].code).toContain("const n = useOuter(() => props.id);");
+});
+
+it("R55 takes a destructured options object as one accessor, as TanStack Query's Solid port takes its options", () => {
+  const out = project({
+    "src/useItem.ts": `import { useMemo } from "react";\nexport function useItem({ id, enabled = true }: { id: string; enabled?: boolean }) {\n  return useMemo(() => (enabled ? id.toUpperCase() : ""), [id, enabled]);\n}\n`,
+    "src/A.tsx": `import { useState } from "react";\nimport { useItem } from "./useItem";\nexport function A() {\n  const [id, setId] = useState("a");\n  const item = useItem({ id, enabled: id !== "" });\n  return <p onClick={() => setId("b")}>{item}</p>;\n}\n`,
+  });
+  expect(out["src/useItem.ts"].code).toContain("export function useItem(options: Accessor<{ id: string; enabled?: boolean }>) {");
+  expect(out["src/useItem.ts"].code).toContain(`return createMemo(() => ((options().enabled ?? true) ? options().id.toUpperCase() : ""));`);
+  expect(out["src/A.tsx"].code).toContain(`const item = useItem(() => ({ id: id(), enabled: id() !== "" }));`);
+});
+
+it("R55 reads a non-destructured options param through its accessor, inside TanStack Query's options function", () => {
+  const out = project({
+    "src/useUser.ts": `import { useQuery } from "@tanstack/react-query";\nexport function useUser(opts: { id: string; enabled: boolean }) {\n  return useQuery({ queryKey: ["user", opts.id], queryFn: () => fetchUser(opts.id), enabled: opts.enabled });\n}\n`,
+    "src/A.tsx": `import { useUser } from "./useUser";\nexport function A({ id }: { id: string }) {\n  const user = useUser({ id, enabled: id !== "" });\n  return <p>{user.data}</p>;\n}\n`,
+  });
+  expect(out["src/useUser.ts"].code).toContain(`return useQuery(() => ({ queryKey: ["user", opts().id], queryFn: () => fetchUser(opts().id), enabled: opts().enabled }));`);
+  expect(out["src/useUser.ts"].flags.filter((f) => f.kind === "render-dependent read")).toEqual([]);
+  expect(out["src/A.tsx"].code).toContain(`const user = useUser(() => ({ id: props.id, enabled: props.id !== "" }));`);
+});
+
+it("R55 leaves a param the hook reads once, or calls, a plain value, and reads a memo passed to it", () => {
+  const out = project({
+    "src/useOnce.ts": `import { useEffect, useState } from "react";\nexport function useOnce(seed: number, onDone: () => void) {\n  const [v] = useState(seed);\n  useEffect(() => { onDone(); }, [onDone]);\n  return v;\n}\n`,
+    "src/A.tsx": `import { useOnce } from "./useOnce";\nexport function A({ items, onDone }: { items: number[]; onDone: () => void }) {\n  const sorted = items.toSorted();\n  const v = useOnce(sorted.length, onDone);\n  const w = useOnce(sorted, onDone);\n  return <p>{v}{w}{sorted.length}</p>;\n}\n`,
+  });
+  expect(out["src/useOnce.ts"].code).toContain("export function useOnce(seed: number, onDone: () => void) {");
+  // The compiler pass made sorted a memo: a plain param gets its value, not the accessor.
+  expect(out["src/A.tsx"].code).toContain("const v = useOnce(sorted().length, props.onDone);");
+  expect(out["src/A.tsx"].code).toContain("const w = useOnce(sorted(), props.onDone);");
+});
+
+it("R55 flags a hook that now takes accessors when no converted file calls it, and a call that spreads its arguments", () => {
+  const out = project({
+    "src/useThing.ts": `import { useMemo } from "react";\nexport function useThing(id: string) {\n  return useMemo(() => id.length, [id]);\n}\nexport function useSpread(id: string) {\n  return useMemo(() => id.length, [id]);\n}\nexport function useCaller(args: [string]) {\n  return useSpread(...args);\n}\n`,
+  });
+  expect(out["src/useThing.ts"].flags.filter((f) => f.kind === "hook param").map((f) => [f.line, f.detail])).toEqual([
+    [2, "useThing now takes parameter 1 as an accessor, and no converted file calls it: a caller elsewhere must pass `() => value`"],
+    [12, "useSpread takes parameter 1 as an accessor, and this call spreads its arguments: pass each as () => value"],
+  ]);
+});
+
+it("R55 leaves a reactive rest parameter and its callers as they are, and flags it", () => {
+  const code = `export const useDeps = (...names: string[]) => {\n  const container = useContainer();\n  return names.map((name) => container[name]);\n};\nexport function useCaller() {\n  return useDeps("a", "b");\n}\n`;
+  const out = project({ "src/useDeps.ts": code })["src/useDeps.ts"];
+  expect(out.code).toContain(`export const useDeps = (...names: string[]) => {`);
+  expect(out.code).toContain(`return useDeps("a", "b");`);
+  expect(out.flags.filter((f) => f.kind === "hook param").map((f) => f.detail)).toEqual([expect.stringMatching(/^useDeps reads parameter 1 reactively, but its pattern has a rest element/)]);
+});
+
+it("R55 flags a reactive param whose pattern can't become one accessor, and leaves it and its callers as they are", () => {
+  const code = `import { useMemo } from "react";\nexport function useRest({ id, ...rest }: { id: string; x: string }) {\n  return useMemo(() => id + rest.x, [id, rest]);\n}\nexport function useCaller() {\n  return useRest({ id: "a", x: "b" });\n}\n`;
+  const out = project({ "src/useRest.ts": code })["src/useRest.ts"];
+  expect(out.code).toContain(`export function useRest({ id, ...rest }: { id: string; x: string }) {`);
+  expect(out.code).toContain(`return useRest({ id: "a", x: "b" });`);
+  expect(out.flags.filter((f) => f.kind === "hook param").map((f) => f.detail)).toEqual(["useRest reads parameter 1 reactively, but its pattern has a rest element, so it stays a plain value and keeps its first value: take it as one accessor (options: Accessor<T>) and read options().x"]);
 });
