@@ -7,6 +7,7 @@ import path from "node:path";
 import { test } from "node:test";
 import ts from "typescript";
 import { PORTS, reactPeers } from "../src/manifests.mjs";
+import { lockCorpus } from "./corpus/lock.mjs";
 
 /**
  * Release check (`pnpm test:corpus`, part of `pnpm test:release`, not of `pnpm test`): runs the
@@ -55,6 +56,10 @@ import { PORTS, reactPeers } from "../src/manifests.mjs";
  * Environment:
  * - REACT_TO_SOLID_CORPUS_CACHE: clones, installs, tools and results (default
  *   ~/.cache/react-to-solid-corpus; not under /tmp, which WSL wipes, and never inside this repo);
+ * - REACT_TO_SOLID_CORPUS_WAIT: minutes to wait for another run on the same cache (default 0: fail
+ *   at once, naming it). One run holds <cache>/corpus.lock (its pid, start time and command) while
+ *   it runs: two runs on one cache reset each other's work copies and overwrite each other's
+ *   results. A lock whose process has exited is taken over (tests/corpus/lock.mjs);
  * - REACT_TO_SOLID_CORPUS_ONLY: comma-separated entry names to run;
  * - REACT_TO_SOLID_CORPUS_WORKFLOW: another workflow.ts to run (an older release's src/), compared
  *   with the same baseline; REACT_TO_SOLID_CORPUS_LABEL names its results directory;
@@ -96,6 +101,8 @@ const ERROR_LINE = /^(.+?)\((\d+),(\d+)\): error (TS\d+): (.*)$/;
 
 const repositoryRoot = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: packageDirectory, encoding: "utf8" }).stdout.trim();
 assert.ok(path.relative(repositoryRoot, cache).startsWith(".."), `the corpus cache (${cache}) must be outside this repository`);
+fs.mkdirSync(cache, { recursive: true });
+lockCorpus(path.join(cache, "corpus.lock"), { waitSeconds: Number(env.REACT_TO_SOLID_CORPUS_WAIT ?? 0) * 60 });
 
 if (env.REACT_TO_SOLID_CORPUS_PRIVATE_REPO) {
   const repo = path.resolve(env.REACT_TO_SOLID_CORPUS_PRIVATE_REPO);
