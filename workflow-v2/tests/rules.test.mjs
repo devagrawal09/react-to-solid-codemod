@@ -883,6 +883,36 @@ it("R46 flushes after each fireEvent statement, once", () => {
   expect(tested(code).code).toBe(`import { flush } from "solid-js";\nimport { fireEvent } from "@solidjs/testing-library";\nit("x", () => {\n  fireEvent.click(button);\n  flush();\n  fireEvent(input, new Event("input"));\n  flush();\n  fireEvent.keyDown(input, { key: "Enter" });\n  flush();\n});\n`);
 });
 
+it("R46 dispatches input then change where fireEvent.change sets a value, for R13's onInput", () => {
+  const code = `import { fireEvent, screen } from "@testing-library/react";\nit("x", () => {\n  fireEvent.change(screen.getByRole("textbox"), { target: { value: "sol" } });\n  fireEvent.change(input, init);\n});\n`;
+  const { code: out, flags } = tested(code);
+  expect(out).toBe(`import { flush } from "solid-js";\nimport { fireEvent, screen } from "@solidjs/testing-library";\nit("x", () => {\n  fireEvent.input(screen.getByRole("textbox"), { target: { value: "sol" } });\n  fireEvent.change(screen.getByRole("textbox"), { target: { value: "sol" } });\n  flush();\n  fireEvent.input(input, init);\n  fireEvent.change(input, init);\n  flush();\n});\n`);
+  expect(flags).toEqual([]);
+});
+
+it("R46 dispatches input then change after act's body, flushing once", () => {
+  const code = `import { act, fireEvent } from "@testing-library/react";\nit("x", () => {\n  act(() => fireEvent.change(area, { target: { "value": text } }));\n});\n`;
+  expect(tested(code).code).toBe(`import { flush } from "solid-js";\nimport { fireEvent } from "@solidjs/testing-library";\nit("x", () => {\n  fireEvent.input(area, { target: { "value": text } });\n  fireEvent.change(area, { target: { "value": text } });\n  flush();\n});\n`);
+});
+
+it("R46 evaluates a fireEvent.change argument with side effects once, in a const named apart from the file's", () => {
+  const code = `import { fireEvent } from "@testing-library/react";\nconst field = 1;\nit("x", () => {\n  fireEvent.change(within(row).getByRole("textbox"), { target: { value: next() } });\n});\n`;
+  expect(tested(code).code).toContain(`  const field2 = within(row).getByRole("textbox");\n  const init = { target: { value: next() } };\n  fireEvent.input(field2, init);\n  fireEvent.change(field2, init);\n  flush();\n`);
+});
+
+it("R46 leaves a fireEvent.change that sets no value (a checkbox's checked, files, none), and one an input already precedes", () => {
+  const code = `import { fireEvent } from "@testing-library/react";\nit("x", () => {\n  fireEvent.change(box, { target: { checked: true } });\n  fireEvent.change(upload, { target: { files: [file] } });\n  fireEvent.change(el);\n  fireEvent.change(el, { bubbles: true });\n  fireEvent.input(el, { target: { value: "a" } });\n  fireEvent.change(el, { target: { value: "a" } });\n});\n`;
+  const { code: out, flags } = tested(code);
+  expect(out).toBe(`import { flush } from "solid-js";\nimport { fireEvent } from "@solidjs/testing-library";\nit("x", () => {\n  fireEvent.change(box, { target: { checked: true } });\n  flush();\n  fireEvent.change(upload, { target: { files: [file] } });\n  flush();\n  fireEvent.change(el);\n  flush();\n  fireEvent.change(el, { bubbles: true });\n  flush();\n  fireEvent.input(el, { target: { value: "a" } });\n  fireEvent.change(el, { target: { value: "a" } });\n  flush();\n});\n`);
+  expect(flags).toEqual([]);
+});
+
+it("R46 flags a value-setting fireEvent.change whose result is used or that isn't a statement in a block, and fireEvent with a change Event", () => {
+  const code = `import { fireEvent } from "@testing-library/react";\nit("x", async () => {\n  expect(fireEvent.change(el, { target: { value: "a" } })).toBe(true);\n  if (open) fireEvent.change(el, { target: { value: "a" } });\n  fireEvent(el, new Event("change", { bubbles: true }));\n  fireEvent(el, new Event("input"));\n  expect(fireEvent.change(box, { target: { checked: true } })).toBe(true);\n});\n`;
+  const { flags } = tested(code);
+  expect(flags.filter((f) => f.kind === "change event").map((f) => f.line)).toEqual([4, 5, 7]);
+});
+
 it("R46 turns a rerender with new literal props into a signal per prop that changes, set before a flush()", () => {
   const code = `import { render, screen } from "@testing-library/react";\nit("x", () => {\n  const { rerender, container } = render(<Badge label="new" count={1} tone="info" />);\n  rerender(<Badge label="new" count={2} tone="info" />);\n  rerender(<Badge label="old" count={2} tone="info" />);\n});\n`;
   const { code: out, flags } = tested(code);

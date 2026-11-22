@@ -6,7 +6,7 @@ export default defineConfig({
   test: {
     // The corpus is a node:test release check (pnpm test:corpus), not a vitest spec.
     exclude: [...configDefaults.exclude, "tests/corpus.test.mjs"],
-    server: { deps: { inline: ["solid-js", "@solidjs/web", "@solidjs/signals"] } },
+    server: { deps: { inline: ["solid-js", "@solidjs/web", "@solidjs/signals", "@solidjs/testing-library"] } },
     tags: [{ name: "slow", description: "Runs the codemod CLI on a fixture app.", timeout: 120_000 }],
   },
 });

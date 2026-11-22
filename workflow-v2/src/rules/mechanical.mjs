@@ -2070,9 +2070,56 @@ export function transform(input, { parse, Lang, ports = {}, next = null, hooks =
     }
   }
   if (testing.fireEvent) {
+    // R13 made a text field's onChange onInput, which hears the native `input` event. React's
+    // onChange heard `input` and `change`, and fireEvent.change dispatches only `change`. A browser
+    // fires `input` on each edit and `change` on commit, so a fireEvent.change that sets target.value
+    // (or might: an init that isn't a literal) dispatches both; a <select>'s or a checkbox's
+    // onChange, which R13 keeps, hears the `change` and not the `input`. An argument with side
+    // effects is evaluated once, in a const. A change whose result is used, or that isn't a
+    // statement in a block, is flagged, as is fireEvent(el, new Event("change")).
+    const CHANGE = "a text field's onChange is onInput in Solid, which hears the native input event, and a change event doesn't reach it (React's onChange heard both)";
+    pass((root) => {
+      const edits = [];
+      const taken = [];
+      for (const call of root.findAll({ rule: { kind: "call_expression", has: { field: "function", regex: `^${testing.fireEvent}(\\.change)?$` } } })) {
+        const [el, init, ...more] = kids(call.field("arguments")).filter((a) => a.kind() !== "comment");
+        if (call.field("function").text() === testing.fireEvent) {
+          if (init?.kind() === "new_expression" && init.field("constructor")?.text() === "Event" && /^["'`]change["'`]$/.test(kids(init.field("arguments"))[0]?.text() ?? "")) flag("change event", call, `${CHANGE}. Dispatch new Event("input", { bubbles: true }) before it`);
+          continue;
+        }
+        if (!el || !init || more.length) continue;
+        // A literal whose target has no value ({ target: { checked: true } }) sets nothing an input event carries.
+        const initProps = init.kind() === "object" && !kids(init).some((p) => p.kind() === "spread_element") ? kids(init).filter((p) => p.kind() !== "comment") : null;
+        const target = initProps?.find((p) => (p.kind() === "pair" ? p.field("key") : p).text().replace(/^["']|["']$/g, "") === "target");
+        if (initProps && !target) continue;
+        const targetValue = target?.kind() === "pair" ? target.field("value") : null;
+        const targetProps = targetValue?.kind() === "object" && !kids(targetValue).some((p) => p.kind() === "spread_element") ? kids(targetValue).filter((p) => p.kind() !== "comment") : null;
+        if (targetProps && !targetProps.some((p) => (p.kind() === "pair" ? p.field("key") : p).text().replace(/^["']|["']$/g, "") === "value")) continue;
+        const statement = call.parent();
+        if (statement?.kind() !== "expression_statement" || !["statement_block", "program"].includes(statement.parent()?.kind())) {
+          flag("change event", call, `${CHANGE}. Call ${testing.fireEvent}.input(el, init) and then ${testing.fireEvent}.change(el, init)`);
+          continue;
+        }
+        if (new RegExp(`^${testing.fireEvent}\\.input\\(`).test(statement.prev()?.text() ?? "")) continue;
+        const indent = " ".repeat(statement.range().start.column);
+        const consts = [];
+        const [elText, initText] = [[el, "field"], [init, "init"]].map(([n, base]) => {
+          // A query (screen.getByRole(...)) finds the same element twice; any other call is hoisted.
+          if (!n.find({ rule: { any: [{ kind: "call_expression", not: { has: { field: "function", regex: "^(\\w+\\.)?(get|query)(All)?By[A-Z]\\w*$" } } }, { kind: "new_expression" }, { kind: "assignment_expression" }, { kind: "augmented_assignment_expression" }, { kind: "update_expression" }, { kind: "await_expression" }, { kind: "arrow_function" }, { kind: "function_expression" }] } })) return n.text();
+          const name = freeName(base, taken);
+          taken.push(name);
+          consts.push(`const ${name} = ${n.text()};`);
+          return name;
+        });
+        note("fireEvent.change -> fireEvent.input + fireEvent.change");
+        edits.push(rep(statement, [...consts, `${testing.fireEvent}.input(${elText}, ${initText});`, `${testing.fireEvent}.change(${elText}, ${initText});`].join(`\n${indent}`)));
+      }
+      return edits;
+    });
     pass((root) =>
       root.findAll({ rule: { kind: "expression_statement", has: { kind: "call_expression", has: { field: "function", regex: `^${testing.fireEvent}(\\.\\w+)?$` } } } }).flatMap((statement) => {
         if (/^flush\(\)/.test(statement.next()?.text() ?? "")) return [];
+        if (new RegExp(`^${testing.fireEvent}\\.input\\(`).test(statement.text()) && new RegExp(`^${testing.fireEvent}\\.change\\(`).test(statement.next()?.text() ?? "")) return [];
         note("fireEvent -> fireEvent + flush()");
         const end = statement.range().end.index;
         return [{ start: end, end, text: `\n${" ".repeat(statement.range().start.column)}flush();` }];
