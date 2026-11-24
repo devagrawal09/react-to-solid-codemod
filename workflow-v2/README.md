@@ -49,7 +49,7 @@ A file that's already Solid is skipped. That's a file that imports `solid-js`, `
 If the run fails with `YAML error: invalid type: string "import { agent, approval, ... } from \"codemod/workflow\"; ...", expected struct Workflow`, the CLI that ran is older than codemod 2.0.0-alpha.2 (the 1.x `codemod`, or 2.0.0-alpha.1): it reads the TypeScript workflow as YAML. npx re-resolves `@alpha` by itself, so a stale one usually comes from a registry mirror or proxy, or an npm `prefer-offline`/`offline` setting. Pin the CLI (`codemod --version` prints `1.18.7` on the 2.0 alpha too, so it can't tell them apart):
 
 ```sh
-npx codemod@2.0.0-alpha.4 run react-to-solid   # or: pnpm dlx codemod@alpha run react-to-solid
+npx codemod@2.0.0-alpha.6 run react-to-solid   # or: pnpm dlx codemod@alpha run react-to-solid
 npm view codemod dist-tags.alpha               # what your registry calls alpha
 ```
 
@@ -98,7 +98,7 @@ With `apply=true`, the package that owns the converted directory moves to Solid 
 
 A library's `peerDependencies` move too (`react` → `solid-js`, `react-dom` → `@solidjs/web`), and a package that peers on React doesn't get `solid-js` added to its `dependencies`, so the app's copy is the only one.
 
-It flags rather than changes: a `catalog:` or `workspace:` range (change it where the catalog defines it; for a library imported by name, below, the flag says the converted files already import the port), a `package.json` or `tsconfig` above the package (shared with the rest of a monorepo), the React lint plugins (`eslint-plugin-react-hooks` and the like, which your lint config loads), a `next.config.*`, a `jest.config.*` (see [Test files](#test-files)), and every React library without a Solid 2 port. A library counts as a React library when the lockfile (`pnpm-lock.yaml`, `package-lock.json`, or yarn berry's `yarn.lock`) says it peers on `react` or `react-dom`, directly or through another peer (`nuqs` peers on `next`); without such a lockfile, when its name contains "react".
+It flags rather than changes: a `catalog:` or `workspace:` range (change it where the catalog defines it; for a library imported by name, below, the flag says the converted files already import the port), a `package.json` or `tsconfig` above the package (shared with the rest of a monorepo), the React lint plugins (`eslint-plugin-react-hooks` and the like, which your lint config loads), a `next.config.*`, a `jest.config.*` (see [Test files](#test-files)), and every React library without a Solid 2 port. A library counts as a React library when the lockfile (`pnpm-lock.yaml`, `package-lock.json`, or yarn berry's `yarn.lock`, read with Codemod's `dependencyGraph`) says it peers on `react` or `react-dom`, directly or through another peer (`nuqs` peers on `next`); without such a lockfile, when its name contains "react".
 
 ### Workspace packages
 
@@ -256,10 +256,11 @@ On create-vite's React TypeScript template with Vitest 5.1.1, `@testing-library/
 |---|---|---|
 | Find the App Router | `forEachFile` | Only with `nextRoutes` and no `include`: whether the App Router is `app/` at the root (then the run converts from the root) or `src/app` |
 | Read package.json files | `forEachFile` | Collects dependencies from every package.json |
-| Read the lockfile | `forEachFile` | Which packages peer on React, and the install command |
+| Read the lockfile | `forEachFile` | Which lockfile there is, and the install command |
+| Find the packages that peer on React | `dependencyGraph` | Which installed packages peer on React, from a lockfile that records peers |
 | Read the workspace definition | `forEachFile` | `pnpm-workspace.yaml`'s packages (npm and yarn list theirs in the root `package.json`) |
 | Check React libraries for Solid ports | function | Fails if nothing on the way to the converted directory depends on `react` or `solid-js`; lists React libraries with and without a Solid 2 port, which package.json owns the directory, and the React workspace packages it depends on (`src/workspaces.mjs`) |
-| branch / commit | `branch`, `commit` | Only with `--param apply=true` and `--managed-git` |
+| branch / commit | `branch`, `commit` (`codemod/git`) | Only with `--param apply=true` and `--managed-git` |
 | Run the React Compiler on each file | `forEachFile` | Skips a file that's already Solid; `babel-plugin-react-compiler@1.0.0` decides what each component-body value becomes; each file's result is a step output, read from the [compiler cache](#the-compiler-cache) when it has it |
 | Resolve hook contracts across files | function | The whole-program hook-contract pass, over every file's result, with imports of converted workspace packages resolved to their source: what each hook returns, which of its params callers pass as accessors, and the files in dependency order |
 | Plan the Next.js routes | function | Only with `--param nextRoutes=true`: where each App Router file goes (`src/nextjs.mjs`) |
@@ -298,7 +299,6 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 | `src/worklist.mjs` | The work list: each flag kind's severity, guidance and guide section, and the Markdown |
 | `src/verify/typecheck.mjs` | The type-check after apply (and the install with `install=true`), run with Node from the target |
 | `src/lint/` | ESLint 9 with `eslint-plugin-solid/configs/v2`; the workflow finds it through `import.meta.dirname` |
-| `workflow.yaml` | A stub: codemod 2.0.0-alpha.4 won't start a registry package without one. `codemod.yaml` runs `src/workflow.ts` |
 | `docs/` | The Nov 16 report on t3code, engine gaps found along the way, and that run's logs |
 
 ## Tests

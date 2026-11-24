@@ -208,6 +208,13 @@ export function reactPeers(path, text) {
       }
     }
   }
+  return reactPeerClosure(peersOf);
+}
+
+// Of the packages in `peersOf` (each name and the names it peers on), those that peer on react or
+// react-dom, directly or through a peer that does, sorted. The workflow builds `peersOf` from
+// dependencyGraph (codemod/deps); reactPeers above builds it from a lockfile's text.
+export function reactPeerClosure(peersOf) {
   const react = new Set(["react", "react-dom"]);
   for (let grew = true; grew;) {
     grew = false;
