@@ -25,11 +25,13 @@
 //
 // A file that's already Solid (it imports Solid and nothing from React) is skipped, so a second run
 // changes nothing.
-import { step, forEachFile, shell, agent, approval, branch, commit } from "codemod/workflow";
+import { step, forEachFile, shell, agent, approval } from "codemod/workflow";
+import { branch, commit } from "codemod/git";
+import { dependencyGraph } from "codemod/deps";
 import { parse } from "codemod/ast-grep";
 import { CACHE_KEY, applyContracts, decide, extract, rewrite } from "./lib/reactivity.mjs";
 import { transform } from "./rules/mechanical.mjs";
-import { NO_PORT, PORTS, migratePackageJson, migrateTsconfig, migrateViteConfig, reactPeers } from "./manifests.mjs";
+import { NO_PORT, PORTS, migratePackageJson, migrateTsconfig, migrateViteConfig, reactPeerClosure } from "./manifests.mjs";
 import { moveImports, nextAppFiles, nextConfigKeys, planNextRoutes } from "./nextjs.mjs";
 import { packageModules, pnpmWorkspaces, workspaceDependencies } from "./workspaces.mjs";
 import { renderWorklist } from "./worklist.mjs";
@@ -69,9 +71,22 @@ export default async function main({ params }: { params: { include?: string; app
       entry: { exports: pkg.exports ?? null, main: pkg.main ?? null, module: pkg.module ?? null, types: pkg.types ?? null, typings: pkg.typings ?? null, source: pkg.source ?? null },
     };
   }));
-  // The lockfile names the package manager, and which packages peer on React.
-  const lockfiles = await step("Read the lockfile", forEachFile(["pnpm-lock.yaml", "yarn.lock", "bun.lock", "package-lock.json"], (file) => ({ path: file.path, peers: reactPeers(file.path, file.text) })));
-  const peers = lockfiles.outputs.find((l) => l.peers)?.peers ?? null;
+  // The lockfile names the package manager, and which packages peer on React. A yarn 1 lockfile
+  // records no peers, and dependencyGraph doesn't read bun's.
+  const lockfiles = await step("Read the lockfile", forEachFile(["pnpm-lock.yaml", "yarn.lock", "bun.lock", "package-lock.json"], (file) => ({ path: file.path, peers: file.path === "pnpm-lock.yaml" || file.path === "package-lock.json" || (file.path === "yarn.lock" && /^__metadata:/m.test(file.text)) })));
+  // The packages the lockfile installs that peer on React, directly or through a peer that does;
+  // null, as without such a lockfile, when dependencyGraph couldn't read it.
+  const peers = !lockfiles.outputs.some((l) => l.peers) ? null : await step("Find the packages that peer on React", dependencyGraph((g) => {
+    if (g.lockfiles.length === 0) return null;
+    const peersOf = new Map<string, Set<string>>();
+    for (const node of g.nodes()) {
+      if (node.local) continue;
+      const names = peersOf.get(node.name) ?? new Set<string>();
+      for (const edge of node.dependencies({ kinds: "peer" })) names.add(edge.name);
+      peersOf.set(node.name, names);
+    }
+    return reactPeerClosure(peersOf) as string[];
+  }));
   // pnpm's workspace packages; npm and yarn list theirs in the root package.json's `workspaces`.
   const pnpmWorkspace = await step("Read the workspace definition", forEachFile(["pnpm-workspace.yaml"], (file) => pnpmWorkspaces(file.text)));
   const plan = await step("Check React libraries for Solid ports", () => {

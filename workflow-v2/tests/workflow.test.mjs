@@ -6,7 +6,7 @@ import path from "node:path";
 import { rolldown } from "rolldown";
 import { beforeAll, describe, expect, it } from "vitest";
 
-// Needs a codemod CLI with the code-first engine: codemod@2.0.0-alpha.4 or newer.
+// Needs a codemod CLI with the code-first engine: codemod@2.0.0-alpha.6 or newer.
 const bin = process.env.CODEMOD_BIN;
 const workflow = path.resolve(import.meta.dirname, "../src/workflow.ts");
 const fixture = path.resolve(import.meta.dirname, "fixtures/todo-app");

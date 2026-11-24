@@ -84,7 +84,7 @@ const label = env.REACT_TO_SOLID_CORPUS_LABEL ?? (env.REACT_TO_SOLID_CORPUS_WORK
 const only = env.REACT_TO_SOLID_CORPUS_ONLY?.split(",").map((name) => name.trim());
 const minAvailableMb = Number(env.REACT_TO_SOLID_CORPUS_MIN_AVAILABLE_MB ?? 4000);
 // The pinned tools: the type-checker and the CLI that runs the workflow.
-const TOOLS = { typescript: "7.0.2", codemod: "2.0.0-alpha.4" };
+const TOOLS = { typescript: "7.0.2", codemod: "2.0.0-alpha.6" };
 // Bump to throw away cached React baselines (when what they measure changes).
 const REACT_CACHE_VERSION = 1;
 // The Solid install allows unmet peers: some Solid 2 ports still peer on Solid 1 helpers.
