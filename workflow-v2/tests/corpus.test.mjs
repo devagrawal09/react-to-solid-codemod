@@ -6,7 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import ts from "typescript";
-import { PORTS, reactPeers } from "../src/manifests.mjs";
+import { PORTS } from "../src/manifests.mjs";
+import { reactPeers } from "./corpus/react-peers.mjs";
 import { lockCorpus } from "./corpus/lock.mjs";
 
 /**
