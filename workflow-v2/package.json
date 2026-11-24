@@ -21,6 +21,7 @@
     "@solidjs/web": "2.0.3",
     "@testing-library/user-event": "14.6.1",
     "babel-plugin-react-compiler": "1.0.0",
+    "codemod": "2.0.0-alpha.6",
     "esbuild": "0.25.11",
     "jsdom": "27.2.0",
     "path-browserify": "1.0.1",
