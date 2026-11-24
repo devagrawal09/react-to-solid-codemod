@@ -33,7 +33,8 @@ function migrate(dir, params = ["apply=true"], workflowFile = workflow, { flags 
     encoding: "utf8",
   });
   const id = `${cli.stdout}${cli.stderr}`.match(/^Run (\S+)/m)[1];
-  return JSON.parse(fs.readFileSync(path.join(store, id, "run.json"), "utf8"));
+  const steps = JSON.parse(fs.readFileSync(path.join(store, id, "steps.json"), "utf8")).map((s) => ({ label: s.label, status: s.status }));
+  return { ...JSON.parse(fs.readFileSync(path.join(store, id, "run.json"), "utf8")), steps };
 }
 
 const read = (dir, file) => fs.readFileSync(path.join(dir, file), "utf8");
@@ -625,6 +626,15 @@ describe.skipIf(!bin)("react-to-solid workflow on an app with React libraries an
   it("flags a class component, which the React Compiler pass leaves alone", () => {
     expect(run.output.flags).toContainEqual(expect.objectContaining({ file: "src/components/Boundary.tsx", kind: "class component", detail: expect.stringContaining("<Errored") }));
     expect(run.output.failures).toEqual([]);
+  });
+});
+
+// dependencyGraph fails its step on a yarn 1 lockfile, which records no peers anyway.
+describe.skipIf(!bin)("react-to-solid workflow on a yarn 1 app", { tags: ["slow"] }, () => {
+  it("runs, going by the names of React libraries", () => {
+    const run = migrate(givenApp((dir) => fs.writeFileSync(path.join(dir, "yarn.lock"), "# yarn lockfile v1\n\nreact@^19.0.0:\n  version \"19.0.0\"\n")), []);
+    expect(run.steps.filter((s) => s.status !== "succeeded")).toEqual([]);
+    expect(run.output.plan.manager).toBe("yarn");
   });
 });
 

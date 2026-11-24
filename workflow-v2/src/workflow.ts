@@ -72,21 +72,17 @@ export default async function main({ params }: { params: { include?: string; app
     };
   }));
   // The lockfile names the package manager, and which packages peer on React. A yarn 1 lockfile
-  // records no peers, and dependencyGraph doesn't read bun's.
+  // records no peers, and dependencyGraph reads neither it nor bun's.
   const lockfiles = await step("Read the lockfile", forEachFile(["pnpm-lock.yaml", "yarn.lock", "bun.lock", "package-lock.json"], (file) => ({ path: file.path, peers: file.path === "pnpm-lock.yaml" || file.path === "package-lock.json" || (file.path === "yarn.lock" && /^__metadata:/m.test(file.text)) })));
   // The packages the lockfile installs that peer on React, directly or through a peer that does;
-  // null, as without such a lockfile, when dependencyGraph couldn't read it.
+  // null, as without such a lockfile, when dependencyGraph can't read it (it fails the step then).
   const peers = !lockfiles.outputs.some((l) => l.peers) ? null : await step("Find the packages that peer on React", dependencyGraph((g) => {
-    if (g.lockfiles.length === 0) return null;
     const peersOf = new Map<string, Set<string>>();
     for (const node of g.nodes()) {
-      if (node.local) continue;
-      const names = peersOf.get(node.name) ?? new Set<string>();
-      for (const edge of node.dependencies({ kinds: "peer" })) names.add(edge.name);
-      peersOf.set(node.name, names);
+      for (const edge of node.local ? [] : node.dependencies({ kinds: "peer" })) peersOf.set(node.name, (peersOf.get(node.name) ?? new Set<string>()).add(edge.name));
     }
     return reactPeerClosure(peersOf) as string[];
-  }));
+  })).catch(() => null);
   // pnpm's workspace packages; npm and yarn list theirs in the root package.json's `workspaces`.
   const pnpmWorkspace = await step("Read the workspace definition", forEachFile(["pnpm-workspace.yaml"], (file) => pnpmWorkspaces(file.text)));
   const plan = await step("Check React libraries for Solid ports", () => {

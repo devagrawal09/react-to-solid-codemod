@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import { parse, Lang } from "@ast-grep/napi";
-import { migratePackageJson, migrateTsconfig, migrateViteConfig, reactPeers } from "../src/manifests.mjs";
+import { migratePackageJson, migrateTsconfig, migrateViteConfig } from "../src/manifests.mjs";
+import { reactPeers } from "./corpus/react-peers.mjs";
 
 const viteConfig = (code) => migrateViteConfig(code, { parse, Lang });
 
