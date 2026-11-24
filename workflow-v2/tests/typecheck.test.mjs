@@ -148,7 +148,8 @@ describe("the install before the type-check (install=true)", () => {
     }
     return { PATH: `${bin}:${process.env.PATH}` };
   }
-  const calls = (dir) => (fs.existsSync(path.join(dir, "calls.log")) ? fs.readFileSync(path.join(dir, "calls.log"), "utf8").replaceAll(`${dir}`, "<target>").trim().split("\n") : []);
+  // $(pwd) prints the real path: on macOS the temp directory is under /private.
+  const calls = (dir) => (fs.existsSync(path.join(dir, "calls.log")) ? fs.readFileSync(path.join(dir, "calls.log"), "utf8").replaceAll(fs.realpathSync(dir), "<target>").replaceAll(dir, "<target>").trim().split("\n") : []);
 
   it("runs the printed install where the lockfile is, then checks what it installed", () => {
     const dir = given({ ...app, "package-lock.json": "{}" });
