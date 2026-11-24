@@ -46,7 +46,7 @@ A file that's already Solid is skipped. That's a file that imports `solid-js`, `
 
 ### Troubleshooting
 
-If the run fails with `YAML error: invalid type: string "import { agent, approval, ... } from \"codemod/workflow\"; ...", expected struct Workflow`, the CLI that ran is older than codemod 2.0.0-alpha.2 (the 1.x `codemod`, or 2.0.0-alpha.1): it reads the TypeScript workflow as YAML. npx re-resolves `@alpha` by itself, so a stale one usually comes from a registry mirror or proxy, or an npm `prefer-offline`/`offline` setting. Pin the CLI (`codemod --version` prints `1.18.7` on the 2.0 alpha too, so it can't tell them apart):
+If the run fails with `YAML error: invalid type: string "import { agent, approval, ... } from \"codemod/workflow\"; ...", expected struct Workflow`, the CLI that ran is older than codemod 2.0.0-alpha.2 (the 1.x `codemod`, or 2.0.0-alpha.1): it reads the TypeScript workflow as YAML. npx re-resolves `@alpha` by itself, so a stale one usually comes from a registry mirror or proxy, or an npm `prefer-offline`/`offline` setting. From 0.2.0 it also needs 2.0.0-alpha.6 or newer: it imports `codemod/git`, which earlier alphas don't have. Pin the CLI (`codemod --version` prints `1.18.7` on the 2.0 alphas before 2.0.0-alpha.6, so it can't tell those apart):
 
 ```sh
 npx codemod@2.0.0-alpha.6 run react-to-solid   # or: pnpm dlx codemod@alpha run react-to-solid
@@ -305,7 +305,7 @@ pnpm install && pnpm build   # rebuild src/lib/reactivity.mjs after changing src
 
 ```sh
 pnpm test                                       # reactivity (59), rule (214), project file (34), workspace (8), Next.js route (15), Solid behavior (17), work list (8), type-check (9) and corpus lock (6) specs
-CODEMOD_BIN=<path to codemod@alpha> pnpm test   # plus the workflow specs (56, tagged slow), which run the CLI on copies of tests/fixtures/todo-app, tests/fixtures/pnpm-monorepo and tests/fixtures/worklist-app, and on Next.js apps the specs write
+CODEMOD_BIN=node_modules/.bin/codemod pnpm test # plus the workflow specs (57, tagged slow), on the pinned codemod 2.0.0-alpha.6 devDependency, which run the CLI on copies of tests/fixtures/todo-app, tests/fixtures/pnpm-monorepo and tests/fixtures/worklist-app, and on Next.js apps the specs write
 ```
 
 ### Release corpus
